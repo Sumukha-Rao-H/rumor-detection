@@ -22,3 +22,9 @@ venv/
 
 #env
 .env
+
+#changelog
+CHANGELOG.md
+
+#git
+git
