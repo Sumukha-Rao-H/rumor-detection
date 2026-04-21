@@ -1,2 +1,3 @@
-def get_reward():
-    return 6.0
+# reward.py
+
+DEFAULT_REWARD = 0.3
