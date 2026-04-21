@@ -1,0 +1,3 @@
+# Project dependencies (none required for the simulated version)
+numpy
+pandas
