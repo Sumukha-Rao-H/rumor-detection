@@ -117,7 +117,71 @@ def init_db():
 
 
 # ─────────────────────────────────────────────
-# REDDIT FETCHER
+# REDDIT DATA FETCHER CLASS
+# ─────────────────────────────────────────────
+
+class RedditDataFetcher:
+    """Fetches Reddit posts and stock prices for analysis."""
+    
+    def __init__(self):
+        pass
+    
+    def fetch_recent_posts(self, query: str, limit: int = 10):
+        """Fetch recent posts from financial subreddits matching the query."""
+        all_posts = []
+        for subreddit in SUBREDDITS:
+            raw_posts = fetch_subreddit(subreddit, sort="new", limit=limit)
+            for raw in raw_posts:
+                parsed = parse_post(raw, subreddit)
+                all_posts.append({
+                    "id": parsed["id"],
+                    "title": parsed["title"],
+                    "content": parsed["body"],
+                    "ticker": parsed["tickers"][0] if parsed["tickers"] else "UNKNOWN",
+                    "timestamp": parsed["created_utc"].isoformat(),
+                })
+        return all_posts
+    
+    def fetch_stock_prices(self, ticker: str, start_date: str, end_date: str):
+        """Fetch stock price data for a given ticker."""
+        try:
+            data = yf.download(ticker, period="1d", interval="1d", progress=False, auto_adjust=True)
+            if data.empty:
+                return {
+                    "current_price": 0.0,
+                    "current_volume": 0.0,
+                    "price_change_24h": 0.0,
+                    "volume_change_24h": 0.0
+                }
+            
+            # Get the most recent row
+            latest = data.iloc[-1]
+            if len(data) > 1:
+                prev = data.iloc[-2]
+                price_change = (latest["Close"] - prev["Close"]) / prev["Close"]
+                volume_change = (latest["Volume"] - prev["Volume"]) / prev["Volume"] if prev["Volume"] > 0 else 0.0
+            else:
+                price_change = 0.0
+                volume_change = 0.0
+            
+            return {
+                "current_price": float(latest["Close"]),
+                "current_volume": int(latest["Volume"]),
+                "price_change_24h": price_change,
+                "volume_change_24h": volume_change
+            }
+        except Exception as e:
+            log.error(f"Error fetching stock prices for {ticker}: {e}")
+            return {
+                "current_price": 0.0,
+                "current_volume": 0.0,
+                "price_change_24h": 0.0,
+                "volume_change_24h": 0.0
+            }
+
+
+# ─────────────────────────────────────────────
+# REDDIT FETCHER (Legacy Functions)
 # ─────────────────────────────────────────────
 
 def fetch_subreddit(subreddit: str, sort: str = "hot", limit: int = POST_LIMIT) -> list[dict]:

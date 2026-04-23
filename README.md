@@ -10,9 +10,11 @@ An RL-based system that scrapes financial subreddits, correlates posts with real
 ├── models.py                # SQLAlchemy ORM models for all 4 tables
 ├── database.py              # SQLAlchemy engine + session setup
 ├── features.py              # Sample feature engineering query for RL training
+├── db_fetcher.py            # Extracts offline database records for the RL Model
 ├── rl_model.py              # Reinforcement Learning model architecture
 ├── reward.py                # Reward function(s) for the RL agent
-├── train.py                 # Training loop
+├── train_rl.py              # Offline historical RL training algorithm (Database-backed)
+├── train.py                 # (Legacy) Agent mock training script
 ├── Schema.sql               # Raw SQL schema (used by Docker for auto-init)
 ├── alembic.ini              # Alembic config
 ├── alembic/
@@ -123,10 +125,12 @@ Join posts with stock prices and labels to generate training-ready rows for the 
 python features.py
 ```
 
-### Train the RL model
+### Train the RL model (Offline DB Mode)
+
+Train the model on your robust offline PostgreSQL dataset. The model automatically synthesizes an objective proxy reward based on actual 3-day subsequent stock performance. It executes the RL Q-learning update step and records its predictive confidences in the `post_labels` table:
 
 ```bash
-python train.py
+python train_rl.py
 ```
 
 ## Working with Migrations
