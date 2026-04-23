@@ -5,7 +5,6 @@ from typing import Dict, Any, List, Optional
 from reddit_data_fetcher import RedditDataFetcher
 from reward import RewardCalculator
 
-
 class RedditPostState:
     """Represents the state derived from a Reddit post and associated stock data."""
     def __init__(self_obj, post_id: str, text: str, sentiment_score: float, 
@@ -95,7 +94,8 @@ class RuleBasedRLModel:
                             stock_data: Dict[str, Any]) -> RedditPostState:
         """Creates a RedditPostState object from raw post and stock data."""
         # Basic keyword extraction (can be improved with NLP)
-        text_lower = post_data.get('content', '').lower()
+        full_text = f"{post_data.get('title', '')} {post_data.get('content', '')}"
+        text_lower = full_text.lower()
         post_keywords = [kw for kw in self_obj.leak_keywords + self_obj.rumour_keywords if kw in text_lower]
 
         # Placeholder for sentiment analysis (can be integrated with NLTK, spaCy, etc.)
@@ -109,7 +109,7 @@ class RuleBasedRLModel:
 
         return RedditPostState(
             post_id=post_data.get('id', 'unknown'),
-            text=post_data.get('content', ''),
+            text=full_text,
             sentiment_score=sentiment_score,
             keywords=post_keywords,
             stock_price=stock_data.get('current_price', 0.0),
