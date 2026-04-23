@@ -75,7 +75,20 @@ pip install -r requirements.txt
 docker compose up -d
 ```
 
-pgAdmin will be available at [http://localhost:5050](http://localhost:5050).
+**pgAdmin Setup:**
+1. Open [http://localhost:5050](http://localhost:5050) in your browser.
+2. Log in using the credentials from your `.env`:
+   - Email: `admin@admin.com`
+   - Password: `admin` (or whatever you set in `PGADMIN_PASSWORD`)
+3. Right-click on **Servers** -> **Register** -> **Server...**
+4. Under the **General** tab, name it "Stock Rumors Local".
+5. Under the **Connection** tab, use these exact settings (the host name is the Docker container name, not localhost!):
+   - **Host name/address**: `postgres`
+   - **Port**: `5432`
+   - **Maintenance database**: `postgres`
+   - **Username**: `postgres`
+   - **Password**: `<your DB_PASSWORD from .env>`
+6. Click **Save**. You can now browse your tables under `Databases > stock_rumors > Schemas > public > Tables`.
 
 **Option B -- Single container** (Postgres only):
 
