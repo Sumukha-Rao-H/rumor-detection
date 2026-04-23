@@ -1,3 +1,13 @@
-# Project dependencies (none required for the simulated version)
+# Project dependencies
 numpy
 pandas
+
+requests>=2.31.0
+yfinance>=0.2.37
+psycopg2-binary>=2.9.9
+python-dotenv>=1.0.0
+schedule>=1.2.1
+
+# ORM + migrations
+sqlalchemy>=2.0
+alembic>=1.13
