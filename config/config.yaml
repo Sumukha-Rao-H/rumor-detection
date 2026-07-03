@@ -20,6 +20,8 @@ backtest_window:
 
 reddit:
   user_agent: "nmamit-major-project-31:v1.0 (academic research)"
+  # rotated automatically when one host keeps returning 403 (plan §5.2 fallback a)
+  base_urls: ["https://www.reddit.com", "https://old.reddit.com"]
   live_poll_seconds: 300          # poll cycle for reddit_live.py
   live_min_interval_s: 8          # >= 7s between unauthenticated requests
   refetch_hours: [6, 24]          # re-fetch posts at t0+6h / t0+24h for score growth

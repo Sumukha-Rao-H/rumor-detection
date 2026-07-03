@@ -50,7 +50,7 @@ The authoritative design document is [`implementation_plan.md`](implementation_p
 | Phase | Status |
 |---|---|
 | 0 — Environment setup | ✅ repo layout, config, requirements |
-| 1 — Data acquisition (§5) | ✅ collectors implemented: arctic_shift, reddit_live, market, news — **data collection runs pending** |
+| 1 — Data acquisition (§5) | ✅ collectors implemented: arctic_shift, reddit_live, market, news — **data collection runs pending**. Known issue (2026-07-03): unauthenticated reddit.com `.json` returns 403 from the dev network (www + old, any UA) — the plan's anticipated risk. Poller auto-rotates hosts; if it persists, use the Arctic Shift API with recent dates as the near-live fallback (§5.2 fallback c). |
 | 2 — Event construction & labeling (§6) | ⏳ not started (minimal `pipeline/tickers.py` pulled forward — collectors need it to filter posts) |
 | 3 — Features & state (§7) | ⏳ not started |
 | 4 — RL environment (§8) | ⏳ not started |
