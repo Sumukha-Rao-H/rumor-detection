@@ -1,162 +1,77 @@
-# Stock Market Rumor Detection System
+# Cross-Domain Rumor Verification — Detecting Informed Trading Footprints via Sequential Decision-Making
 
-An RL-based system that scrapes financial subreddits, correlates posts with real stock price movements, and classifies them as rumors, leaks, or confirmed news.
+**Project Code 31 · NMAM Institute of Technology · Dept. of ISE**
 
-## Project Structure
+The system ingests rumors about publicly traded companies from Reddit (r/wallstreetbets, r/stocks, …), fuses each rumor with the stock's recent price/volume behavior, and trains an RL agent that at each hourly step decides to **WAIT** (gather more market evidence) or **COMMIT** (declare the rumor TRUE or FALSE). Ground truth comes from timestamps of official news (GDELT/Finnhub). The headline metric is **Time Delta Advantage (Δ)** — how many hours before official news the agent correctly resolved the rumor.
+
+Full design: [`implementation_plan.md`](implementation_plan.md). Agent/contributor rules: [`AGENTS.md`](AGENTS.md).
+
+## Repository layout
 
 ```
-.
-├── reddit_data_fetcher.py   # Reddit + yfinance scraper (psycopg2 bulk inserts)
-├── models.py                # SQLAlchemy ORM models for all 4 tables
-├── database.py              # SQLAlchemy engine + session setup
-├── features.py              # Sample feature engineering query for RL training
-├── db_fetcher.py            # Extracts offline database records for the RL Model
-├── rl_model.py              # Reinforcement Learning model architecture
-├── reward.py                # Reward function(s) for the RL agent
-├── train_rl.py              # Offline historical RL training algorithm (Database-backed)
-├── train.py                 # (Legacy) Agent mock training script
-├── Schema.sql               # Raw SQL schema (used by Docker for auto-init)
-├── alembic.ini              # Alembic config
-├── alembic/
-│   ├── env.py               # Reads DB URL from .env
-│   ├── script.py.mako       # Migration template
-│   └── versions/            # Migration files
-├── docker-compose.yml       # Postgres 16 + pgAdmin 4
-├── start-db.sh              # Single-container startup script
-├── .env.example             # Template for environment variables
-└── requirements.txt         # Python dependencies
+├── config/config.yaml            # all knobs — no hardcoded tickers/dates/paths in code
+├── data/
+│   ├── raw/arctic_dumps/         # Arctic Shift .zst dumps (gitignored)
+│   ├── raw/live_json/            # raw live-poller JSON snapshots (gitignored)
+│   ├── db/rumor.db               # SQLite (posts, bars, news, events)
+│   └── processed/                # events.parquet + per-event state tensors
+├── src/
+│   ├── collectors/               # arctic_shift, reddit_live, market, news
+│   ├── pipeline/                 # tickers, events, labeling, features
+│   ├── rl/                       # Gymnasium env + SB3 training
+│   ├── baselines/                # static classifiers + LLM zero-shot policy
+│   ├── eval/                     # Brier, ECE, Time Delta Advantage
+│   └── utils/                    # rate limiting, UTC time helpers
+├── app/dashboard.py              # Streamlit demo
+├── tests/                        # pytest (leakage tests are mandatory)
+└── implementation_plan.md        # the authoritative plan — read first
 ```
-
-## Prerequisites
-
-- Python 3.10+
-- Docker (and Docker Compose)
 
 ## Setup
 
-### 1. Clone and configure environment
-
 ```bash
-git clone <repo-url> && cd <repo-dir>
-
-# Copy the example env and fill in your values
-cp .env.example .env
-```
-
-Edit `.env` with your preferred credentials:
-
-```
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=stock_rumors
-DB_USER=postgres
-DB_PASSWORD=<your-secure-password>
-PGADMIN_EMAIL=admin@admin.com
-PGADMIN_PASSWORD=admin
-```
-
-### 2. Create a Python virtual environment
-
-```bash
-python -m venv venv
-source venv/bin/activate    # Linux / macOS
-# venv\Scripts\activate     # Windows
-```
-
-### 3. Install dependencies
-
-```bash
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env   # add your free-tier API keys (Finnhub, Gemini, Groq)
 ```
 
-### 4. Start the database
+## Phase 1 — Data collection
 
-**Option A -- Docker Compose** (Postgres + pgAdmin):
+All collectors are config-driven (`config/config.yaml`), write to SQLite at `data/db/rumor.db`, and store all timestamps in UTC.
+
+**Historical Reddit (Arctic Shift):**
 
 ```bash
-docker compose up -d
+# Option A: parse downloaded .zst dumps from data/raw/arctic_dumps/
+python -m src.collectors.arctic_shift --mode dumps
+
+# Option B: pull from the Arctic Shift REST API (throttled ≤1 req/s)
+python -m src.collectors.arctic_shift --mode api --start 2025-01-01 --end 2025-02-01
 ```
 
-**pgAdmin Setup:**
-1. Open [http://localhost:5050](http://localhost:5050) in your browser.
-2. Log in using the credentials from your `.env`:
-   - Email: `admin@admin.com`
-   - Password: `admin` (or whatever you set in `PGADMIN_PASSWORD`)
-3. Right-click on **Servers** -> **Register** -> **Server...**
-4. Under the **General** tab, name it "Stock Rumors Local".
-5. Under the **Connection** tab, use these exact settings (the host name is the Docker container name, not localhost!):
-   - **Host name/address**: `postgres`
-   - **Port**: `5432`
-   - **Maintenance database**: `postgres`
-   - **Username**: `postgres`
-   - **Password**: `<your DB_PASSWORD from .env>`
-6. Click **Save**. You can now browse your tables under `Databases > stock_rumors > Schemas > public > Tables`.
-
-**Option B -- Single container** (Postgres only):
+**Live Reddit poller** (public `.json` endpoints, no auth — run long-lived from Week 2):
 
 ```bash
-chmod +x start-db.sh
-./start-db.sh
+python -m src.collectors.reddit_live           # loops forever, polls every 5 min
+python -m src.collectors.reddit_live --once    # single cycle (testing)
 ```
 
-### 5. Run database migrations
+**Market data** (yfinance hourly bars, cached incrementally):
 
 ```bash
-alembic upgrade head
+python -m src.collectors.market --tickers TSLA,AAPL --start 2025-01-01 --end 2025-06-01
+python -m src.collectors.market --from-db      # all tickers seen in collected posts
 ```
 
-This creates all four tables (`reddit_posts`, `stock_prices`, `post_ticker_links`, `post_labels`) along with indexes and constraints.
-
-## Usage
-
-### Collect data
-
-Scrape posts from r/wallstreetbets, r/stocks, r/investing, and r/StockMarket, then fetch 7 days of OHLCV price data for every ticker found:
+**Ground-truth news** (GDELT + Finnhub):
 
 ```bash
-python reddit_data_fetcher.py
+python -m src.collectors.news --ticker TSLA --query "merger OR acquisition" \
+    --start 2025-01-01 --end 2025-01-08
 ```
 
-### Preview training features
-
-Join posts with stock prices and labels to generate training-ready rows for the RL model:
+## Tests
 
 ```bash
-python features.py
+pytest tests/
 ```
-
-### Train the RL model (Offline DB Mode)
-
-Train the model on your robust offline PostgreSQL dataset. The model automatically synthesizes an objective proxy reward based on actual 3-day subsequent stock performance. It executes the RL Q-learning update step and records its predictive confidences in the `post_labels` table:
-
-```bash
-python train_rl.py
-```
-
-## Working with Migrations
-
-After changing models in `models.py`, generate a new migration:
-
-```bash
-# Requires a running database
-alembic revision --autogenerate -m "describe your change"
-
-# Apply it
-alembic upgrade head
-
-# Roll back one step
-alembic downgrade -1
-```
-
-## Tech Stack
-
-| Component | Technology |
-|-----------|------------|
-| Language | Python |
-| Subreddits | r/wallstreetbets, r/stocks, r/investing, r/StockMarket |
-| Stock data | yfinance |
-| Database | PostgreSQL 16 (Docker) |
-| ORM | SQLAlchemy 2.0 |
-| Migrations | Alembic |
-| Bulk inserts | psycopg2 + execute_values |
-| Admin UI | pgAdmin 4 |

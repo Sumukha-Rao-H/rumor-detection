@@ -1,0 +1,89 @@
+# ============================================================
+# Central configuration — ALL knobs live here (plan Appendix B).
+# No hardcoded tickers, dates, or paths anywhere in src/.
+# All timestamps are UTC everywhere; convert at display time only.
+# ============================================================
+
+paths:
+  db: "data/db/rumor.db"
+  arctic_dumps: "data/raw/arctic_dumps"
+  live_json: "data/raw/live_json"
+  events: "data/processed/events.parquet"
+  states: "data/processed/states"
+  llm_cache: "data/llm_cache"
+
+subreddits: [wallstreetbets, stocks, StockMarket, investing, pennystocks]
+
+backtest_window:
+  start: "2025-01-01"
+  end: "2026-05-31"
+
+reddit:
+  user_agent: "nmamit-major-project-31:v1.0 (academic research)"
+  live_poll_seconds: 300          # poll cycle for reddit_live.py
+  live_min_interval_s: 8          # >= 7s between unauthenticated requests
+  refetch_hours: [6, 24]          # re-fetch posts at t0+6h / t0+24h for score growth
+  listing_limit: 100
+
+arctic_shift:
+  api_base: "https://arctic-shift.photon-reddit.com/api"
+  min_interval_s: 1.0             # free community service — throttle to <=1 req/sec
+  page_limit: 100
+
+market:
+  interval: "60m"                 # hourly bars = backtest granularity (~730d of history)
+  daily_interval: "1d"
+  pad_days_before: 7              # bars must cover [t0 - 7d, t0 + 5d] per event
+  pad_days_after: 5
+  benchmark: "SPY"
+  min_interval_s: 1.0
+
+news:
+  gdelt_base: "https://api.gdeltproject.org/api/v2/doc/doc"
+  gdelt_min_interval_s: 5.0
+  finnhub_min_interval_s: 1.1     # free tier ~60 calls/min
+  max_records: 75
+  whitelist: [reuters.com, bloomberg.com, apnews.com, cnbc.com, wsj.com, ft.com,
+              prnewswire.com, businesswire.com, sec.gov]
+
+tickers:
+  universe_csv: "config/tickers.csv"
+  blacklist: [A, ALL, AI, ARE, BE, BIG, BUY, CAN, CEO, DD, EDIT, EV, FOR, GO, IPO,
+              IT, LOL, LOVE, NOW, ON, ONE, OR, OUT, PUMP, RH, SO, TV, U, UK, USA,
+              WSB, YOLO, IMO, ATH, FOMO, FD, PT, EPS, ER]
+  max_tickers_per_post: 3         # posts with more distinct tickers are portfolio-spam
+
+rumor_keywords: [merger, acquisition, acquire, buyout, takeover, bankrupt, "chapter 11",
+                 delist, halt, FDA, approval, recall, partnership, contract,
+                 "earnings leak", insider, SEC, investigation, lawsuit, guidance,
+                 "short squeeze", offering, dilution, split]
+
+event:
+  gap_hours: 12
+  min_posts: 2
+  min_solo_score: 50
+  label_horizon_hours: 72
+
+state:
+  embed_model: "sentence-transformers/all-MiniLM-L6-v2"
+  sent_model: "ProsusAI/finbert"
+  dim: 418
+
+reward:
+  r_correct: 1.0
+  r_early_bonus: 0.5
+  r_wrong: -2.0
+  r_wait: -0.02
+  r_timeout: -0.5
+  T_max: 48
+
+split:
+  train: 0.70
+  val: 0.15
+  test: 0.15
+  method: temporal
+
+llm:
+  provider: gemini
+  fallback: groq
+  min_interval_s: 6
