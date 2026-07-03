@@ -48,9 +48,11 @@ news:
 
 tickers:
   universe_csv: "config/tickers.csv"
-  blacklist: [A, ALL, AI, ARE, BE, BIG, BUY, CAN, CEO, DD, EDIT, EV, FOR, GO, IPO,
-              IT, LOL, LOVE, NOW, ON, ONE, OR, OUT, PUMP, RH, SO, TV, U, UK, USA,
-              WSB, YOLO, IMO, ATH, FOMO, FD, PT, EPS, ER]
+  # quoted: bare ON/OFF/NO/YES are YAML 1.1 booleans
+  blacklist: ["A", "ALL", "AI", "ARE", "BE", "BIG", "BUY", "CAN", "CEO", "DD",
+              "EDIT", "EV", "FOR", "GO", "IPO", "IT", "LOL", "LOVE", "NOW", "ON",
+              "ONE", "OR", "OUT", "PUMP", "RH", "SO", "TV", "U", "UK", "USA",
+              "WSB", "YOLO", "IMO", "ATH", "FOMO", "FD", "PT", "EPS", "ER"]
   max_tickers_per_post: 3         # posts with more distinct tickers are portfolio-spam
 
 rumor_keywords: [merger, acquisition, acquire, buyout, takeover, bankrupt, "chapter 11",
