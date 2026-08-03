@@ -52,6 +52,18 @@ def stream_zst(path: str | Path):
             except json.JSONDecodeError:
                 continue
 
+def stream_jsonl(path: str | Path):
+    """Yield JSON records from an uncompressed .jsonl file."""
+    with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
 
 def record_to_post(rec: dict) -> dict | None:
     """Normalize a raw Reddit submission record to a `posts` row."""
