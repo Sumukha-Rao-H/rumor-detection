@@ -34,6 +34,7 @@ from collections import Counter
 from dataclasses import dataclass
 
 from src import db
+from src.pipeline.events import keyword_regex
 from src.utils.config import load_config
 from src.utils.llm import LLMClient, LLMError
 from src.utils.timeutils import utc_now_ts
@@ -83,15 +84,22 @@ def content_key(prompt: str) -> str:
     return hashlib.sha1(prompt.encode()).hexdigest()
 
 
-def pending_pairs(conn, cfg: dict, prompt_version: str) -> list[Pair]:
+def pending_pairs(conn, cfg: dict, prompt_version: str,
+                  seeds_only: bool = False) -> list[Pair]:
     """Untriaged (post, ticker) pairs inside kept events, most promising first.
 
     Ordered *seed-first*: every event's highest-scoring post comes before any
     event's second post. An event only needs one rumor post to become usable,
     so this maximises the number of distinct events covered by any prefix of
     the run — which matters because free-tier quota decides where the run stops.
+
+    Within a rank, events whose seed title names a discrete corporate claim
+    (`triage.priority_keywords`) come first: at ~500 calls a day, spending them
+    on "merger"/"FDA"/"takeover" titles rather than ambient market chatter is
+    what gets the dataset to its target event count in days instead of weeks.
     """
     done = db.triaged_pairs(conn, prompt_version)
+    priority = keyword_regex(cfg["triage"]["priority_keywords"])
     rows = conn.execute(
         "SELECT event_id, ticker, n_posts, post_ids FROM events "
         "ORDER BY n_posts DESC, t0_utc"
@@ -107,10 +115,17 @@ def pending_pairs(conn, cfg: dict, prompt_version: str) -> list[Pair]:
             ids,
         ).fetchall()
         for rank, (post_id, title, selftext, score) in enumerate(posts):
+            if seeds_only and rank > 0:
+                break
             if (post_id, ticker) not in done:
                 by_rank.setdefault(rank, []).append(
                     Pair(post_id, ticker, title, selftext, score or 0,
                          event_id, n_posts))
+
+    for pairs_at_rank in by_rank.values():
+        pairs_at_rank.sort(
+            key=lambda p: (0 if priority.search(p.title or "") else 1,
+                           -p.n_posts, -p.score))
     return [pair for rank in sorted(by_rank) for pair in by_rank[rank]]
 
 
@@ -131,10 +146,11 @@ def normalize(data: dict) -> dict:
     }
 
 
-def triage(conn, cfg: dict, client: LLMClient, limit: int | None = None) -> dict:
+def triage(conn, cfg: dict, client: LLMClient, limit: int | None = None,
+           seeds_only: bool = False) -> dict:
     """Judge outstanding pairs, writing each verdict as it arrives."""
     prompt_version = cfg["llm"]["prompt_version"]
-    pairs = pending_pairs(conn, cfg, prompt_version)
+    pairs = pending_pairs(conn, cfg, prompt_version, seeds_only=seeds_only)
     if limit is not None:
         pairs = pairs[:limit]
     log.info("%d pairs to triage under prompt %s", len(pairs), prompt_version)
@@ -203,6 +219,9 @@ def refresh_events(conn) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, help="judge at most N pairs")
+    parser.add_argument("--seeds-only", action="store_true",
+                        help="judge only each event's top-scoring post — the "
+                             "cheapest way to decide whether an event is a rumor")
     parser.add_argument("--events-only", action="store_true",
                         help="skip the API entirely, just refresh event rollups")
     args = parser.parse_args()
@@ -214,7 +233,8 @@ def main() -> None:
 
     if not args.events_only:
         client = LLMClient(cfg)
-        stats = triage(conn, cfg, client, limit=args.limit)
+        stats = triage(conn, cfg, client, limit=args.limit,
+                       seeds_only=args.seeds_only)
         log.info("triaged %d pairs: %d rumors (%.0f%%), %d api calls, %d cached",
                  stats.get("done", 0), stats.get("rumor", 0),
                  100 * stats.get("rumor", 0) / max(stats.get("done", 0), 1),

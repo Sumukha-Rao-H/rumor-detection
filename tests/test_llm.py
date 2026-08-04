@@ -116,6 +116,31 @@ def test_cached_reply_survives_a_new_client(tmp_path, monkeypatch):
     assert second.complete_json("prompt", cache_key="k").data == {"n": 7}
 
 
+def test_no_fallback_configured_means_one_provider(tmp_path, monkeypatch):
+    """Triage runs single-model on purpose: no silent second opinion."""
+    cfg = _cfg(tmp_path)
+    cfg["llm"]["fallback"] = None
+    client = LLMClient(cfg)
+    assert client.providers == ["gemini"]
+    monkeypatch.setattr(client, "_request", lambda p, prompt: (_ for _ in ()).throw(
+        llm_mod._Retryable("HTTP 429")))
+    with pytest.raises(LLMError):
+        client.complete_json("prompt", cache_key="k")
+
+
+def test_cache_is_scoped_by_model(tmp_path, monkeypatch):
+    """A different model must re-ask, not inherit another model's answer."""
+    cfg = _cfg(tmp_path)
+    client = LLMClient(cfg)
+    monkeypatch.setattr(client, "_request", lambda p, prompt: '{"n": 1}')
+    client.complete_json("prompt", cache_key="k")
+
+    cfg["llm"]["gemini"]["model"] = "gem-2"
+    other = LLMClient(cfg)
+    monkeypatch.setattr(other, "_request", lambda p, prompt: '{"n": 2}')
+    assert other.complete_json("prompt", cache_key="k").data == {"n": 2}
+
+
 def test_cache_file_records_provenance(tmp_path, monkeypatch):
     client = LLMClient(_cfg(tmp_path))
     monkeypatch.setattr(client, "_request", lambda p, prompt: '{"n": 1}')

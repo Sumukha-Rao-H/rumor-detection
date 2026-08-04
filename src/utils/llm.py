@@ -72,14 +72,16 @@ class LLMClient:
 
     # ---------------------------------------------------------------- caching
 
-    def _cache_path(self, cache_key: str) -> Path:
+    def _cache_path(self, cache_key: str, model: str) -> Path:
+        # The model is part of the key: two models answer the same question
+        # differently, and a dataset must not silently mix them.
         digest = hashlib.sha1(
-            f"{self.prompt_version}|{cache_key}".encode()
+            f"{self.prompt_version}|{model}|{cache_key}".encode()
         ).hexdigest()
         return self.cache_dir / f"{digest}.json"
 
-    def _read_cache(self, cache_key: str) -> LLMReply | None:
-        path = self._cache_path(cache_key)
+    def _read_cache(self, cache_key: str, model: str) -> LLMReply | None:
+        path = self._cache_path(cache_key, model)
         if not path.exists():
             return None
         try:
@@ -90,7 +92,7 @@ class LLMClient:
                         blob.get("model", "?"), cached=True)
 
     def _write_cache(self, cache_key: str, reply: LLMReply) -> None:
-        self._cache_path(cache_key).write_text(
+        self._cache_path(cache_key, reply.model).write_text(
             json.dumps({"cache_key": cache_key,
                         "prompt_version": self.prompt_version,
                         "provider": reply.provider, "model": reply.model,
@@ -102,14 +104,14 @@ class LLMClient:
 
     def complete_json(self, prompt: str, cache_key: str) -> LLMReply:
         """Ask the active provider for JSON. Cached by (prompt_version, key)."""
-        cached = self._read_cache(cache_key)
-        if cached is not None:
-            self.cache_hits += 1
-            return cached
-
         last_error = "no provider attempted"
         while self._active < len(self.providers):
             name = self.providers[self._active]
+            model = self.cfg[name]["model"]
+            cached = self._read_cache(cache_key, model)
+            if cached is not None:
+                self.cache_hits += 1
+                return cached
             backoff = Backoff(base_s=20)
             for _ in range(self.cfg["quota_failures_before_fallback"]):
                 self._limiters[name].wait()
@@ -124,8 +126,7 @@ class LLMClient:
                     backoff.sleep(f"{name}: {exc}")
                     continue
                 self.calls += 1
-                reply = LLMReply(parse_json(text), name,
-                                 self.cfg[name]["model"], cached=False)
+                reply = LLMReply(parse_json(text), name, model, cached=False)
                 self._write_cache(cache_key, reply)
                 return reply
             log.warning("%s exhausted (%s) — switching provider", name, last_error)

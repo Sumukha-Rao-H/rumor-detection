@@ -91,6 +91,31 @@ title when there are any (a $BBAI post that name-drops PLTR was creating a PLTR
 event: −19% events, all noise), and `event.exclude_etfs` drops index funds,
 which have no company claim to confirm. Both are config-switchable.
 
+### LLM triage (§6.2 stage 2) — 2026-08-04
+
+```
+python -m src.pipeline.triage --seeds-only    # judge each event's top post
+python -m src.pipeline.triage --events-only   # rollup only, no API calls
+```
+
+Resumable and cached (`data/llm_cache/`, keyed by prompt version + model +
+prompt content), so an interrupted run continues rather than restarts. Free
+tier measured 2026-08-04: **gemini ~500 calls/day**, groq 70b 1,000/day,
+groq 8b 14,400/day. A background loop re-runs the command every 30 min so it
+picks up automatically when the daily quota resets:
+
+```
+setsid nohup bash -c 'while true; do python -m src.pipeline.triage --seeds-only \
+  >> triage.log 2>&1; sleep 1800; done' &
+```
+
+**Triage is single-model on purpose** (`llm.fallback: null`). On identical
+posts gemini-3.5-flash-lite called 36% of seeds rumors vs 10% for
+llama-3.3-70b-versatile, which rejects real checkable claims; llama-3.1-8b's
+disagreements were all false positives (68% agreement). Mixing providers would
+make dataset *selection* depend on which model answered. Change the fallback
+only for work where cross-event consistency does not matter (§10 baseline).
+
 ### Phase 1 notes (2026-08-04)
 
 - **106.9k posts vs the §5.1 target of ≥200k.** The gap is not a collection

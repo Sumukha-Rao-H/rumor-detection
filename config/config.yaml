@@ -88,6 +88,16 @@ rumor_keywords: [merger, acquisition, acquire, buyout, takeover, bankrupt, "chap
                  "earnings leak", insider, SEC, investigation, lawsuit, guidance,
                  "short squeeze", offering, dilution, split]
 
+triage:
+  # Free-tier quota decides where a run stops, so seeds are judged in priority
+  # order: posts whose *title* carries one of these claim words first. They are
+  # the subset of rumor_keywords that name a discrete, checkable corporate
+  # event, as opposed to ambient ones ("guidance", "split", "short squeeze")
+  # that show up in ordinary market chatter.
+  priority_keywords: [merger, acquisition, acquire, buyout, takeover, bankrupt,
+                      "chapter 11", delist, halt, FDA, approval, recall,
+                      investigation, lawsuit, insider, SEC, "earnings leak"]
+
 event:
   gap_hours: 12
   min_posts: 2
@@ -121,7 +131,15 @@ split:
 
 llm:
   provider: gemini
-  fallback: groq                  # used when the primary's daily quota runs out
+  # Deliberately null for triage (2026-08-04). Measured on the same posts,
+  # gemini-3.5-flash-lite calls 36% of seed posts rumors and
+  # llama-3.3-70b-versatile only 10% — it rejects real checkable claims
+  # (an OKLO/NVIDIA collaboration, a $32.2M lease signing, an FDA clearance).
+  # Mixing them would make dataset *selection* depend on which model happened
+  # to answer. With no fallback the run simply stops when the daily quota is
+  # gone and resumes tomorrow. Set to "groq" for non-dataset work (§10 policy
+  # baseline), where consistency across events does not matter.
+  fallback: null
   min_interval_s: 6               # per-provider default
   temperature: 0                  # plan Appendix D: deterministic labeling
   max_output_tokens: 400

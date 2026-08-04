@@ -14,7 +14,8 @@ from src.pipeline.triage import (
 
 
 def _cfg():
-    return {"llm": {"prompt_version": "v1"}}
+    return {"llm": {"prompt_version": "v1"},
+            "triage": {"priority_keywords": ["merger", "FDA"]}}
 
 
 class FakeClient:
@@ -93,6 +94,23 @@ def test_pending_pairs_is_seed_first(tmp_path):
     order = [(p.post_id, p.ticker) for p in pending_pairs(conn, _cfg(), "v1")]
     assert order[:2] == [("a2", "AAA"), ("b1", "BBB")]     # seeds
     assert sorted(order[2:]) == [("a1", "AAA"), ("b2", "BBB")]
+
+
+def test_priority_keywords_come_first_within_a_rank(tmp_path):
+    """Quota-bound runs must spend calls on discrete claims, not chatter."""
+    conn = db.get_conn(tmp_path / "t.db")
+    _seed_event(conn, "A-1", "AAA", [("a1", "just vibes here", 900)])
+    _seed_event(conn, "B-1", "BBB", [("b1", "rumored merger with X", 5)])
+    order = [p.post_id for p in pending_pairs(conn, _cfg(), "v1")]
+    assert order == ["b1", "a1"]   # despite a1 scoring far higher
+
+
+def test_seeds_only_takes_one_post_per_event(tmp_path):
+    conn = db.get_conn(tmp_path / "t.db")
+    _seed_event(conn, "A-1", "AAA", [("a1", "low", 1), ("a2", "high", 90)])
+    _seed_event(conn, "B-1", "BBB", [("b1", "mid", 50)])
+    pairs = pending_pairs(conn, _cfg(), "v1", seeds_only=True)
+    assert [p.post_id for p in pairs] == ["a2", "b1"]
 
 
 def test_pending_pairs_skips_already_triaged(tmp_path):
