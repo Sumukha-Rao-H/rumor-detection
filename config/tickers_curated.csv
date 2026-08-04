@@ -1,0 +1,242 @@
+ticker,name
+AAPL,Apple
+MSFT,Microsoft
+GOOGL,Alphabet
+GOOG,Google
+AMZN,Amazon
+TSLA,Tesla
+META,Meta Platforms
+NVDA,Nvidia
+AMD,Advanced Micro Devices
+INTC,Intel
+NFLX,Netflix
+BABA,Alibaba
+GME,GameStop
+AMC,AMC Entertainment
+PLTR,Palantir
+RIVN,Rivian
+LCID,Lucid Motors
+NIO,NIO
+COIN,Coinbase
+JPM,JPMorgan
+BAC,Bank of America
+GS,Goldman Sachs
+WFC,Wells Fargo
+BRK.B,Berkshire Hathaway
+V,Visa
+MA,Mastercard
+PYPL,PayPal
+SQ,Block
+HOOD,Robinhood
+SOFI,SoFi
+UPST,Upstart
+AFRM,Affirm
+CRM,Salesforce
+ORCL,Oracle
+ADBE,Adobe
+CSCO,Cisco
+IBM,IBM
+QCOM,Qualcomm
+TXN,Texas Instruments
+AVGO,Broadcom
+MU,Micron
+TSM,Taiwan Semiconductor
+ASML,ASML
+ARM,Arm Holdings
+SMCI,Super Micro Computer
+DELL,Dell
+HPQ,HP Inc
+SNOW,Snowflake
+MDB,MongoDB
+DDOG,Datadog
+NET,Cloudflare
+CRWD,CrowdStrike
+PANW,Palo Alto Networks
+ZS,Zscaler
+OKTA,Okta
+SHOP,Shopify
+UBER,Uber
+LYFT,Lyft
+ABNB,Airbnb
+DASH,DoorDash
+SNAP,Snap
+PINS,Pinterest
+RDDT,Reddit
+SPOT,Spotify
+RBLX,Roblox
+U,Unity Software
+EA,Electronic Arts
+TTWO,Take-Two
+DIS,Disney
+WBD,Warner Bros Discovery
+PARA,Paramount
+CMCSA,Comcast
+T,AT&T
+VZ,Verizon
+TMUS,T-Mobile
+F,Ford
+GM,General Motors
+STLA,Stellantis
+TM,Toyota
+XPEV,XPeng
+LI,Li Auto
+BYDDY,BYD
+BA,Boeing
+LMT,Lockheed Martin
+RTX,RTX Corporation
+NOC,Northrop Grumman
+GE,General Electric
+CAT,Caterpillar
+DE,Deere
+MMM,3M
+HON,Honeywell
+UPS,UPS
+FDX,FedEx
+DAL,Delta Air Lines
+UAL,United Airlines
+AAL,American Airlines
+LUV,Southwest Airlines
+CCL,Carnival
+RCL,Royal Caribbean
+NCLH,Norwegian Cruise Line
+MAR,Marriott
+HLT,Hilton
+MCD,McDonald's
+SBUX,Starbucks
+CMG,Chipotle
+YUM,Yum Brands
+KO,Coca-Cola
+PEP,PepsiCo
+MNST,Monster Beverage
+KHC,Kraft Heinz
+GIS,General Mills
+PG,Procter & Gamble
+CL,Colgate
+UL,Unilever
+COST,Costco
+WMT,Walmart
+TGT,Target
+HD,Home Depot
+LOW,Lowe's
+NKE,Nike
+LULU,Lululemon
+CROX,Crocs
+ETSY,Etsy
+EBAY,eBay
+CHWY,Chewy
+CVNA,Carvana
+W,Wayfair
+BBY,Best Buy
+XOM,Exxon Mobil
+CVX,Chevron
+COP,ConocoPhillips
+OXY,Occidental Petroleum
+SLB,Schlumberger
+HAL,Halliburton
+BP,BP
+SHEL,Shell
+FSLR,First Solar
+ENPH,Enphase
+RUN,Sunrun
+PLUG,Plug Power
+NEE,NextEra Energy
+DUK,Duke Energy
+JNJ,Johnson & Johnson
+PFE,Pfizer
+MRNA,Moderna
+BNTX,BioNTech
+NVAX,Novavax
+LLY,Eli Lilly
+MRK,Merck
+ABBV,AbbVie
+BMY,Bristol Myers Squibb
+AMGN,Amgen
+GILD,Gilead
+BIIB,Biogen
+REGN,Regeneron
+VRTX,Vertex Pharmaceuticals
+UNH,UnitedHealth
+CVS,CVS Health
+CI,Cigna
+HUM,Humana
+HIMS,Hims & Hers
+TDOC,Teladoc
+ISRG,Intuitive Surgical
+MDT,Medtronic
+ABT,Abbott
+TMO,Thermo Fisher
+DHR,Danaher
+MS,Morgan Stanley
+C,Citigroup
+SCHW,Charles Schwab
+BLK,BlackRock
+BX,Blackstone
+KKR,KKR
+APO,Apollo Global
+AXP,American Express
+DFS,Discover Financial
+SYF,Synchrony
+MSTR,MicroStrategy
+MARA,Marathon Digital
+RIOT,Riot Platforms
+CLSK,CleanSpark
+HUT,Hut 8
+BB,BlackBerry
+NOK,Nokia
+BBAI,BigBear.ai
+IONQ,IonQ
+RGTI,Rigetti Computing
+QUBT,Quantum Computing Inc
+ACHR,Archer Aviation
+JOBY,Joby Aviation
+LUNR,Intuitive Machines
+RKLB,Rocket Lab
+ASTS,AST SpaceMobile
+SPCE,Virgin Galactic
+DJT,Trump Media
+DWAC,Digital World Acquisition
+VFS,VinFast
+CHPT,ChargePoint
+QS,QuantumScape
+MULN,Mullen Automotive
+FFIE,Faraday Future
+NKLA,Nikola
+WKHS,Workhorse
+GOEV,Canoo
+CLOV,Clover Health
+WISH,ContextLogic
+BBBY,Bed Bath & Beyond
+TLRY,Tilray
+CGC,Canopy Growth
+ACB,Aurora Cannabis
+SNDL,SNDL Inc
+DKNG,DraftKings
+PENN,Penn Entertainment
+MGM,MGM Resorts
+WYNN,Wynn Resorts
+LVS,Las Vegas Sands
+Z,Zillow
+OPEN,Opendoor
+RDFN,Redfin
+ZG,Zillow Group
+TWLO,Twilio
+DOCU,DocuSign
+ZM,Zoom
+ROKU,Roku
+FUBO,fuboTV
+PTON,Peloton
+BYND,Beyond Meat
+OTLY,Oatly
+CELH,Celsius Holdings
+ELF,e.l.f. Beauty
+ULTA,Ulta Beauty
+SPY,SPDR S&P 500 ETF
+QQQ,Invesco QQQ
+IWM,iShares Russell 2000
+VTI,Vanguard Total Stock Market
+TQQQ,ProShares UltraPro QQQ
+SQQQ,ProShares UltraPro Short QQQ
+VIX,CBOE Volatility Index
+GLD,SPDR Gold Shares
+SLV,iShares Silver Trust
+USO,United States Oil Fund

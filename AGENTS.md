@@ -50,23 +50,38 @@ The authoritative design document is [`implementation_plan.md`](implementation_p
 | Phase | Status |
 |---|---|
 | 0 — Environment setup | ✅ repo layout, config, requirements |
-| 1 — Data acquisition (§5) | 🟡 collectors implemented; historical dumps ingested (2026-08-04): 66.8k posts / 86.2k ticker links / 3.7M bars / 320 news rows. Open gaps below. |
-| 2 — Event construction & labeling (§6) | ⏳ not started (minimal `pipeline/tickers.py` pulled forward — collectors need it to filter posts) |
+| 1 — Data acquisition (§5) | 🟡 collectors implemented; dumps ingested and universe rebuilt (2026-08-04): 68.2k posts / 87.0k ticker links / 3.7M bars / 320 news rows. Open gaps below. |
+| 2 — Event construction & labeling (§6) | 🟡 §6.1 ticker extraction done (`pipeline/tickers.py`, `pipeline/build_universe.py`); §6.2 rumor filtering onward not started |
+| 3 — Features & state (§7) | ⏳ not started |
+| 4 — RL environment (§8) | ⏳ not started |
+| 5 — Training (§9) | ⏳ not started |
+| 6 — LLM policy baseline (§10) | ⏳ not started |
+| 7 — Baselines & evaluation (§11) | ⏳ not started |
+| 8 — Streamlit demo (§12) | ⏳ not started |
+
+### Ticker universe (regenerate, don't hand-edit) — 2026-08-04
+
+`config/tickers.csv` (1,235 core symbols) and `config/listed_symbols.csv`
+(12,497 US-listed symbols) are **generated**:
+
+```
+python -m src.pipeline.build_universe     # rebuild both CSVs from the corpus
+python -m src.pipeline.relink             # re-apply them to posts already in SQLite
+```
+
+Hand-written names live in `config/tickers_curated.csv` (an input, never
+rewritten). After any rebuild, run `relink` or the DB keeps stale links.
+Matching is tiered — cashtags need a listed symbol, bare tokens need the core
+universe, company names need `name_match=1` (see `pipeline/tickers.py`).
 
 ### Phase 1 open gaps (2026-08-04)
 
-- **Post count is 66.8k, below the §5.1 target of ≥200k.** Three causes, in impact
-  order: (a) `config/tickers.csv` holds only 241 tickers, so the universe filter
-  drops most posts; (b) `r_wallstreetbets_posts.jsonl` is a truncated download —
-  it ends 2021-01-29, so no WSB post in the backtest window comes from a dump
-  (the 18.2k WSB rows are all from the API run, covering only 182 days);
-  (c) ingestion honours `backtest_window.end: 2026-05-31`, while the dumps run
-  through 2026-07-28.
-- **Ticker precision needs the §6.1 empirical prune.** Company-name matching fires
-  on ordinary words: `target` → TGT (3.9k links), `reddit` → RDDT (5.6k), `block`
-  → SQ, `shell` → SHEL. Those nine names alone are 12% of all links. A further
-  18.8% of links are cashtags for symbols outside the universe (mix of real
-  small caps and pump spam) — no bars can be fetched for them as-is.
+- **Post count is 68.2k, below the §5.1 target of ≥200k.** Two remaining causes:
+  (a) `r_wallstreetbets_posts.jsonl` is a truncated download — it ends
+  2021-01-29, so no WSB post in the backtest window comes from a dump (the
+  15.7k WSB rows are all from the API run, covering only 182 days);
+  (b) ingestion honours `backtest_window.end: 2026-05-31`, while the dumps run
+  through 2026-07-28 (2026-06 is empty). Re-ingesting is a ~70s job.
 - **Live poller still blocked** (2026-07-03): unauthenticated reddit.com `.json`
   returns 403 from the dev network (www + old, any UA) — the plan's anticipated
   risk. Poller auto-rotates hosts; if it persists, use the Arctic Shift API with
@@ -74,12 +89,6 @@ The authoritative design document is [`implementation_plan.md`](implementation_p
 - `data/raw/arctic_dumps/*.crswap` (2.9 GB) are partial browser-download temp
   files, safe to delete. Comment dumps are scanned but never stored — the schema
   has no comments table.
-| 3 — Features & state (§7) | ⏳ not started |
-| 4 — RL environment (§8) | ⏳ not started |
-| 5 — Training (§9) | ⏳ not started |
-| 6 — LLM policy baseline (§10) | ⏳ not started |
-| 7 — Baselines & evaluation (§11) | ⏳ not started |
-| 8 — Streamlit demo (§12) | ⏳ not started |
 
 ## Handoff checklist for a new agent session
 

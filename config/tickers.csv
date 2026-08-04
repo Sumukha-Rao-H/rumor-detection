@@ -1,242 +1,1236 @@
-ticker,name
-AAPL,Apple
-MSFT,Microsoft
-GOOGL,Alphabet
-GOOG,Google
-AMZN,Amazon
-TSLA,Tesla
-META,Meta Platforms
-NVDA,Nvidia
-AMD,Advanced Micro Devices
-INTC,Intel
-NFLX,Netflix
-BABA,Alibaba
-GME,GameStop
-AMC,AMC Entertainment
-PLTR,Palantir
-RIVN,Rivian
-LCID,Lucid Motors
-NIO,NIO
-COIN,Coinbase
-JPM,JPMorgan
-BAC,Bank of America
-GS,Goldman Sachs
-WFC,Wells Fargo
-BRK.B,Berkshire Hathaway
-V,Visa
-MA,Mastercard
-PYPL,PayPal
-SQ,Block
-HOOD,Robinhood
-SOFI,SoFi
-UPST,Upstart
-AFRM,Affirm
-CRM,Salesforce
-ORCL,Oracle
-ADBE,Adobe
-CSCO,Cisco
-IBM,IBM
-QCOM,Qualcomm
-TXN,Texas Instruments
-AVGO,Broadcom
-MU,Micron
-TSM,Taiwan Semiconductor
-ASML,ASML
-ARM,Arm Holdings
-SMCI,Super Micro Computer
-DELL,Dell
-HPQ,HP Inc
-SNOW,Snowflake
-MDB,MongoDB
-DDOG,Datadog
-NET,Cloudflare
-CRWD,CrowdStrike
-PANW,Palo Alto Networks
-ZS,Zscaler
-OKTA,Okta
-SHOP,Shopify
-UBER,Uber
-LYFT,Lyft
-ABNB,Airbnb
-DASH,DoorDash
-SNAP,Snap
-PINS,Pinterest
-RDDT,Reddit
-SPOT,Spotify
-RBLX,Roblox
-U,Unity Software
-EA,Electronic Arts
-TTWO,Take-Two
-DIS,Disney
-WBD,Warner Bros Discovery
-PARA,Paramount
-CMCSA,Comcast
-T,AT&T
-VZ,Verizon
-TMUS,T-Mobile
-F,Ford
-GM,General Motors
-STLA,Stellantis
-TM,Toyota
-XPEV,XPeng
-LI,Li Auto
-BYDDY,BYD
-BA,Boeing
-LMT,Lockheed Martin
-RTX,RTX Corporation
-NOC,Northrop Grumman
-GE,General Electric
-CAT,Caterpillar
-DE,Deere
-MMM,3M
-HON,Honeywell
-UPS,UPS
-FDX,FedEx
-DAL,Delta Air Lines
-UAL,United Airlines
-AAL,American Airlines
-LUV,Southwest Airlines
-CCL,Carnival
-RCL,Royal Caribbean
-NCLH,Norwegian Cruise Line
-MAR,Marriott
-HLT,Hilton
-MCD,McDonald's
-SBUX,Starbucks
-CMG,Chipotle
-YUM,Yum Brands
-KO,Coca-Cola
-PEP,PepsiCo
-MNST,Monster Beverage
-KHC,Kraft Heinz
-GIS,General Mills
-PG,Procter & Gamble
-CL,Colgate
-UL,Unilever
-COST,Costco
-WMT,Walmart
-TGT,Target
-HD,Home Depot
-LOW,Lowe's
-NKE,Nike
-LULU,Lululemon
-CROX,Crocs
-ETSY,Etsy
-EBAY,eBay
-CHWY,Chewy
-CVNA,Carvana
-W,Wayfair
-BBY,Best Buy
-XOM,Exxon Mobil
-CVX,Chevron
-COP,ConocoPhillips
-OXY,Occidental Petroleum
-SLB,Schlumberger
-HAL,Halliburton
-BP,BP
-SHEL,Shell
-FSLR,First Solar
-ENPH,Enphase
-RUN,Sunrun
-PLUG,Plug Power
-NEE,NextEra Energy
-DUK,Duke Energy
-JNJ,Johnson & Johnson
-PFE,Pfizer
-MRNA,Moderna
-BNTX,BioNTech
-NVAX,Novavax
-LLY,Eli Lilly
-MRK,Merck
-ABBV,AbbVie
-BMY,Bristol Myers Squibb
-AMGN,Amgen
-GILD,Gilead
-BIIB,Biogen
-REGN,Regeneron
-VRTX,Vertex Pharmaceuticals
-UNH,UnitedHealth
-CVS,CVS Health
-CI,Cigna
-HUM,Humana
-HIMS,Hims & Hers
-TDOC,Teladoc
-ISRG,Intuitive Surgical
-MDT,Medtronic
-ABT,Abbott
-TMO,Thermo Fisher
-DHR,Danaher
-MS,Morgan Stanley
-C,Citigroup
-SCHW,Charles Schwab
-BLK,BlackRock
-BX,Blackstone
-KKR,KKR
-APO,Apollo Global
-AXP,American Express
-DFS,Discover Financial
-SYF,Synchrony
-MSTR,MicroStrategy
-MARA,Marathon Digital
-RIOT,Riot Platforms
-CLSK,CleanSpark
-HUT,Hut 8
-BB,BlackBerry
-NOK,Nokia
-BBAI,BigBear.ai
-IONQ,IonQ
-RGTI,Rigetti Computing
-QUBT,Quantum Computing Inc
-ACHR,Archer Aviation
-JOBY,Joby Aviation
-LUNR,Intuitive Machines
-RKLB,Rocket Lab
-ASTS,AST SpaceMobile
-SPCE,Virgin Galactic
-DJT,Trump Media
-DWAC,Digital World Acquisition
-VFS,VinFast
-CHPT,ChargePoint
-QS,QuantumScape
-MULN,Mullen Automotive
-FFIE,Faraday Future
-NKLA,Nikola
-WKHS,Workhorse
-GOEV,Canoo
-CLOV,Clover Health
-WISH,ContextLogic
-BBBY,Bed Bath & Beyond
-TLRY,Tilray
-CGC,Canopy Growth
-ACB,Aurora Cannabis
-SNDL,SNDL Inc
-DKNG,DraftKings
-PENN,Penn Entertainment
-MGM,MGM Resorts
-WYNN,Wynn Resorts
-LVS,Las Vegas Sands
-Z,Zillow
-OPEN,Opendoor
-RDFN,Redfin
-ZG,Zillow Group
-TWLO,Twilio
-DOCU,DocuSign
-ZM,Zoom
-ROKU,Roku
-FUBO,fuboTV
-PTON,Peloton
-BYND,Beyond Meat
-OTLY,Oatly
-CELH,Celsius Holdings
-ELF,e.l.f. Beauty
-ULTA,Ulta Beauty
-SPY,SPDR S&P 500 ETF
-QQQ,Invesco QQQ
-IWM,iShares Russell 2000
-VTI,Vanguard Total Stock Market
-TQQQ,ProShares UltraPro QQQ
-SQQQ,ProShares UltraPro Short QQQ
-VIX,CBOE Volatility Index
-GLD,SPDR Gold Shares
-SLV,iShares Silver Trust
-USO,United States Oil Fund
+ticker,name,name_match,etf,cashtags,mentions,name_posts,name_precision
+RAYA,Erayak Power Solution,1,0,556,609,5,1.0
+NVDA,Nvidia,1,0,224,2250,3864,0.1553
+BYND,Beyond Meat,1,0,204,922,171,0.6725
+BMNR,BitMine Immersion Technologies,1,0,194,297,8,0.375
+ILLR,Triller,1,0,148,163,119,0.9916
+OPEN,Opendoor,1,0,135,341,134,0.5
+TSLA,Tesla,1,0,118,1177,2756,0.1665
+PLTR,Palantir,1,0,106,737,963,0.2087
+ASST,Strive,1,0,104,232,68,0.5588
+TLIH,Ten-League International,1,0,98,99,0,
+NVO,Novo Nordisk A/S,1,0,91,253,0,
+NVNI,Nvni,1,0,81,174,191,0.911
+MSFT,Microsoft,1,0,78,893,1565,0.147
+IXHL,Incannex Healthcare,1,0,76,729,33,0.9394
+SPY,SPDR S&P 500 ETF,1,1,75,1085,0,
+OPTT,Ocean Power Technologies,1,0,70,271,69,0.8696
+AMD,Advanced Micro Devices,1,0,66,1213,80,0.7625
+META,Meta Platforms,1,0,66,728,107,0.5607
+AMZN,Amazon,1,0,61,687,1939,0.098
+INTC,Intel,1,0,61,296,749,0.1709
+ATCH,AtlasClear,1,0,61,242,49,0.7959
+PROP,Prairie Operating,1,0,61,88,50,0.94
+GOOGL,Alphabet,1,0,60,564,562,0.2135
+DVLT,Datavault AI,1,0,60,352,106,0.8868
+AAPL,Apple,1,0,58,586,1736,0.1181
+OTLK,Outlook Therapeutics,1,0,58,70,6,0.8333
+KULR,KULR Technology,1,0,57,284,48,0.9792
+MBOT,Microbot Medical,1,0,56,153,69,0.8986
+NBIS,Nebius Group N.V,1,0,55,317,0,
+GOOG,Google,0,0,53,497,3069,0.0384
+GME,GameStop,1,0,53,445,301,0.2193
+MU,Micron,1,0,52,425,400,0.3375
+SLS,SELLAS Life Sciences,1,0,51,149,45,0.8444
+RCAT,Red Cat,1,0,51,122,55,0.7091
+UNH,UnitedHealth,1,0,50,447,160,0.5437
+RDDT,Reddit,0,0,49,431,4444,0.0452
+LODE,Comstock,1,0,49,144,56,0.5714
+QSI,Quantum-Si,1,0,49,79,0,
+GPUS,Hyperscale Data,1,0,48,248,124,0.6532
+RIME,Algorhythm,1,0,47,233,43,0.9302
+WOLF,Wolfspeed,1,0,47,107,86,0.6163
+DFLI,Dragonfly Energy,1,0,45,211,65,0.8154
+RR,Richtech Robotics,1,0,45,184,79,0.6962
+ONDS,Ondas,1,0,45,179,93,0.6452
+MVST,Microvast,1,0,45,167,68,0.7941
+YYAI,AiRWA,1,0,45,138,28,0.8214
+HOOD,Robinhood,0,0,42,260,1457,0.0563
+CTM,Castellum,1,0,41,200,81,0.8519
+NFE,New Fortress Energy,1,0,41,158,43,0.9302
+AIRE,reAlpha Tech,1,0,41,93,24,0.8333
+OSTX,OS Therapies,1,0,41,51,39,0.9487
+HCTI,Healthcare Triangle,1,0,40,138,27,0.8519
+NUAI,New Era Energy & Digital,1,0,40,108,0,
+RGC,Regencell Bioscience,1,0,40,63,8,0.75
+SURG,SurgePays,1,0,40,41,39,0.9487
+QQQ,Invesco QQQ,1,1,38,785,26,0.8846
+IREN,IREN,1,0,38,164,178,0.9213
+CYCU,Cycurion,1,0,38,89,42,0.8333
+GANX,Gain Therapeutics,1,0,38,64,40,0.95
+AIMD,Ainos,1,0,38,50,40,1.0
+SMX,SMX (Security Matters) Public,1,0,37,130,0,
+EONR,EON Resources,1,0,37,90,24,0.7917
+ZENA,ZenaTech,1,0,37,61,46,0.913
+NXXT,NextNRG,1,0,36,514,131,0.7405
+BBAI,BigBear.ai,1,0,35,210,0,
+FEMY,Femasys,1,0,35,120,54,0.9259
+OTLY,Oatly,1,0,35,55,45,0.7111
+RVSN,Rail Vision,1,0,34,209,46,0.9348
+LEXX,Lexaria Bioscience,1,0,34,44,25,0.8
+OKLO,Oklo,1,0,33,191,271,0.7011
+HIMS,Hims & Hers,1,0,33,172,0,
+WKSP,Worksport,1,0,33,123,91,0.5824
+CYN,Cyngn,1,0,33,88,30,0.7
+OLB,The OLB,1,0,33,45,3,1.0
+AUUD,Auddia,1,0,33,43,14,1.0
+VOO,Vanguard S&P 500 ETF,1,1,32,2054,0,
+RKLB,Rocket Lab,1,0,32,440,131,0.5573
+LULU,Lululemon,1,0,32,98,88,0.4659
+SOUN,SoundHound AI,1,0,32,96,30,0.2333
+TLRY,Tilray,1,0,32,93,62,0.5323
+CRWV,CoreWeave,1,0,31,154,242,0.2521
+NCNA,NuCana,1,0,31,77,38,0.8158
+MP,MP Materials,1,0,30,179,104,0.9712
+APP,Applovin,1,0,30,112,79,0.481
+UBER,Uber,1,0,29,129,464,0.278
+XTIA,XTI Aerospace,1,0,29,117,23,0.5652
+PCSA,Processa Pharmaceuticals,1,0,29,79,22,0.9545
+INTS,Intensity Therapeutics,1,0,29,62,15,0.9333
+MYSE,Myseum.AI,1,0,29,35,0,
+RGTI,Rigetti Computing,1,0,28,168,38,0.3421
+CGTX,Cognition Therapeutics,1,0,28,81,25,1.0
+SPCE,Virgin Galactic,1,0,28,67,42,0.6667
+NINE,Nine Energy Service,1,0,28,62,7,1.0
+MBAI,Check-Cap,1,0,28,49,0,
+BTBD,BT Brands,1,0,28,45,8,0.875
+SMCI,Super Micro Computer,1,0,27,242,54,0.537
+PLUG,Plug Power,1,0,27,84,51,0.6078
+ACHR,Archer Aviation,1,0,26,177,96,0.625
+APLD,Applied Digital,1,0,26,152,63,0.5873
+BABA,Alibaba,1,0,26,141,185,0.2919
+ARBE,Arbe Robotics,1,0,26,56,30,0.7667
+GNPX,Genprex,1,0,26,38,11,0.8182
+LLY,Eli Lilly,1,0,25,166,173,0.3121
+DNUT,Krispy Kreme,1,0,25,58,40,0.85
+UMAC,Unusual Machines,1,0,25,56,30,0.7
+KSS,Kohl's,1,0,25,53,13,0.6923
+SHOT,RMG ML Sports,1,0,25,53,0,
+SOAR,Volato,1,0,25,43,21,0.8571
+SVRE,SaverOne 2014,1,0,25,30,0,
+ASTS,AST SpaceMobile,1,0,24,401,55,0.6364
+RZLV,Rezolve AI,1,0,24,150,82,0.8415
+ATER,Aterian,1,0,24,40,5,0.8
+MSTR,MicroStrategy,1,0,23,240,124,0.2823
+MSAI,MultiSensor AI,1,0,23,91,33,1.0
+BULL,Webull,1,0,23,81,283,0.0989
+WWR,Westwater Resources,1,0,23,63,14,1.0
+IQST,iQSTEL,1,0,23,46,38,0.7632
+OLOX,Olenox Industries,1,0,23,26,17,1.0
+AVGO,Broadcom,1,0,22,292,325,0.28
+NFLX,Netflix,1,0,22,197,478,0.1339
+IONQ,IonQ,1,0,22,160,216,0.7407
+WMT,Walmart,1,0,22,136,438,0.1187
+NKE,Nike,1,0,22,117,210,0.2524
+POET,POET Technologies,1,0,22,88,29,1.0
+UAMY,,0,0,22,78,0,
+MOBX,Mobix Labs,1,0,22,71,45,0.8444
+HOLO,MicroCloud Hologram,1,0,22,66,18,0.8333
+POLA,Polar Power,1,0,22,36,7,1.0
+LRHC,La Rosa,1,0,22,31,17,1.0
+HITI,High Tide,1,0,22,29,26,0.7692
+IVDA,Iveda Solutions,1,0,22,27,4,0.75
+ORCL,Oracle,1,0,21,172,575,0.1409
+TMC,TMC the metals,1,0,21,82,15,1.0
+FIG,Figma,1,0,21,75,177,0.1864
+CRDL,Cardiol Therapeutics,1,0,21,42,26,0.9231
+RNXT,RenovoRx,1,0,21,36,29,0.931
+SOFI,SoFi,1,0,20,197,428,0.4603
+DJT,Trump Media,1,0,20,176,55,0.5455
+COIN,Coinbase,1,0,20,128,231,0.2078
+LPSN,LivePerson,1,0,20,82,44,0.7727
+SIDU,Sidus Space,1,0,20,78,34,0.9412
+GORO,Goldgroup Mining,1,0,20,70,3,0.0
+BNAI,Brand Engagement Network,1,0,20,64,9,1.0
+NXE,Nexgen Energy,1,0,20,64,65,0.6923
+SOBR,SOBR Safe,1,0,20,57,11,1.0
+NVA,Nova Minerals,1,0,20,53,41,0.878
+IOVA,Iovance Biotherapeutics,1,0,20,50,10,0.8
+KITT,Nauticus Robotics,1,0,20,45,24,0.875
+PAVS,Paranovus Entertainment Technology,1,0,20,42,3,1.0
+ATAI,AtaiBeckley,1,0,20,39,10,0.8
+VMAR,Vision Marine Technologies,1,0,20,32,13,1.0
+PRSO,Peraso,1,0,20,31,40,0.525
+LDI,loanDepot,1,0,20,27,7,0.7143
+PALI,Palisade Bio,1,0,20,24,15,0.9333
+SNAP,Snap,1,0,19,124,273,0.4542
+CVNA,Carvana,1,0,19,105,152,0.3684
+MDAI,Spectral AI,1,0,19,61,31,0.8387
+SRXH,SRX Global,1,0,19,50,0,
+VRME,VerifyMe,1,0,19,33,14,0.9286
+GLMD,Galmed Pharmaceuticals,1,0,19,24,8,1.0
+GLD,SPDR Gold Shares,1,1,18,189,7,0.8571
+AMPX,Amprius Technologies,1,0,18,110,23,0.7391
+IWM,iShares Russell 2000,1,1,18,70,0,
+GAME,GameSquare,1,0,18,64,19,0.7895
+HIT,Health In Tech,1,0,18,47,19,0.7895
+TNMG,TNL Mediagene,1,0,18,46,27,0.963
+CJMB,Callan JMB,1,0,18,23,13,1.0
+CRM,Salesforce,1,0,17,172,187,0.3636
+SCWO,374Water,1,0,17,124,0,
+SES,SES AI,1,0,17,79,49,0.9184
+IBRX,Imm,0,0,17,72,21,0.0
+LCID,Lucid Motors,1,0,17,71,15,0.3333
+USAR,USA Rare Earth,1,0,17,63,30,0.6667
+HIVE,HIVE Digital Technologies,1,0,17,60,26,0.6923
+SENS,Senseonics,1,0,17,56,29,0.7241
+NEGG,Newegg Commerce,1,0,17,35,2,1.0
+AMZE,Amaze,1,0,17,24,16,0.5
+GIPR,Generation Income Properties,1,0,17,22,0,
+AIFU,AIFU,1,0,17,19,19,1.0
+LMT,Lockheed Martin,1,0,16,132,123,0.3333
+QBTS,D-Wave Quantum,1,0,16,122,0,
+XOM,Exxon Mobil,1,0,16,106,37,0.3243
+REKR,Rekor Systems,1,0,16,69,25,0.92
+TNXP,Tonix Pharmaceuticals,1,0,16,59,11,0.7273
+PPTA,Perpetua Resources,1,0,16,56,37,0.6757
+ROOT,Root,1,0,16,53,134,0.3955
+SKYX,SKYX Platforms,1,0,16,44,20,1.0
+TEM,Tempus AI,1,0,16,39,37,0.4054
+BGM,BGM,1,0,16,36,36,1.0
+GNS,Genius,0,0,16,36,306,0.0621
+DGXX,Digi Power X Inc. - Common Subordinate Voting Shares,1,0,16,33,0,
+RUBI,Rubico,1,0,16,33,12,0.75
+WNW,Meiwu Technology,1,0,16,31,11,1.0
+SAFX,XCF Global,1,0,16,29,13,0.6923
+ABCL,AbCellera Biologics,1,0,16,27,4,1.0
+HYPD,Hyperion DeFi,1,0,16,26,3,0.6667
+BUFF,Innovator Laddered Allocation Power Buffer ETF,1,1,16,24,0,
+BLIN,Bridgeline Digital,1,0,16,21,3,1.0
+ARAI,Arrive AI,1,0,16,20,14,0.7143
+LSH,Lakeside,1,0,16,18,1,1.0
+S,SentinelOne,1,0,16,16,18,0.0
+TSM,Taiwan Semiconductor,1,0,15,240,81,0.2593
+LUNR,Intuitive Machines,1,0,15,120,30,0.7
+SMR,NuScale Power,1,0,15,112,21,0.619
+KO,Coca-Cola,1,0,15,100,0,
+GRRR,Gorilla Technology,1,0,15,60,21,0.5714
+ACON,Aclarion,1,0,15,51,27,0.8148
+GRAB,Grab,1,0,15,50,324,0.1543
+VIVK,Vivakor,1,0,15,50,22,0.9091
+CPSH,CPS Technologies,1,0,15,38,19,1.0
+UAVS,AgEagle Aerial Systems,1,0,15,38,12,0.9167
+KOPN,Kopin,1,0,15,37,32,0.8125
+SEGG,Sports Entertainment Gaming Global,1,0,15,36,0,
+ASBP,Aspire Biopharma,1,0,15,33,15,0.9333
+MIST,Milestone Pharmaceuticals,1,0,15,28,12,1.0
+PHIO,Phio Pharmaceuticals,1,0,15,28,15,0.9333
+FGL,Founder,0,0,15,26,678,0.0133
+OSRH,OSR Health,1,0,15,26,0,
+IPM,Intelligent Protection Management,1,0,15,24,4,1.0
+APRE,Aprea Therapeutics,1,0,15,20,19,0.9474
+AUAU,Global X Gold Miners ETF,1,1,15,17,0,
+ACTU,Actuate Therapeutics,1,0,15,15,10,1.0
+VTI,Vanguard Total Stock Market,1,1,14,963,0,
+TTWO,Take-Two,1,0,14,94,0,
+VRT,Vertiv,1,0,14,90,82,0.3537
+SLV,iShares Silver Trust,1,1,14,84,9,0.8889
+GCTK,GlucoTrack,1,0,14,77,14,0.7143
+SNOW,Snowflake,1,0,14,62,73,0.3836
+ATYR,aTyr Pharma,1,0,14,59,23,0.7391
+EUV,Corgi Lithography & Semiconductor Photonics ETF,1,1,14,50,0,
+CRML,Critical Metals,1,0,14,47,63,0.2222
+HMR,Heidmar Maritime,1,0,14,44,11,1.0
+CETX,Cemtrex,1,0,14,42,9,0.8889
+LAES,SEALSQ,1,0,14,41,23,0.6522
+NB,NioCorp Developments,1,0,14,40,11,0.8182
+OSCR,Oscar Health,1,0,14,39,13,0.6154
+JTAI,Jet.AI,1,0,14,38,0,
+DNN,Denison Mines,1,0,14,37,24,0.5833
+PRZO,ParaZero Technologies,1,0,14,34,12,1.0
+BTOG,Bit Origin,1,0,14,28,5,1.0
+NEON,Neonode,1,0,14,27,3,0.3333
+ASML,ASML,1,0,13,307,318,0.9623
+COST,Costco,1,0,13,123,240,0.1583
+ADBE,Adobe,1,0,13,106,193,0.2073
+PL,Planet Labs PBC,1,0,13,85,3,0.6667
+TTD,The Trade Desk,1,0,13,83,47,0.6383
+MRVL,Marvell Technology,1,0,13,68,32,0.5938
+LAC,Lithium Americas,1,0,13,66,32,0.4062
+XAIR,Beyond Air,1,0,13,54,24,0.8333
+RIOT,Riot Platforms,1,0,13,50,15,0.7333
+WRD,WeRide,1,0,13,50,91,0.3626
+GCTS,GCT Semiconductor,1,0,13,39,16,0.9375
+HUBC,Hub Cyber Security,1,0,13,38,23,0.913
+HUMA,Humacyte,1,0,13,36,24,0.8333
+TRNR,Interactive Strength,1,0,13,36,11,0.9091
+CHGG,Chegg,1,0,13,35,41,0.4634
+GPRO,GoPro,1,0,13,35,56,0.375
+ONCO,Onconetix,1,0,13,35,11,0.9091
+PN,PN Smart Energy,1,0,13,28,0,
+ABSI,Absci,1,0,13,26,22,0.7727
+PEW,GrabAGun Digital,1,0,13,25,1,1.0
+PLBY,Playboy,1,0,13,22,13,0.7692
+SANA,Sana Biotechnology,1,0,13,21,12,0.75
+TRUG,TruGolf,1,0,13,21,6,1.0
+SJ,Scienjoy,1,0,13,18,10,1.0
+BNZI,Banzai International,1,0,13,16,6,1.0
+MVIS,MicroVision,1,0,12,63,34,0.8529
+ALAB,Astera Labs,1,0,12,56,28,0.5357
+LITE,Lumentum,1,0,12,49,36,0.5278
+SBET,Sharplink,1,0,12,49,16,0.5625
+WULF,TeraWulf,1,0,12,45,21,0.5714
+MNTS,Momentus,1,0,12,38,20,0.8
+CMCT,Creative Media,1,0,12,32,3,0.6667
+GVH,Globavend Holdings Limited - Ord Shares,1,0,12,31,0,
+ELAB,PMGC,1,0,12,29,9,0.8889
+ASPI,ASP Isotopes,1,0,12,28,11,0.9091
+CXAI,CXApp,1,0,12,26,5,1.0
+GXAI,Gaxos.ai,1,0,12,25,0,
+WLDS,Wearable Devices,1,0,12,24,18,0.6667
+BIRD,Smartbird,1,0,12,22,0,
+GUTS,Fractyl Health,1,0,12,22,13,0.8462
+VCIG,VCI Global,1,0,12,20,14,0.6429
+PSHG,Performance Shipping,1,0,12,19,8,1.0
+VTGN,Vistagen Therapeutics,1,0,12,18,10,1.0
+PDSB,PDS Biotechnology,1,0,12,17,10,1.0
+PRFX,PRF Technologies,1,0,12,13,2,1.0
+M,Macy's,1,0,12,12,5,0.0
+NOMA,NOMADAR,1,0,12,12,12,1.0
+T,AT&T,0,0,12,12,111,0.036
+SCHD,Schwab US Dividend Equity ETF,1,1,11,451,0,
+UPS,UPS,1,0,11,129,486,0.2654
+CRWD,CrowdStrike,1,0,11,107,88,0.3068
+TALK,Talkspace,1,0,11,99,17,0.9412
+CVX,Chevron,1,0,11,95,146,0.2808
+BA,Boeing,1,0,11,83,230,0.1435
+PEP,PepsiCo,1,0,11,56,43,0.4419
+LXRX,Lexicon Pharmaceuticals,1,0,11,54,15,0.9333
+NAK,Northern Dynasty Minerals,1,0,11,54,11,0.7273
+PATH,UiPath,1,0,11,53,40,0.55
+RXRX,Recursion Pharmaceuticals,1,0,11,51,11,0.8182
+EOSE,Eos Energy Enterprises,1,0,11,42,18,0.4444
+HOVR,New Horizon Aircraft,1,0,11,41,11,0.9091
+CHR,Cheer,1,0,11,37,47,0.3404
+TGL,Treasure Global,1,0,11,34,4,1.0
+AIXI,XIAO-I,1,0,11,33,0,
+VERI,Veritone,1,0,11,28,16,0.8125
+PMAX,Powell Max,1,0,11,19,6,1.0
+UAA,Under Armour,1,0,11,19,34,0.3529
+LFMD,LifeMD,1,0,11,18,6,0.6667
+SDOT,Sadot,1,0,11,18,13,0.9231
+ADUR,Aduro Clean Technologies,1,0,11,17,7,1.0
+CANG,Cango,1,0,11,16,6,0.6667
+NIO,NIO,1,0,10,94,114,0.8158
+RTX,RTX Corporation,1,0,10,92,3,1.0
+MARA,Marathon Digital,1,0,10,72,18,0.8333
+AMAT,Applied Materials,1,0,10,70,28,0.6786
+FLWS,1-800-FLOWERS.COM,1,0,10,59,0,
+ES,Eversource Energy (D/B/A),1,0,10,58,0,
+SHOP,Shopify,1,0,10,55,110,0.2364
+SUNE,SUNation Energy,1,0,10,54,6,0.6667
+RDW,Redwire,1,0,10,51,36,0.5278
+BLSH,Bullish,0,0,10,40,3224,0.0068
+GSAT,Globalstar,1,0,10,40,25,0.44
+CIFR,Cipher Digital,1,0,10,38,2,0.0
+BLRX,BioLineRx,1,0,10,35,14,1.0
+WW,WW International,1,0,10,34,9,1.0
+OSS,One Stop Systems,1,0,10,32,18,0.9444
+BNGO,Bionano Genomics,1,0,10,30,3,1.0
+GETY,Getty Images,1,0,10,29,21,0.5714
+INDO,Indonesia Energy,1,0,10,29,8,0.875
+YDKG,Yueda Digital,1,0,10,29,4,0.75
+LAZR,Tema Photonics & Optical ETF,1,1,10,28,0,
+CLF,Cleveland-Cliffs,1,0,10,27,0,
+KIDZ,KIDZ AI,1,0,10,26,0,
+BATL,Battalion Oil,1,0,10,25,4,0.5
+ANNA,AleAnna,1,0,10,21,16,0.6875
+AMS,American Shared Hospital Services,1,0,10,19,0,
+BTCS,BTCS,1,0,10,18,23,0.7826
+ITRG,Integra Resources,1,0,10,17,5,0.8
+GURE,Gulf Resources,1,0,10,16,10,1.0
+MODD,Modular Medical,1,0,10,16,8,0.75
+AMOD,Alpha Modus,1,0,10,14,6,1.0
+GIFT,Giftify,1,0,10,14,6,1.0
+SNAL,Snail,1,0,10,13,10,0.7
+BFRG,Bullfrog AI,1,0,10,12,9,0.6667
+UPB,Upstream Bio,1,0,10,12,3,0.3333
+SSYS,Stratasys,1,0,10,11,3,0.6667
+B,Barrick Mining,1,0,10,10,6,0.0
+CRCL,Circle Internet,1,0,9,106,17,0.4706
+DRAM,Roundhill Memory ETF,1,1,9,101,2,1.0
+XYZ,Block,0,0,9,74,418,0.0478
+NET,Cloudflare,1,0,9,70,51,0.5098
+OXY,Occidental Petroleum,1,0,9,68,19,0.5789
+VST,Vistra,1,0,9,57,58,0.4828
+VZ,Verizon,1,0,9,56,94,0.2447
+ABAT,American Battery Technology,1,0,9,50,15,0.8667
+VWAV,VisionWave,1,0,9,50,46,0.8696
+DRTS,Alpha Tau Medical,1,0,9,48,15,0.9333
+DELL,Dell,1,0,9,46,137,0.3358
+AVAV,AeroVironment,1,0,9,44,24,0.4583
+BTBT,Bit Digital,1,0,9,43,13,0.6923
+CRDO,Credo Technology,1,0,9,41,15,0.4667
+MCD,McDonald's,1,0,9,40,42,0.1905
+CLSK,CleanSpark,1,0,9,39,15,0.6667
+MSOS,AdvisorShares Pure US Cannabis ETF,1,1,9,35,0,
+BTAI,BioXcel Therapeutics,1,0,9,31,10,0.8
+ICU,SeaStar Medical,1,0,9,31,12,0.9167
+RBNE,Robin Energy,1,0,9,31,14,1.0
+NWTG,Newton Golf,1,0,9,30,30,0.3667
+CGC,Canopy Growth,1,0,9,29,18,0.3333
+COHR,Coherent,1,0,9,29,68,0.1765
+KVUE,Kenvue,1,0,9,29,23,0.4783
+LIDR,AEye,1,0,9,29,25,0.76
+TSSI,TSS,1,0,9,28,14,0.3571
+INVZ,Innoviz Technologies,1,0,9,25,12,0.5
+ALT,Altimmune,1,0,9,24,20,0.85
+BKYI,BIO-key International,1,0,9,24,0,
+AEHL,Antelope Enterprise,1,0,9,20,4,1.0
+CLIR,ClearSign Technologies,1,0,9,20,12,0.8333
+STI,Solidion Technology,1,0,9,20,5,0.8
+CISO,CISO Global,1,0,9,19,11,1.0
+FBLG,FibroBiologics,1,0,9,18,9,0.7778
+TPET,Trio Petroleum,1,0,9,18,5,1.0
+VRAX,Virax Biolabs,1,0,9,18,6,1.0
+SST,System1,1,0,9,17,0,
+MITQ,Moving iMage Technologies,1,0,9,16,1,1.0
+VNRX,VolitionRX,1,0,9,16,8,0.875
+CAPS,Capstone,1,0,9,15,29,0.2069
+IPW,iPower,1,0,9,15,2,1.0
+RENT,Rent the Runway,1,0,9,15,9,1.0
+GRNQ,Greenpro Capital,1,0,9,13,0,
+LFWD,Lifeward,1,0,9,13,9,1.0
+COOT,Australian Oilseeds,1,0,9,10,2,1.0
+TAOP,Taoping,1,0,9,10,0,
+INTJ,Intelligent,0,0,9,9,307,0.0098
+IBM,IBM,1,0,8,242,254,0.9528
+ARM,Arm Holdings,1,0,8,91,26,0.5769
+QCOM,Qualcomm,1,0,8,86,122,0.1967
+PFE,Pfizer,1,0,8,85,192,0.1823
+FUBO,fuboTV,1,0,8,78,12,0.5
+CEG,Constellation Energy,1,0,8,69,32,0.75
+DIS,Disney,1,0,8,58,210,0.1238
+BB,BlackBerry,1,0,8,54,48,0.4792
+NU,,0,0,8,49,0,
+NVTS,Navitas Semiconductor,1,0,8,45,19,0.3684
+AXP,American Express,1,0,8,40,38,0.2895
+INTU,Intuit,1,0,8,39,48,0.2917
+RILY,BRC,1,0,8,38,3,0.0
+FLY,Firefly Aerospace,1,0,8,34,8,0.5
+MMA,Mixed Martial Arts,1,0,8,34,5,0.8
+SERV,Serve Robotics,1,0,8,34,9,0.4444
+MLGO,MicroAlgo,1,0,8,33,7,0.8571
+ZM,Zoom,1,0,8,30,197,0.1066
+QNCX,Quince Therapeutics,1,0,8,28,14,1.0
+CLOV,Clover Health,1,0,8,27,12,0.75
+RITR,Reitar Logtech,1,0,8,25,12,1.0
+VSEE,VSee Health,1,0,8,25,7,0.8571
+SLNH,Soluna,1,0,8,23,14,0.7143
+CDT,CDT Equity,1,0,8,22,0,
+QNTM,Quantum Biopharma Ltd. - Class B Subordinate Voting Shares,1,0,8,22,0,
+XRX,Xerox,1,0,8,22,13,0.6923
+ADIL,Adial Pharmaceuticals,1,0,8,21,6,0.8333
+SPRC,SciSparc,1,0,8,21,10,0.8
+CSAI,Cloudastructure,1,0,8,20,14,0.9286
+TE,T1 Energy,1,0,8,19,0,
+DGNX,Diginex,1,0,8,17,14,0.5714
+VERU,Veru,1,0,8,17,18,0.7778
+SONM,DNA X,1,0,8,16,0,
+FJET,Starfighters Space,1,0,8,15,5,1.0
+HWH,HWH International,1,0,8,15,0,
+IVVD,Invivyd,1,0,8,15,17,0.5294
+TRT,Trio-Tech International,1,0,8,15,0,
+LUMN,Lumen Technologies,1,0,8,14,3,1.0
+QTEX,QTREX Quantum,1,0,8,14,5,0.8
+AIIO,Robo.ai,1,0,8,13,0,
+BOXL,Boxlight,1,0,8,13,0,
+LTH,Life Time,1,0,8,11,16,0.1875
+MTEK,Maris-Tech,1,0,8,11,0,
+ENHA,Enhanced,0,0,8,10,341,0.0176
+SRAD,Sportradar,1,0,8,9,2,0.5
+WATT,Energous,1,0,8,9,6,1.0
+SWAG,Stran &,1,0,8,8,0,
+JPM,JPMorgan,1,0,7,216,311,0.1608
+AMC,AMC Entertainment,1,0,7,156,11,0.8182
+SNDK,Sandisk,1,0,7,146,125,0.28
+SMH,VanEck Semiconductor ETF,1,1,7,140,21,0.8095
+WBD,Warner Bros Discovery,1,0,7,110,76,0.4868
+CSCO,Cisco,1,0,7,62,141,0.2057
+JOBY,Joby Aviation,1,0,7,54,25,0.48
+CELH,Celsius Holdings,1,0,7,45,13,0.6154
+DUOL,Duolingo,1,0,7,44,82,0.2561
+RKT,Rocket Companies,1,0,7,38,11,0.8182
+DKNG,DraftKings,1,0,7,34,38,0.4211
+VKTX,Viking Therapeutics,1,0,7,34,26,0.8077
+IVF,INVO Fertility,1,0,7,32,2,1.0
+ACHV,Achieve Life Sciences,1,0,7,31,9,1.0
+TMUS,T-Mobile,1,0,7,31,0,
+GIS,General Mills,1,0,7,28,21,0.4286
+FIX,Comfort Systems USA,1,0,7,27,14,0.7143
+SPOT,Spotify,1,0,7,27,99,0.0909
+PBM,Psyence Biomedical,1,0,7,25,7,1.0
+NAKA,Nakamoto,1,0,7,24,21,0.1429
+INBS,Intelligent Bio Solutions,1,0,7,23,6,1.0
+OCGN,Ocugen,1,0,7,23,8,0.75
+OMEX,Odyssey Marine Exploration,1,0,7,23,5,1.0
+SDST,Stardust Power,1,0,7,23,18,0.7222
+RCKT,Rocket Pharmaceuticals,1,0,7,22,10,0.7
+DEFT,Defi Technologies,1,0,7,21,14,0.4286
+KALA,KALA BIO,1,0,7,21,14,0.7143
+VOYG,Voyager Technologies,1,0,7,21,13,0.7692
+MBLY,Mobileye Global,1,0,7,20,3,1.0
+NIVF,NewGenIvf,1,0,7,20,7,1.0
+BAER,Bridger Aerospace,1,0,7,19,8,1.0
+BLNK,Blink Charging,1,0,7,19,14,0.5
+NVX,NOVONIX Limited - American Depository Shares,1,0,7,19,0,
+YAAS,Youxin Technology,1,0,7,19,5,0.8
+BIAF,bioAffinity Technologies,1,0,7,18,9,1.0
+CLBR,Colombier Acquisition Corp. III,1,0,7,18,0,
+NAMM,Namib Minerals,1,0,7,18,9,1.0
+GCL,GCL Global,1,0,7,17,10,1.0
+HYFT,MindWalk,1,0,7,17,8,1.0
+SOWG,Sow Good,1,0,7,17,8,1.0
+UCAR,U Power,1,0,7,17,13,1.0
+INHD,Inno,1,0,7,16,9,0.7778
+ISPC,iSpecimen,1,0,7,16,5,1.0
+SPCX,Space Exploration Technologies,1,0,7,16,3,0.0
+JAGU,Jaguar Uranium,1,0,7,15,8,1.0
+AEI,Alset,1,0,7,14,3,0.6667
+COSM,Cosmos Health,1,0,7,14,6,0.6667
+LIMN,Liminatus Pharma,1,0,7,14,2,1.0
+MYO,Myomo,1,0,7,14,9,0.5556
+ALPS,ALPS,1,0,7,12,14,0.8571
+ALXO,ALX Oncology,1,0,7,12,4,1.0
+CHA,Chagee,1,0,7,12,9,0.6667
+DXCM,DexCom,1,0,7,12,11,0.2727
+EVGO,EVgo,1,0,7,12,15,0.8
+USAU,U.S. Gold,1,0,7,12,0,
+BNC,CEA Industries,1,0,7,11,3,0.6667
+LICN,Lichen International,1,0,7,11,1,1.0
+OPTX,Syntec Optics,1,0,7,11,1,1.0
+TYGO,Tigo Energy,1,0,7,11,6,1.0
+ALMU,Aeluma,1,0,7,10,7,0.7143
+IBG,Innovation Beverage,1,0,7,10,2,1.0
+INV,Innventure,1,0,7,10,3,1.0
+LION,Lionsgate Studios,1,0,7,10,7,0.4286
+MNDR,Mobile-health Network Solutions,1,0,7,10,0,
+LRE,Lead Real Estate,1,0,7,9,2,1.0
+RMSG,Real Messenger,1,0,7,9,3,1.0
+AUST,Austin Gold,1,0,7,8,2,1.0
+CRWS,Crown Crafts,1,0,7,8,3,1.0
+INGN,Inogen,1,0,7,8,3,1.0
+F,Ford,0,0,7,7,264,0.0076
+JD,JD.com,1,0,6,138,0,
+GEV,GE Vernova,1,0,6,69,55,0.4545
+PG,Procter & Gamble,1,0,6,62,0,
+UUUU,Energy Fuels,1,0,6,62,37,0.5135
+CAR,Avis Budget,1,0,6,61,3,0.3333
+RIVN,Rivian,1,0,6,59,103,0.1748
+BAC,Bank of America,1,0,6,55,205,0.0634
+MELI,MercadoLibre,1,0,6,46,11,0.7273
+WM,Waste Management,1,0,6,44,69,0.1739
+VTIX,Virtuix,1,0,6,40,34,1.0
+SRPT,Sarepta Therapeutics,1,0,6,39,18,0.7778
+BLK,BlackRock,0,0,6,37,408,0.0588
+HG,Hamilton Insurance,1,0,6,34,2,0.0
+NNE,Nano Nuclear Energy,1,0,6,34,11,0.8182
+CNSP,CNS Pharmaceuticals,1,0,6,33,7,0.8571
+KTOS,Kratos Defense & Security Solutions,1,0,6,32,0,
+REI,Ring Energy,1,0,6,32,10,1.0
+DECK,Deckers Outdoor,1,0,6,31,11,1.0
+CLS,Celestica,1,0,6,30,39,0.3846
+LEU,Centrus Energy,1,0,6,30,8,0.625
+TMO,Thermo Fisher,1,0,6,29,41,0.3171
+LTRX,Lantronix,1,0,6,28,13,0.7692
+PDYN,Palladyne AI,1,0,6,27,19,0.5789
+PGR,Progressive Corporation (The),1,0,6,27,0,
+CMND,Clearmind Medicine,1,0,6,25,13,0.8462
+SATL,Satellogic,1,0,6,25,16,0.75
+WOK,WORK Medical Technology,1,0,6,25,4,1.0
+BEAT,Heartbeam,1,0,6,24,6,0.8333
+GEVO,Gevo,1,0,6,24,27,0.8889
+VLN,Valens Semiconductor,1,0,6,23,14,0.7857
+XHLD,TEN,0,0,6,23,421,0.0071
+ENVX,Enovix,1,0,6,22,19,0.4737
+LYFT,Lyft,1,0,6,22,66,0.3333
+RXT,Rackspace Technology,1,0,6,22,10,1.0
+AEVA,Aeva Technologies,1,0,6,20,3,1.0
+ATO,Atmos Energy,1,0,6,20,0,
+DOCU,DocuSign,1,0,6,20,19,0.6842
+GLXY,Galaxy Digital,1,0,6,20,22,0.3182
+SRFM,Surf Air Mobility,1,0,6,20,11,0.9091
+TDIC,Dreamland,1,0,6,20,5,1.0
+EMO,ClearBridge Energy Midstream Opport,1,0,6,19,0,
+ACRV,Acrivon Therapeutics,1,0,6,18,9,0.8889
+AEON,AEON Biopharma,1,0,6,18,6,1.0
+ASTI,Ascent Solar Technologies,1,0,6,18,5,1.0
+CAPR,Capricor Therapeutics,1,0,6,18,4,0.75
+QH,Quhuo,1,0,6,18,11,0.8182
+TDOC,Teladoc,1,0,6,18,14,0.5714
+CURI,CuriosityStream,1,0,6,17,7,1.0
+FEED,ENvue Medical,1,0,6,17,5,0.8
+PGY,Pagaya Technologies,1,0,6,17,2,1.0
+VEEE,Twin Vee PowerCats,1,0,6,17,9,0.8889
+ONCY,Oncolytics Biotech,1,0,6,16,8,1.0
+SIRI,SiriusXM,1,0,6,16,1,0.0
+BCTX,BriaCell Therapeutics,1,0,6,15,2,1.0
+AZI,Autozi Internet Technology (Global),1,0,6,14,0,
+BNKK,Bonk,1,0,6,14,31,0.2581
+HCWC,Healthy Choice Wellness,1,0,6,14,1,1.0
+SILO,Silo Pharma,1,0,6,14,6,1.0
+APO,Apollo Global,1,0,6,13,25,0.12
+QUCY,Quantum Cyber N.V,1,0,6,13,0,
+VALE,VALE S.A,1,0,6,13,0,
+JUNS,Jupiter Neurosciences,1,0,6,12,4,1.0
+KEEL,Keel Infrastructure,1,0,6,12,3,1.0
+XP,,0,0,6,12,0,
+DDC,DDC Enterprise,1,0,6,11,2,1.0
+FNGR,FingerMotion,1,0,6,11,2,1.0
+LUCY,Innovative Eyewear,1,0,6,11,5,0.6
+ORKT,Orangekloud Technology,1,0,6,11,1,1.0
+AMST,Amesite,1,0,6,10,5,1.0
+CISS,,0,0,6,10,0,
+PPC,Pilgrim's Pride,1,0,6,10,2,0.5
+SAGT,SAGTEC GLOBAL,1,0,6,10,2,1.0
+SQNS,Sequans Communications S.A,1,0,6,10,0,
+COOK,Traeger,1,0,6,9,6,1.0
+ENTX,Entera Bio,1,0,6,9,8,1.0
+INSW,International Seaways,1,0,6,9,4,1.0
+PLCE,"Children's Place, Inc. (The)",1,0,6,9,0,
+RERE,ATRenew,1,0,6,9,3,1.0
+UONE,Urban One,1,0,6,9,4,0.25
+ABTS,Abits,1,0,6,8,1,1.0
+ARTL,Artelo Biosciences,1,0,6,8,2,1.0
+IOTR,iOThree,1,0,6,8,2,1.0
+WYY,WidePoint,1,0,6,8,7,0.8571
+CREX,Creative Realities,1,0,6,7,0,
+DFSC,DEFSEC Technologies,1,0,6,7,4,1.0
+DMAC,DiaMedica Therapeutics,1,0,6,7,5,1.0
+FUSE,Fusemachines,1,0,6,7,5,1.0
+RGS,Regis,1,0,6,7,7,0.8571
+LNG,Cheniere Energy,1,0,5,216,7,0.5714
+GM,General Motors,1,0,5,200,82,0.5366
+PYPL,PayPal,1,0,5,79,221,0.1448
+QUBT,Quantum Computing Inc,1,0,5,63,20,0.65
+XLE,State Street Energy Select Sector SPDR ETF,1,1,5,62,0,
+NRXP,NRX Pharmaceuticals,1,0,5,46,17,0.8824
+CCJ,Cameco,1,0,5,44,48,0.3125
+FSLR,First Solar,1,0,5,44,37,0.4865
+MRK,Merck,1,0,5,44,100,0.13
+MRNA,Moderna,1,0,5,44,65,0.3385
+AU,AngloGold Ashanti,1,0,5,42,4,0.75
+LRCX,Lam Research,1,0,5,40,21,0.5238
+WDC,Western Digital,1,0,5,39,41,0.3171
+NOC,Northrop Grumman,1,0,5,38,40,0.25
+RDZN,Roadzen,1,0,5,38,34,0.7353
+GCT,GigaCloud Technology,1,0,5,37,9,0.7778
+TEAM,Atlassian,1,0,5,35,32,0.5312
+QCLS,Q/C Technologies,1,0,5,33,0,
+ABNB,Airbnb,1,0,5,29,84,0.1548
+PFSA,Profusa,1,0,5,29,22,0.8636
+DAL,Delta Air Lines,1,0,5,28,22,0.2727
+HTZ,Hertz Global,1,0,5,28,4,0.75
+INOD,Innodata,1,0,5,28,30,0.4667
+DG,Dollar General,1,0,5,25,25,0.4
+RBRK,Rubrik,1,0,5,25,14,0.3571
+BKNG,Booking,1,0,5,23,106,0.1132
+CHSN,Chanson International,1,0,5,23,9,0.8889
+XOVR,ERShares Private-Public Crossover ETF,1,1,5,23,0,
+AIRO,AIRO,1,0,5,22,26,0.8462
+BCG,Binah Capital,1,0,5,22,5,1.0
+BLNE,Beeline,1,0,5,22,11,1.0
+DGX,Quest Diagnostics,1,0,5,22,23,0.1304
+ICON,Icon Energy,1,0,5,22,19,0.5789
+SLE,Super League Enterprise,1,0,5,22,0,
+BEEM,Beam Global,1,0,5,20,11,1.0
+COF,Capital One Financial,1,0,5,20,6,0.8333
+FCUV,Focus Universal,1,0,5,20,7,1.0
+GLW,Corning,1,0,5,20,37,0.2703
+PLRZ,Polyrizon,1,0,5,20,8,0.75
+SLB,Schlumberger,1,0,5,20,15,0.5333
+CALM,Cal-Maine Foods,1,0,5,19,0,
+LFVN,Lifevantage,1,0,5,19,6,1.0
+AISP,Airship AI,1,0,5,18,15,0.5333
+CDE,Coeur Mining,1,0,5,18,7,0.5714
+EL,"Estee Lauder Companies, Inc. (The)",1,0,5,18,0,
+SBFM,Sunshine Biopharma,1,0,5,18,9,0.7778
+XXX,CYBER HORNET S&P 500 and XRP 75/25 Strategy ETF,1,1,5,18,0,
+ZONE,CleanCore Solutions,1,0,5,18,1,1.0
+AXTI,AXT,1,0,5,17,8,0.625
+BTU,Peabody Energy,1,0,5,17,8,0.875
+CODX,Co-Diagnostics,1,0,5,17,0,
+CRDF,Cardiff Oncology,1,0,5,17,8,0.75
+GOSS,Gossamer Bio,1,0,5,17,15,0.9333
+NMRA,Neumora Therapeutics,1,0,5,17,7,1.0
+OPI,Office Properties Income Trust,1,0,5,17,0,
+VPG,Vishay Precision,1,0,5,17,6,0.8333
+ZETA,Zeta Global,1,0,5,17,7,0.5714
+ACB,Aurora Cannabis,1,0,5,16,8,0.375
+CROX,Crocs,1,0,5,16,14,0.5
+MCVT,Miller Convertible Total Return ETF,1,1,5,16,0,
+MLP,Maui Land & Pineapple,1,0,5,16,0,
+PBR,Petroleo Brasileiro S.A. Petrobras ADS,1,0,5,16,0,
+SNYR,Synergy CHC,1,0,5,15,3,1.0
+ELPW,Elong Power,1,0,5,14,4,1.0
+FFAI,Faraday Future Intelligent Electric,1,0,5,14,0,
+TNYA,Tenaya Therapeutics,1,0,5,14,10,0.7
+AIFF,Firefly Neuroscience,1,0,5,13,7,1.0
+CING,Cingulate,1,0,5,13,3,1.0
+GERN,Geron,1,0,5,13,12,0.9167
+NNVC,NanoViricides,1,0,5,13,7,1.0
+OUST,Ouster,1,0,5,13,14,0.3571
+POOL,Pool,0,0,5,13,330,0.0394
+TRIP,TripAdvisor,1,0,5,13,10,0.2
+AGL,agilon health,1,0,5,12,10,0.4
+AZTR,Azitra,1,0,5,12,4,1.0
+DRUG,,0,0,5,12,0,
+ELDN,Eledon Pharmaceuticals,1,0,5,12,2,1.0
+FGI,FGI Industries,1,0,5,12,1,1.0
+GSIT,GSI Technology,1,0,5,12,5,0.6
+JFB,JFB Construction,1,0,5,12,6,1.0
+PACB,Pacific Biosciences of California,1,0,5,12,0,
+BBGI,Beasley Broadcast,1,0,5,11,0,
+COKE,Coca-Cola Consolidated,1,0,5,11,0,
+IPWR,Ideal Power,1,0,5,11,4,0.75
+LPTH,LightPath Technologies,1,0,5,11,5,1.0
+MNDY,monday.com,1,0,5,11,0,
+MSS,Maison Solutions,1,0,5,11,3,1.0
+CODA,Coda Octopus,1,0,5,10,1,1.0
+JAGX,Jaguar Health,1,0,5,10,6,0.5
+JOB,GEE,1,0,5,10,12,0.3333
+REPL,Replimune,1,0,5,10,5,0.8
+SYNX,Silynxcom,1,0,5,10,5,1.0
+TROO,TROOPS,0,0,5,10,63,0.0317
+CLIK,Click,0,0,5,9,813,0.0049
+CLRB,Cellectar Biosciences,1,0,5,9,5,0.8
+DUKR,DUKE Robotics,1,0,5,9,5,1.0
+GMM,Global Mofy AI,1,0,5,9,3,1.0
+HSDT,Solana,0,0,5,9,122,0.0
+MDGL,Madrigal Pharmaceuticals,1,0,5,9,4,0.75
+PROK,ProKidney,1,0,5,9,4,0.75
+SHFS,SHF,1,0,5,9,1,0.0
+ASPC,A SPAC III Acquisition,1,0,5,8,0,
+ATHE,Alterity Therapeutics,1,0,5,8,7,1.0
+ENLV,Enlivex,1,0,5,8,6,0.8333
+FCHL,Fitness Champs,1,0,5,8,5,1.0
+KAPA,Kairos Pharma,1,0,5,8,2,1.0
+MAAS,Maase,1,0,5,8,1,0.0
+RAIN,Rain Enhancement Technologies Holdco,1,0,5,8,0,
+TLYS,Tilly's,1,0,5,8,8,1.0
+ALLR,Allarity Therapeutics,1,0,5,7,2,1.0
+CAMP,CAMP4 Therapeutics,1,0,5,7,0,
+CELZ,Creative Medical Technology,1,0,5,7,5,1.0
+GLE,Global Engine,1,0,5,7,2,1.0
+HCWB,HCW Biologics,1,0,5,7,6,0.8333
+IMTE,Integrated Media Technology,1,0,5,7,0,
+KTTA,Pasithea Therapeutics,1,0,5,7,0,
+MAMA,Mama's Creations,1,0,5,7,0,
+PLYX,Polaryx Therapeutics,1,0,5,7,0,
+SNES,SenesTech,1,0,5,7,7,0.7143
+SPCG,Tradr 2X Short SpaceX Daily ETF,1,1,5,7,0,
+SPHL,Springview,1,0,5,7,2,1.0
+TVGN,Tevogen,1,0,5,7,6,1.0
+CAMT,Camtek,1,0,5,6,4,0.5
+COCH,Envoy Medical,1,0,5,6,0,
+GROV,Grove Collaborative,1,0,5,6,5,1.0
+MOB,Mobilicom,1,0,5,6,8,0.625
+MTSI,MACOM Technology Solutions,1,0,5,6,1,1.0
+NERD,Roundhill Video Games ETF,1,1,5,6,0,
+ONFO,Onfolio,1,0,5,6,5,1.0
+C,Citigroup,0,0,5,5,69,0.029
+NTRP,NextTrip,1,0,5,5,3,1.0
+RCT,RedCloud,1,0,5,5,5,0.8
+SKYH,Sky Harbour,1,0,5,5,5,1.0
+V,Visa,0,0,5,5,247,0.0081
+WTI,W&T Offshore,1,0,4,126,6,1.0
+SE,Sea,0,0,4,120,294,0.0374
+JNJ,Johnson & Johnson,1,0,4,77,0,
+GS,Goldman Sachs,1,0,4,73,352,0.0767
+SG,Sweetgreen,1,0,4,65,20,0.6
+SQQQ,ProShares UltraPro Short QQQ,1,1,4,60,0,
+FTC,First Trust Large Cap Growth AlphaDEX Fund,1,1,4,58,0,
+HD,Home Depot,1,0,4,58,85,0.1882
+GT,The Goodyear Tire & Rubber,1,0,4,56,0,
+NEE,NextEra Energy,1,0,4,53,24,0.7083
+TGT,Target,0,0,4,53,4011,0.0077
+RUN,Sunrun,1,0,4,52,15,0.5333
+TER,Teradyne,1,0,4,52,16,0.5625
+PDD,PDD,1,0,4,50,50,1.0
+NOK,Nokia,1,0,4,49,102,0.2647
+ENPH,Enphase,1,0,4,46,28,0.6429
+CMG,Chipotle,1,0,4,45,86,0.2326
+FICO,Fair Isaac,1,0,4,45,7,0.7143
+FLNC,Fluence Energy,1,0,4,42,17,0.7059
+USO,United States Oil Fund,1,1,4,42,0,
+RBLX,Roblox,1,0,4,40,59,0.3051
+KYC,Corgi Digital Banking & Fintech Infrastructure ETF,1,1,4,38,0,
+MO,Altria,1,0,4,38,20,0.35
+SBUX,Starbucks,1,0,4,38,125,0.168
+COP,ConocoPhillips,1,0,4,37,26,0.5769
+HP,Helmerich & Payne,1,0,4,37,0,
+HPE,Hewlett Packard Enterprise,1,0,4,36,9,0.6667
+GIBO,GIBO,1,0,4,33,35,0.9143
+CRSP,CRISPR Therapeutics,1,0,4,32,13,0.6923
+ISRG,Intuitive Surgical,1,0,4,32,23,0.5217
+GAIN,Gladstone Investment Corporation - Business Development,1,0,4,31,0,
+CHYM,Chime Financial,1,0,4,27,6,1.0
+DDD,3D Systems,1,0,4,27,0,
+KOS,Kosmos Energy,1,0,4,27,19,0.8947
+UEC,Uranium Energy,1,0,4,27,17,0.4706
+TKO,TKO,1,0,4,26,26,1.0
+BROS,Dutch Bros,1,0,4,25,23,0.4783
+UNCY,Unicycive Therapeutics,1,0,4,25,10,0.9
+BMI,Badger Meter,1,0,4,24,3,1.0
+DPRO,Draganfly,1,0,4,24,9,0.7778
+CAVA,CAVA,1,0,4,23,40,0.575
+FOUR,Shift4 Payments,1,0,4,23,0,
+LEN,Lennar,1,0,4,22,21,0.4762
+SYM,Symbotic,1,0,4,22,12,0.6667
+AEO,American Eagle Outfitters,1,0,4,21,8,0.125
+SPCB,SuperCom,1,0,4,21,13,0.9231
+APH,Amphenol,1,0,4,20,11,0.7273
+IMPP,Imperial Petroleum,1,0,4,20,6,0.8333
+SEZL,Sezzle,1,0,4,20,13,0.4615
+SLDP,Solid Power,1,0,4,20,10,0.4
+TOVX,Theriva Biologics,1,0,4,20,11,1.0
+VAL,Valaris,1,0,4,19,11,0.9091
+AAOI,Applied Optoelectronics,1,0,4,18,4,0.5
+CVU,CPI Aerostructures,1,0,4,18,6,1.0
+LGHL,Lion,0,0,4,18,44,0.0227
+TMDX,TransMedics,1,0,4,18,4,1.0
+DASH,DoorDash,0,0,4,17,64,0.0781
+GILD,Gilead,1,0,4,17,20,0.3
+MOOD,Relative Sentiment Tactical Allocation ETF,1,1,4,17,0,
+WEN,Wendy's Company (The),1,0,4,17,0,
+ACET,Adicet Bio,1,0,4,16,11,1.0
+BARK,BARK,1,0,4,16,22,0.7273
+BDRX,Biodexa Pharmaceuticals,1,0,4,16,5,0.8
+BNRG,Brenmiller Energy,1,0,4,16,8,0.875
+DRCT,Direct Digital,1,0,4,16,4,0.5
+LASE,Laser Photonics,1,0,4,16,10,0.7
+SIG,Signet Jewelers,1,0,4,16,2,1.0
+XPON,Expion360,1,0,4,16,0,
+COMP,Compass,1,0,4,15,48,0.1458
+FCEL,FuelCell Energy,1,0,4,15,6,0.5
+GFAI,Guardforce AI,1,0,4,15,9,1.0
+JMIA,Jumia Technologies,1,0,4,15,3,1.0
+MBRX,Moleculin Biotech,1,0,4,15,10,0.7
+MGRX,Mangoceuticals,1,0,4,15,12,0.9167
+AEHR,Aehr Test Systems,1,0,4,14,7,1.0
+FDMT,4D Molecular Therapeutics,1,0,4,14,0,
+NXPL,NextPlat,1,0,4,14,5,1.0
+PEN,Penumbra,1,0,4,14,7,1.0
+SHPH,Shuttle Pharmaceuticals,1,0,4,14,5,1.0
+STNG,Scorpio Tankers,1,0,4,14,8,1.0
+TGE,The Generation Essentials,1,0,4,14,4,1.0
+UA,Under Armour,1,0,4,14,34,0.3529
+XXII,22nd Century,1,0,4,14,0,
+CIGL,Concorde International,1,0,4,13,3,0.3333
+GNLN,Greenlane,1,0,4,13,8,0.5
+PTON,Peloton,1,0,4,13,27,0.3333
+SPRB,Spruce Biosciences,1,0,4,13,1,1.0
+WYFI,WhiteFiber,1,0,4,13,10,0.9
+BENF,Beneficient,1,0,4,12,4,0.75
+KODK,Eastman Kodak Company Common New,1,0,4,12,0,
+NXDR,Nextdoor,1,0,4,12,12,0.6667
+STFS,Star Fashion Culture,1,0,4,12,2,0.5
+AKAN,Akanda,1,0,4,11,2,0.5
+EDBL,Edible Garden,1,0,4,11,5,0.6
+FRSH,Freshworks,1,0,4,11,8,0.75
+RANI,Rani Therapeutics,1,0,4,11,4,0.75
+TSN,Tyson Foods,1,0,4,11,13,0.5385
+XFOR,X4 Pharmaceuticals,1,0,4,11,0,
+AVL,Direxion Daily AVGO Bull 2X ETF,1,1,4,10,0,
+CLYM,Climb Bio,1,0,4,10,3,1.0
+CWD,CaliberCos,1,0,4,10,1,0.0
+ERNA,Ernexa Therapeutics,1,0,4,10,3,1.0
+EVO,Evotec,1,0,4,10,1,1.0
+INO,Inovio Pharmaceuticals,1,0,4,10,2,1.0
+INTZ,Intrusion,1,0,4,10,11,0.1818
+MTDR,Matador Resources,1,0,4,10,7,1.0
+PAYS,Paysign,1,0,4,10,6,1.0
+PRME,Prime Medicine,1,0,4,10,2,1.0
+RNAZ,TransCode Therapeutics,1,0,4,10,0,
+VFF,Village Farms International,1,0,4,10,2,0.0
+YCBD,cbdMD,1,0,4,10,0,
+AFJK,Aimei Health Technology,1,0,4,9,2,1.0
+BCAB,BioAtla,1,0,4,9,6,0.6667
+DAVE,Dave,1,0,4,9,71,0.1268
+DOMH,Dominari,1,0,4,9,7,0.7143
+GALT,Galectin Therapeutics,1,0,4,9,1,1.0
+LBGJ,Li Bang International,1,0,4,9,1,1.0
+LENZ,LENZ Therapeutics,1,0,4,9,7,1.0
+NVT,nVent Electric,1,0,4,9,2,1.0
+PSQH,PSQ,1,0,4,9,5,0.0
+RELY,Remitly Global,1,0,4,9,0,
+AQMS,Aqua Metals,1,0,4,8,3,1.0
+ATXG,Addentax,1,0,4,8,0,
+BJDX,Bluejay Diagnostics,1,0,4,8,0,
+CRVO,CervoMed,1,0,4,8,6,1.0
+DFDV,DeFi Development,1,0,4,8,2,1.0
+FVRR,Fiverr International,1,0,4,8,0,
+KRMN,Karman,1,0,4,8,6,0.1667
+LNAI,Lunai Bioworks,1,0,4,8,7,0.8571
+MTC,MMTec,1,0,4,8,1,1.0
+RUM,RUM,1,0,4,8,12,0.6667
+SABR,Sabre,1,0,4,8,9,0.4444
+SNOA,Sonoma Pharmaceuticals,1,0,4,8,6,0.8333
+WRB,W.R. Berkley,1,0,4,8,0,
+BYRN,Byrna Technologies,1,0,4,7,7,0.5714
+CBAT,CBAK Energy Technology,1,0,4,7,2,1.0
+CDTG,CDT Environmental Technology Investment,1,0,4,7,0,
+EMN,Eastman Chemical,1,0,4,7,5,0.8
+ERAS,Erasca,1,0,4,7,2,1.0
+LFS,LEIFRAS,1,0,4,7,1,1.0
+LSCC,Lattice Semiconductor,1,0,4,7,4,0.75
+LZMH,LZ Technology,1,0,4,7,2,1.0
+NKLR,Terra Innovatum Global N.V,1,0,4,7,0,
+NVNO,enVVeno Medical,1,0,4,7,2,1.0
+OIO,OIO,1,0,4,7,7,1.0
+PW,Power REIT (MD),1,0,4,7,0,
+SMSI,Smith Micro Software,1,0,4,7,3,1.0
+SUIG,Sui,1,0,4,7,10,0.3
+TRMB,Trimble,1,0,4,7,3,0.0
+UWMC,UWM,1,0,4,7,2,1.0
+VTAK,Catheter Precision,1,0,4,7,3,1.0
+YMAT,J-Star,1,0,4,7,0,
+BIYA,Baiya International,1,0,4,6,0,
+BLDP,Ballard Power Systems,1,0,4,6,1,0.0
+CDIO,Cardio Diagnostics,1,0,4,6,3,0.6667
+DIN,Dine Brands Global,1,0,4,6,1,1.0
+DXF,Eason Technology,1,0,4,6,1,1.0
+FRGT,Freight Technologies,1,0,4,6,4,1.0
+HURA,TuHURA Biosciences,1,0,4,6,1,1.0
+IPSC,Century Therapeutics,1,0,4,6,3,1.0
+NDRA,ENDRA Life Sciences,1,0,4,6,2,1.0
+PTLE,PTL,1,0,4,6,1,0.0
+RAMP,LiveRamp,1,0,4,6,2,1.0
+STEX,Streamex,1,0,4,6,17,0.2353
+YDDL,One and One Green Technologies,1,0,4,6,0,
+ABX,Abacus Global Management,1,0,4,5,1,0.0
+AMCI,AMC Robotics,1,0,4,5,1,1.0
+ARQT,Arcutis Biotherapeutics,1,0,4,5,1,1.0
+CLDI,Calidi Biotherapeutics,1,0,4,5,0,
+GROY,Gold Royalty,1,0,4,5,5,0.2
+JDZG,JIADE,1,0,4,5,1,1.0
+KPLT,Katapult,1,0,4,5,4,1.0
+PRTS,CarParts.com,1,0,4,5,0,
+PSNL,Personalis,1,0,4,5,5,0.8
+PUBM,PubMatic,1,0,4,5,2,0.5
+QTTB,Q32 Bio,1,0,4,5,0,
+WETH,Wetouch Technology,1,0,4,5,4,1.0
+ASYS,Amtech Systems,1,0,4,4,2,1.0
+BREW,Corgi Coffee & Energy Drinks ETF,1,1,4,4,0,
+DGICA,Donegal,1,0,4,4,3,1.0
+DOYU,DouYu International,1,0,4,4,1,1.0
+FTEK,Fuel Tech,1,0,4,4,2,0.5
+HYFM,Hydrofarm,1,0,4,4,0,
+NEWT,NewtekOne,1,0,4,4,0,
+NWGL,CL Workshop,1,0,4,4,0,
+OWLT,Owlet,1,0,4,4,4,1.0
+VVOS,Vivos Therapeutics,1,0,4,4,2,0.5
+YYGH,,0,0,4,4,0,
+VXUS,Vanguard Total International Stock ETF,1,1,3,516,0,
+SGOV,iShares 0-3 Month Treasury Bond ETF,1,1,3,336,0,
+IBKR,Interactive Brokers,1,0,3,315,147,0.2381
+QQQM,Invesco NASDAQ 100 ETF,1,1,3,268,0,
+MA,Mastercard,1,0,3,179,104,0.1346
+VGT,Vanguard Information Tech ETF,1,1,3,145,0,
+DNA,Ginkgo Bioworks,1,0,3,140,5,0.4
+FT,Franklin Universal Trust,1,0,3,117,0,
+IBIT,iShares Bitcoin Trust ETF,1,1,3,102,0,
+PANW,Palo Alto Networks,1,0,3,82,62,0.5484
+BP,BP,1,0,3,78,113,0.6903
+TLT,iShares 20+ Year Treasury Bond ETF,1,1,3,78,0,
+DE,Deere,1,0,3,73,35,0.4286
+CAT,Caterpillar,1,0,3,69,51,0.4314
+ANET,Arista Networks,1,0,3,64,30,0.6
+AIM,AIM Immu,1,0,3,58,0,
+STEM,Stem,1,0,3,53,151,0.3444
+NA,Nano Labs,1,0,3,43,2,0.5
+QS,QuantumScape,1,0,3,43,51,0.4118
+FCX,Freeport-McMoRan,1,0,3,42,0,
+NCI,Neo-Concept International,1,0,3,39,0,
+QNC,Quantum eMotion,1,0,3,39,45,0.3778
+AAL,American Airlines,1,0,3,35,49,0.3878
+HKD,AMTD Digital,1,0,3,34,0,
+STX,Seagate Technology,1,0,3,34,7,0.5714
+FBIO,Fortress Biotech,1,0,3,33,13,0.9231
+CITR,CitroTech,1,0,3,32,13,0.9231
+CL,Colgate,1,0,3,32,4,0.25
+SPGI,S&P Global,1,0,3,32,75,0.0533
+ETN,Eaton,1,0,3,31,16,0.25
+UPST,Upstart,1,0,3,31,40,0.3
+ORR,Militia Long/Short Equity ETF,1,1,3,30,0,
+NE,Noble Corporation plc A,1,0,3,28,0,
+NEM,Newmont,1,0,3,28,38,0.2632
+TXN,Texas Instruments,1,0,3,27,25,0.36
+URA,Global X Uranium ETF,1,1,3,27,0,
+CNC,Centene,1,0,3,26,23,0.3478
+CR,Crane,1,0,3,26,12,0.3333
+LHX,L3Harris Technologies,1,0,3,25,0,
+PINS,Pinterest,1,0,3,24,43,0.2558
+STLA,Stellantis,1,0,3,24,112,0.1607
+WFC,Wells Fargo,1,0,3,24,116,0.0776
+ALB,Albemarle,1,0,3,23,12,0.5833
+AREC,American Resources,1,0,3,23,10,0.9
+BZAI,Blaize,1,0,3,23,14,0.8571
+HUT,Hut 8,1,0,3,23,0,
+LI,Li Auto,1,0,3,23,22,0.5
+LDOS,Leidos,1,0,3,22,26,0.3846
+GP,GreenPower Motor,1,0,3,21,0,
+KHC,Kraft Heinz,1,0,3,21,23,0.4348
+KLAC,KLA,1,0,3,21,15,0.4
+PSNY,Polestar Automotive Holding UK Limited - Class A ADS,1,0,3,21,0,
+SB,Safe Bulkers,1,0,3,21,3,1.0
+CMPX,Compass Therapeutics,1,0,3,20,4,0.25
+DVN,Devon Energy,1,0,3,20,10,0.6
+INUV,Inuvo,1,0,3,20,15,0.5333
+ABTC,American Bitcoin,1,0,3,19,9,0.5556
+HE,Hawaiian Electric Industries,1,0,3,19,0,
+IMUX,Immunic,1,0,3,19,7,1.0
+SOS,SOS,1,0,3,19,20,0.95
+ALP,Alpha Compute,1,0,3,18,15,0.8667
+ASAN,Asana,1,0,3,18,17,0.4706
+BX,Blackstone,1,0,3,18,64,0.0938
+CHTR,Charter Communications,1,0,3,18,11,0.4545
+CMCSA,Comcast,1,0,3,18,50,0.2
+INDI,indie Semiconductor,1,0,3,18,13,0.7692
+RIG,Transocean Ltd (Switzerland),1,0,3,18,0,
+ZIM,ZIM Integrated Shipping Services,1,0,3,18,0,
+HYLN,Hyliion,1,0,3,17,14,0.7857
+MX,Magnachip Semiconductor,1,0,3,17,4,1.0
+OCG,Oriental Culture,1,0,3,17,8,0.5
+ORLY,O'Reilly Automotive,1,0,3,17,3,1.0
+AIAI,AIAI,1,0,3,16,16,1.0
+GOVX,GeoVax Labs,1,0,3,16,4,1.0
+GWH,ESS Tech,1,0,3,16,10,0.5
+HAL,Halliburton,1,0,3,16,17,0.3529
+IGV,iShares Expanded Tech-Software Sector ETF,1,1,3,16,0,
+REGN,Regeneron,1,0,3,16,25,0.44
+ZIP,ZipRecruiter,1,0,3,16,2,1.0
+ETOR,eToro,1,0,3,15,80,0.1375
+ONON,,0,0,3,15,0,
+ORBS,Eightco,1,0,3,15,10,0.7
+CHPT,ChargePoint,1,0,3,14,12,0.4167
+EVTL,Vertical Aerospace,1,0,3,14,15,0.6
+QMMM,QMMM,1,0,3,14,17,0.8235
+RSG,Republic Services,1,0,3,14,11,0.7273
+BMBL,Bumble,1,0,3,13,19,0.3684
+CIEN,Ciena,1,0,3,13,11,0.6364
+ETSY,Etsy,1,0,3,13,31,0.4194
+FEIM,Frequency Electronics,1,0,3,13,8,0.5
+HPQ,HP Inc,1,0,3,13,3,0.6667
+MNST,Monster Beverage,1,0,3,13,7,0.7143
+VSME,VS Media,1,0,3,13,2,1.0
+ANF,Abercrombie & Fitch,1,0,3,12,0,
+ASTC,Astrotech,1,0,3,12,5,0.4
+BBY,Best Buy,1,0,3,12,41,0.1951
+FLYE,Fly-E,1,0,3,12,0,
+GOLF,Acushnet,1,0,3,12,6,0.6667
+HHH,Howard Hughes,1,0,3,12,9,0.5556
+LIN,Linde,1,0,3,12,8,0.625
+MCHI,iShares MSCI China ETF,1,1,3,12,0,
+ROLR,High Roller Technologies,1,0,3,12,2,1.0
+SCNX,Scienture,1,0,3,12,3,0.6667
+SPT,Sprout Social,1,0,3,12,10,1.0
+TMDE,TMD Energy,1,0,3,12,8,0.875
+GPN,Global Payments,1,0,3,11,13,0.4615
+HUBS,HubSpot,1,0,3,11,15,0.1333
+SDRL,Seadrill,1,0,3,11,9,1.0
+SPRO,Spero Therapeutics,1,0,3,11,4,1.0
+BTQ,BTQ Technologies,1,0,3,10,4,1.0
+CRNC,Cerence,1,0,3,10,13,0.3077
+CTNT,Cheetah Net Supply Chain Service,1,0,3,10,0,
+EEIQ,EpicQuest Education Group International,1,0,3,10,0,
+FATN,FatPipe,1,0,3,10,6,0.8333
+HOUR,Hour Loop,1,0,3,10,0,
+IGC,IGC Pharma,1,0,3,10,7,1.0
+ILMN,Illumina,1,0,3,10,31,0.0968
+IRDM,Iridium Communications,1,0,3,10,4,0.75
+KGC,Kinross Gold,1,0,3,10,7,0.1429
+PTN,Palatin Technologies,1,0,3,10,13,0.5385
+AMSC,American Superconductor,1,0,3,9,4,0.75
+BDX,"Becton, Dickinson and",1,0,3,9,0,
+BMEA,Biomea Fusion,1,0,3,9,1,1.0
+EBS,Emergent BioSolutions,1,0,3,9,4,1.0
+FUN,Six Flags Entertainment,1,0,3,9,2,1.0
+IAI,iShares U.S. Broker-Dealers & Securities Exchanges ETF,1,1,3,9,0,
+KD,Kyndryl,1,0,3,9,2,0.5
+LNKS,Linkers Industries,1,0,3,9,4,1.0
+MAIA,MAIA Biotechnology,1,0,3,9,4,1.0
+MRNO,Murano Global Investments,1,0,3,9,1,1.0
+OPAD,Offerpad Solutions,1,0,3,9,1,1.0
+VUZI,Vuzix,1,0,3,9,6,0.3333
+WSHP,WeShop,1,0,3,9,5,0.6
+XBI,State Street SPDR S&P Biotech ETF,1,1,3,9,0,
+BGSF,BGSF,1,0,3,8,8,1.0
+DOGZ,Dogness (International),1,0,3,8,0,
+HCAI,Huachen AI Parking Management Technology,1,0,3,8,0,
+HSAI,Hesai,1,0,3,8,9,0.7778
+IMNN,Imunon,1,0,3,8,4,1.0
+MIRA,MIRA Pharmaceuticals,1,0,3,8,6,1.0
+PCLA,PicoCELA,1,0,3,8,5,1.0
+RLMD,Relmada Therapeutics,1,0,3,8,4,1.0
+SER,Serina Therapeutics,1,0,3,8,5,1.0
+SPAI,Safe Pro,1,0,3,8,4,0.75
+AIRI,Air Industries,1,0,3,7,1,1.0
+BDMD,Baird Medical Investment,1,0,3,7,0,
+BGI,Birks,1,0,3,7,3,1.0
+BKKT,Bakkt,1,0,3,7,11,0.2727
+CCHH,CCH,1,0,3,7,3,0.3333
+COCP,Cocrystal Pharma,1,0,3,7,2,1.0
+CORT,Corcept Therapeutics,1,0,3,7,1,1.0
+DY,Dycom Industries,1,0,3,7,3,1.0
+FIVN,Five9,1,0,3,7,0,
+GELS,Gelteq,1,0,3,7,5,1.0
+HYPR,Hyperfine,1,0,3,7,6,0.6667
+LAD,Lithia Motors,1,0,3,7,3,1.0
+LRMR,Larimar Therapeutics,1,0,3,7,1,1.0
+NGEN,NervGen Pharma,1,0,3,7,10,0.4
+OPFI,OppFi,1,0,3,7,4,0.5
+TRMD,TORM,1,0,3,7,7,0.8571
+WIMI,WiMi Hologram Cloud,1,0,3,7,1,1.0
+WOOF,Petco Health and Wellness,1,0,3,7,0,
+AMIX,Autonomix Medical,1,0,3,6,2,1.0
+BIOA,BioAge Labs,1,0,3,6,0,
+BRZE,Braze,1,0,3,6,5,0.4
+BZFD,BuzzFeed,1,0,3,6,6,0.6667
+CCCC,C4 Therapeutics,1,0,3,6,0,
+CHD,Church & Dwight,1,0,3,6,0,
+EQR,Equity Residential,1,0,3,6,0,
+EWZ,iShares MSCI Brazil ETF,1,1,3,6,0,
+GNTA,Genenta Science S.p.A,1,0,3,6,0,
+GRAL,GRAIL,0,0,3,6,69,0.058
+INAB,IN8bio,1,0,3,6,0,
+KURA,Kura Oncology,1,0,3,6,5,0.8
+PXED,Phoenix Education Partners,1,0,3,6,4,1.0
+PXLW,Pixelworks,1,0,3,6,5,1.0
+SBLK,Star Bulk Carriers,1,0,3,6,6,1.0
+TDTH,Trident Digital Tech,1,0,3,6,1,1.0
+TRAW,Traws Pharma,1,0,3,6,4,1.0
+WFRD,Weatherford International,1,0,3,6,1,1.0
+XLO,Xilio Therapeutics,1,0,3,6,4,1.0
+AGIG,Abundia Global Impact,1,0,3,5,1,1.0
+ASTL,Algoma Steel,1,0,3,5,2,0.5
+CAG,ConAgra Brands,1,0,3,5,1,1.0
+CART,Maplebear,1,0,3,5,2,0.5
+CECO,CECO Environmental,1,0,3,5,3,1.0
+CNO,CNO Financial,1,0,3,5,0,
+DRIO,DarioHealth,1,0,3,5,6,0.8333
+ECAT,BlackRock ESG Capital Allocation Term Trust,1,0,3,5,0,
+EFOI,Energy Focus,1,0,3,5,6,0.3333
+EJH,E-Home Household Service,1,0,3,5,0,
+EVC,Entravision Communications,1,0,3,5,1,1.0
+GLO,Clough Global Opport,1,0,3,5,0,
+HAWK,HawkEye 360,1,0,3,5,0,
+IMCC,IM Cannabis,1,0,3,5,1,1.0
+JL,J-Long,1,0,3,5,0,
+KNRX,KNOREX,1,0,3,5,0,
+OM,Outset Medical,1,0,3,5,12,0.25
+PRPL,Purple Innovation,1,0,3,5,3,1.0
+PYXS,Pyxis Oncology,1,0,3,5,2,1.0
+RDAC,Rising Dragon Acquisition,1,0,3,5,0,
+STUB,StubHub,1,0,3,5,19,0.2105
+THH,TryHard,1,0,3,5,4,1.0
+VOXR,Vox Royalty,1,0,3,5,3,1.0
+VSH,Vishay Intertechnology,1,0,3,5,2,1.0
+AGRZ,Agroz,1,0,3,4,2,1.0
+ALVO,Alvotech,1,0,3,4,4,1.0
+CETY,Clean Energy Technologies,1,0,3,4,16,0.25
+DSGR,Distribution Solutions,1,0,3,4,9,0.3333
+DSS,DSS,1,0,3,4,4,1.0
+GLSI,Greenwich LifeSciences,1,0,3,4,0,
+JFIN,Jiayin,1,0,3,4,3,1.0
+KOSS,Koss,1,0,3,4,4,1.0
+KSCP,Knightscope,1,0,3,4,3,0.6667
+LCUT,Lifetime Brands,1,0,3,4,4,1.0
+LTRN,Lantern Pharma,1,0,3,4,3,1.0
+LXU,LSB Industries,1,0,3,4,0,
+MIMI,Mint Incorporation,1,0,3,4,1,1.0
+NIXX,Nixxy,1,0,3,4,2,1.0
+PLTY,YieldMax PLTR Option Income Strategy ETF,1,1,3,4,0,
+POWW,Outdoor,0,0,3,4,44,0.0
+PPL,PPL,0,0,3,4,86,0.0465
+PUR,Defiance Daily Target 2X Long PURR ETF,1,1,3,4,0,
+QFIN,Qfin,1,0,3,4,4,1.0
+SCYX,SCYNEXIS,1,0,3,4,3,1.0
+SNTI,Senti Biosciences,1,0,3,4,1,1.0
+SQFT,Presidio Property Trust,1,0,3,4,0,
+USGO,U.S. GoldMining,1,0,3,4,0,
+UUU,Universal Safety Products,1,0,3,4,1,1.0
+VLTO,Veralto,1,0,3,4,2,0.5
+ADVB,Advanced Biomed,1,0,3,3,0,
+BETR,Better Home & Finance,1,0,3,3,0,
+BGDE,Big Digital Energy,1,0,3,3,4,0.5
+BVS,Bioventus,1,0,3,3,3,1.0
+EXOZ,eXoZymes,1,0,3,3,3,1.0
+EZRA,Reliance Global,1,0,3,3,5,0.2
+FSV,FirstService,1,0,3,3,3,1.0
+GBR,New Concept Energy,1,0,3,3,0,
+GSM,Ferroglobe,1,0,3,3,3,1.0
+GTBP,GT Biopharma,1,0,3,3,2,1.0
+INVE,Identiv,1,0,3,3,1,1.0
+JANX,Janux Therapeutics,1,0,3,3,3,1.0
+JPEF,JPMorgan Equity Focus ETF,1,1,3,3,0,
+MANE,Veradermics,1,0,3,3,3,1.0
+MYSZ,My Size,1,0,3,3,2,1.0
+O,Realty Income,1,0,3,3,33,0.0
+ODYS,Odysight.ai,1,0,3,3,0,
+PIII,P3 Health Partners,1,0,3,3,0,
+PRMR,PeakShares RMR Prime Equity ETF,1,1,3,3,0,
+RHP,"Ryman Hospitality Properties, Inc. (REIT)",1,0,3,3,0,
+SEER,Seer,1,0,3,3,5,0.6
+SGC,Superior Group of Companies,1,0,3,3,0,
+SWAGW,Stran &,1,0,3,3,0,
+VELO,Velo3D,1,0,3,3,0,
+WTRG,Essential Utilities,1,0,3,3,3,1.0
+MS,Morgan Stanley,1,0,2,99,303,0.0726
+CVS,CVS Health,1,0,2,67,22,1.0
+EA,Electronic Arts,1,0,2,54,15,0.6
+ELF,e.l.f. Beauty,1,0,2,39,0,
+UAL,United Airlines,1,0,2,30,43,0.2558
+SNDL,SNDL Inc,1,0,2,27,2,1.0
+BMY,Bristol Myers Squibb,1,0,2,22,22,0.2727
+AFRM,Affirm,1,0,2,21,35,0.2571
+NVAX,Novavax,1,0,2,21,14,0.5
+MDT,Medtronic,1,0,2,19,21,0.4286
+TWLO,Twilio,1,0,2,18,16,0.6875
+VRTX,Vertex Pharmaceuticals,1,0,2,17,8,0.5
+MMM,3M,1,0,2,15,0,
+UL,Unilever,0,0,2,15,39,0.0513
+CHWY,Chewy,1,0,2,12,19,0.2632
+WKHS,Workhorse,0,0,2,11,20,0.05
+SHEL,Shell,0,0,2,9,283,0.0141
+YUM,Yum Brands,1,0,2,6,4,0.25
+DDOG,Datadog,1,0,1,37,24,0.5417
+ZS,Zscaler,1,0,1,37,26,0.4615
+KKR,KKR,1,0,1,34,36,0.9444
+ABBV,AbbVie,1,0,1,26,41,0.1951
+OKTA,Okta,1,0,1,24,36,0.6667
+ABT,Abbott,1,0,1,20,33,0.3333
+MDB,MongoDB,1,0,1,19,19,0.4211
+CCL,Carnival,1,0,1,17,28,0.25
+LUV,Southwest Airlines,1,0,1,15,12,0.25
+SCHW,Charles Schwab,1,0,1,15,189,0.0212
+MGM,MGM Resorts,1,0,1,12,2,1.0
+XPEV,XPeng,1,0,1,12,33,0.2121
+BNTX,BioNTech,1,0,1,9,21,0.1429
+EBAY,eBay,1,0,1,9,80,0.1125
+HLT,Hilton,1,0,1,8,19,0.2105
+LVS,Las Vegas Sands,1,0,1,8,13,0.5385
+BIIB,Biogen,1,0,1,6,24,0.2083
+PENN,Penn Entertainment,1,0,1,3,2,0.0
+W,Wayfair,1,0,1,1,16,0.0
+GE,General Electric,1,0,0,135,17,0.4118
+TQQQ,ProShares UltraPro QQQ,1,1,0,90,0,
+TM,Toyota,0,0,0,41,104,0.0577
+CI,Cigna,1,0,0,36,26,0.3077
+MAR,Marriott,1,0,0,28,14,0.2857
+FDX,FedEx,1,0,0,23,62,0.1935
+HUM,Humana,1,0,0,17,36,0.3333
+DUK,Duke Energy,1,0,0,16,7,0.8571
+HON,Honeywell,1,0,0,15,42,0.1905
+ROKU,Roku,1,0,0,15,26,0.5769
+RCL,Royal Caribbean,1,0,0,14,9,0.4444
+DHR,Danaher,1,0,0,10,7,0.2857
+AMGN,Amgen,1,0,0,9,24,0.1667
+NCLH,Norwegian Cruise Line,1,0,0,9,9,0.3333
+ULTA,Ulta Beauty,1,0,0,9,7,0.2857
+BBBY,Bed Bath & Beyond,1,0,0,7,0,
+ZG,Zillow Group,1,0,0,6,1,1.0
+WYNN,Wynn Resorts,1,0,0,5,2,1.0
+SYF,Synchrony,1,0,0,3,9,0.2222
+VFS,VinFast,1,0,0,1,1,1.0
+Z,Zillow,0,0,0,0,27,0.0

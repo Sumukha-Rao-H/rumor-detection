@@ -15,6 +15,7 @@ venv/
 # Data (raw dumps, DB, caches are never committed)
 data/raw/arctic_dumps/*
 data/raw/live_json/*
+data/raw/symbol_dir/*
 data/db/*
 data/processed/*
 data/llm_cache/
