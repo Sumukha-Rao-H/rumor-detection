@@ -93,6 +93,12 @@ event:
   min_posts: 2
   min_solo_score: 50
   label_horizon_hours: 72
+  # Index/sector ETFs have no company-specific claim for news to confirm or
+  # deny, so they cannot be rumors in the §6.2 sense. Set false to keep them.
+  exclude_etfs: true
+  # Seed events only from tickers named in the post title when there are any:
+  # a $BBAI post that name-drops PLTR is not a PLTR rumor.
+  title_ticker_priority: true
 
 state:
   embed_model: "sentence-transformers/all-MiniLM-L6-v2"

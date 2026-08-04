@@ -51,7 +51,7 @@ The authoritative design document is [`implementation_plan.md`](implementation_p
 |---|---|
 | 0 — Environment setup | ✅ repo layout, config, requirements |
 | 1 — Data acquisition (§5) | ✅ Reddit collection complete (2026-08-04): 106.9k posts / 134.1k ticker links across all 577 days of the window, 5 subreddits. 3.7M hourly bars (1,566 tickers). News is a smoke test only — real collection is per-event in §6.4. |
-| 2 — Event construction & labeling (§6) | 🟡 §6.1 ticker extraction done (`pipeline/tickers.py`, `pipeline/build_universe.py`); §6.2 rumor filtering onward not started |
+| 2 — Event construction & labeling (§6) | 🟡 §6.1 extraction + §6.2 keyword pre-filter + §6.3 clustering done (`pipeline/events.py`): **4,770 unlabeled candidate events**, 866 tickers, 2025-01-01..2026-07-28. §6.2 LLM triage and §6.4 labeling not started |
 | 3 — Features & state (§7) | ⏳ not started |
 | 4 — RL environment (§8) | ⏳ not started |
 | 5 — Training (§9) | ⏳ not started |
@@ -73,6 +73,23 @@ Hand-written names live in `config/tickers_curated.csv` (an input, never
 rewritten). After any rebuild, run `relink` or the DB keeps stale links.
 Matching is tiered — cashtags need a listed symbol, bare tokens need the core
 universe, company names need `name_match=1` (see `pipeline/tickers.py`).
+
+### Event set (regenerate, don't hand-edit) — 2026-08-04
+
+```
+python -m src.pipeline.events [--dry-run]   # keyword pre-filter + clustering
+```
+
+Idempotent: `event_id` is `{ticker}-{t0_utc}`, re-runs upsert, and events that
+clustering no longer produces are pruned **unless** they carry a label or
+`human_reviewed=1`. Labeling fields are never overwritten by a re-run — that
+guarantee is what makes it safe to re-cluster after §6.2 triage.
+
+Two deviations from a literal reading of §6.3, both measured (see git log):
+`event.title_ticker_priority` seeds events only from tickers named in the post
+title when there are any (a $BBAI post that name-drops PLTR was creating a PLTR
+event: −19% events, all noise), and `event.exclude_etfs` drops index funds,
+which have no company claim to confirm. Both are config-switchable.
 
 ### Phase 1 notes (2026-08-04)
 

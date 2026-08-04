@@ -41,9 +41,17 @@ CREATE INDEX IF NOT EXISTS idx_news_ticker ON news (ticker, seen_utc);
 CREATE TABLE IF NOT EXISTS events (
   event_id TEXT PRIMARY KEY, ticker TEXT, t0_utc INTEGER, claim_summary TEXT,
   claim_type TEXT, post_ids TEXT, label INTEGER,  -- 1 TRUE, 0 FALSE, NULL unverified
-  t_official_utc INTEGER, label_source TEXT, human_reviewed INTEGER DEFAULT 0
+  t_official_utc INTEGER, label_source TEXT, human_reviewed INTEGER DEFAULT 0,
+  n_posts INTEGER, subreddits TEXT                -- plan §6.3 stores both
 );
+CREATE INDEX IF NOT EXISTS idx_events_ticker ON events (ticker, t0_utc);
 """
+
+# Columns added after the first DBs were created (plan §6.3). ALTER is the only
+# way to reach a table that CREATE TABLE IF NOT EXISTS silently skips.
+MIGRATIONS: dict[str, dict[str, str]] = {
+    "events": {"n_posts": "INTEGER", "subreddits": "TEXT"},
+}
 
 POST_COLUMNS = (
     "id", "subreddit", "title", "selftext", "author", "created_utc", "score",
@@ -60,7 +68,18 @@ def get_conn(db_path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns missing from DBs created by an earlier schema version."""
+    for table, columns in MIGRATIONS.items():
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    conn.commit()
 
 
 def upsert_posts(conn: sqlite3.Connection, posts: list[dict]) -> int:
@@ -147,6 +166,64 @@ def upsert_news(conn: sqlite3.Connection, rows: list[tuple]) -> int:
     conn.commit()
     after = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
     return after - before
+
+
+EVENT_COLUMNS = (
+    "event_id", "ticker", "t0_utc", "claim_summary", "claim_type", "post_ids",
+    "n_posts", "subreddits",
+)
+
+
+def upsert_events(conn: sqlite3.Connection, events: list[dict]) -> int:
+    """Insert/refresh clustered events. Returns the number of new rows.
+
+    Labeling fields (label, t_official_utc, label_source, human_reviewed) are
+    never touched: re-clustering must not throw away human review work
+    (plan §6.4 — "do not skip human review"). claim_summary/claim_type are only
+    overwritten when the caller supplies them, so re-running the clustering
+    pass does not wipe LLM triage output either.
+    """
+    if not events:
+        return 0
+    before = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    conn.executemany(
+        f"""
+        INSERT INTO events ({", ".join(EVENT_COLUMNS)})
+        VALUES ({", ".join(":" + c for c in EVENT_COLUMNS)})
+        ON CONFLICT(event_id) DO UPDATE SET
+          t0_utc = excluded.t0_utc,
+          post_ids = excluded.post_ids,
+          n_posts = excluded.n_posts,
+          subreddits = excluded.subreddits,
+          claim_summary = COALESCE(excluded.claim_summary, claim_summary),
+          claim_type = COALESCE(excluded.claim_type, claim_type)
+        """,
+        [{c: e.get(c) for c in EVENT_COLUMNS} for e in events],
+    )
+    conn.commit()
+    after = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    return after - before
+
+
+def prune_events(conn: sqlite3.Connection, keep_ids: set[str]) -> int:
+    """Delete events the current clustering no longer produces.
+
+    Anything a human has already touched (label set, or human_reviewed) is kept
+    regardless — re-running the pipeline must never destroy review work.
+    """
+    with conn:
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS _keep (event_id TEXT PRIMARY KEY)")
+        conn.execute("DELETE FROM _keep")
+        conn.executemany("INSERT OR IGNORE INTO _keep VALUES (?)",
+                         [(i,) for i in keep_ids])
+        cur = conn.execute(
+            """
+            DELETE FROM events
+            WHERE event_id NOT IN (SELECT event_id FROM _keep)
+              AND human_reviewed = 0 AND label IS NULL
+            """
+        )
+    return cur.rowcount
 
 
 def known_post_ids(conn: sqlite3.Connection, ids: list[str]) -> set[str]:
