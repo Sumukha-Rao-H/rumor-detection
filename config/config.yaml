@@ -121,5 +121,24 @@ split:
 
 llm:
   provider: gemini
-  fallback: groq
-  min_interval_s: 6
+  fallback: groq                  # used when the primary's daily quota runs out
+  min_interval_s: 6               # per-provider default
+  temperature: 0                  # plan Appendix D: deterministic labeling
+  max_output_tokens: 400
+  timeout_s: 90
+  quota_failures_before_fallback: 4
+  # Bump when a prompt changes — it is part of the cache key, so old answers
+  # are not silently reused for a different question.
+  prompt_version: "triage-v1"
+  gemini:
+    api_base: "https://generativelanguage.googleapis.com/v1beta"
+    # Pinned, not "-latest": a research dataset must be reproducible. Verified
+    # available 2026-08-04; 2.5-flash-lite is closed to new keys.
+    model: "gemini-3.5-flash-lite"
+    key_env: GEMINI_API_KEY
+    min_interval_s: 4.5           # free tier is ~15 req/min
+  groq:
+    api_base: "https://api.groq.com/openai/v1"
+    model: "llama-3.3-70b-versatile"
+    key_env: GROQ_API_KEY
+    min_interval_s: 2.5

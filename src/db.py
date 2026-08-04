@@ -45,12 +45,24 @@ CREATE TABLE IF NOT EXISTS events (
   n_posts INTEGER, subreddits TEXT                -- plan §6.3 stores both
 );
 CREATE INDEX IF NOT EXISTS idx_events_ticker ON events (ticker, t0_utc);
+
+-- LLM triage verdicts, one per (post, ticker) pair (plan §6.2 stage 2).
+-- Kept separate from posts so a prompt revision can be re-run without
+-- touching collected data.
+CREATE TABLE IF NOT EXISTS post_triage (
+  post_id TEXT, ticker TEXT, is_rumor INTEGER, claim_summary TEXT,
+  claim_type TEXT, provider TEXT, model TEXT, prompt_version TEXT,
+  created_utc INTEGER,
+  PRIMARY KEY (post_id, ticker)
+);
+CREATE INDEX IF NOT EXISTS idx_triage_rumor ON post_triage (is_rumor);
 """
 
 # Columns added after the first DBs were created (plan §6.3). ALTER is the only
 # way to reach a table that CREATE TABLE IF NOT EXISTS silently skips.
 MIGRATIONS: dict[str, dict[str, str]] = {
-    "events": {"n_posts": "INTEGER", "subreddits": "TEXT"},
+    "events": {"n_posts": "INTEGER", "subreddits": "TEXT",
+               "n_rumor_posts": "INTEGER"},
 }
 
 POST_COLUMNS = (
@@ -203,6 +215,47 @@ def upsert_events(conn: sqlite3.Connection, events: list[dict]) -> int:
     conn.commit()
     after = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     return after - before
+
+
+TRIAGE_COLUMNS = (
+    "post_id", "ticker", "is_rumor", "claim_summary", "claim_type",
+    "provider", "model", "prompt_version", "created_utc",
+)
+
+
+def upsert_triage(conn: sqlite3.Connection, rows: list[dict]) -> int:
+    """Store LLM triage verdicts; re-running a prompt version overwrites."""
+    if not rows:
+        return 0
+    before = conn.execute("SELECT COUNT(*) FROM post_triage").fetchone()[0]
+    conn.executemany(
+        f"""
+        INSERT INTO post_triage ({", ".join(TRIAGE_COLUMNS)})
+        VALUES ({", ".join(":" + c for c in TRIAGE_COLUMNS)})
+        ON CONFLICT(post_id, ticker) DO UPDATE SET
+          is_rumor = excluded.is_rumor,
+          claim_summary = excluded.claim_summary,
+          claim_type = excluded.claim_type,
+          provider = excluded.provider, model = excluded.model,
+          prompt_version = excluded.prompt_version,
+          created_utc = excluded.created_utc
+        """,
+        [{c: r.get(c) for c in TRIAGE_COLUMNS} for r in rows],
+    )
+    conn.commit()
+    after = conn.execute("SELECT COUNT(*) FROM post_triage").fetchone()[0]
+    return after - before
+
+
+def triaged_pairs(conn: sqlite3.Connection, prompt_version: str) -> set[tuple[str, str]]:
+    """(post_id, ticker) pairs already judged under this prompt version."""
+    return {
+        (row[0], row[1])
+        for row in conn.execute(
+            "SELECT post_id, ticker FROM post_triage WHERE prompt_version = ?",
+            (prompt_version,),
+        )
+    }
 
 
 def prune_events(conn: sqlite3.Connection, keep_ids: set[str]) -> int:
