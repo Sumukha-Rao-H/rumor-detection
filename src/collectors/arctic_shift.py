@@ -1,8 +1,9 @@
 """Historical Reddit collector — Arctic Shift (plan §5.1). Replaces PRAW entirely.
 
 Two modes:
-  dumps  — stream .zst dump files (newline-delimited JSON inside zstandard)
-           from data/raw/arctic_dumps/, never fully decompressing.
+  dumps  — stream dump files from data/raw/arctic_dumps/: .zst (newline-delimited
+           JSON inside zstandard, never fully decompressed), .jsonl and .jsonl.gz
+           as produced by the Arctic Shift download tool.
   api    — Arctic Shift REST API, paginating by created_utc. Free community
            service: throttled to <=1 req/sec with exponential backoff.
 
@@ -17,9 +18,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gzip
 import io
 import json
 import logging
+import re
+from collections.abc import Iterator
 from pathlib import Path
 
 import requests
@@ -34,23 +38,43 @@ from src.utils.timeutils import date_str_to_ts, ts_to_iso, utc_now_ts
 log = logging.getLogger(__name__)
 
 BATCH_SIZE = 5000  # posts per DB flush in dump mode
+PROGRESS_EVERY = 500_000  # lines between progress logs in dump mode
+DUMP_PATTERNS = ("*.zst", "*.jsonl", "*.jsonl.gz", "*.ndjson")
+
+# Cheap pre-parse timestamp probe: full-history dumps are mostly outside the
+# backtest window, and json.loads on every one of ~10M lines is the bottleneck.
+CREATED_UTC_RE = re.compile(rb'"created_utc"\s*:\s*"?(\d+)')
 
 
-def stream_zst(path: str | Path):
-    """Yield JSON records from a .zst newline-delimited dump, streaming."""
-    with open(path, "rb") as fh:
-        dctx = zstd.ZstdDecompressor(max_window_size=2**31)
-        stream = io.TextIOWrapper(
-            dctx.stream_reader(fh), encoding="utf-8", errors="ignore"
-        )
-        for line in stream:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                continue
+def iter_raw_lines(path: str | Path) -> Iterator[bytes]:
+    """Yield raw newline-delimited JSON lines from a .zst / .gz / plain dump.
+
+    Compressed dumps are streamed, never fully decompressed to disk or memory.
+    """
+    name = str(path)
+    if name.endswith(".zst"):
+        with open(path, "rb") as fh:
+            dctx = zstd.ZstdDecompressor(max_window_size=2**31)
+            with dctx.stream_reader(fh) as reader:
+                yield from io.BufferedReader(reader, buffer_size=1 << 20)
+    elif name.endswith(".gz"):
+        with gzip.open(path, "rb") as fh:
+            yield from fh
+    else:
+        with open(path, "rb") as fh:
+            yield from fh
+
+
+def stream_records(path: str | Path) -> Iterator[dict]:
+    """Yield parsed JSON records from a dump file, skipping malformed lines."""
+    for line in iter_raw_lines(path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            continue
 
 
 def record_to_post(rec: dict) -> dict | None:
@@ -90,11 +114,28 @@ class _Ingestor:
         self.end_ts = end_ts
         self.seen = 0
         self.kept = 0
+        self.out_of_window = 0
         self._posts: list[dict] = []
         self._links: list[tuple[str, str]] = []
 
+    def offer_raw(self, line: bytes) -> None:
+        """Dump-mode entry point: reject out-of-window lines without parsing JSON."""
+        match = CREATED_UTC_RE.search(line)
+        if match and not (self.start_ts <= int(match.group(1)) < self.end_ts):
+            self.seen += 1
+            self.out_of_window += 1
+            self._log_progress()
+            return
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            self.seen += 1
+            return
+        self.offer(rec)
+
     def offer(self, rec: dict) -> None:
         self.seen += 1
+        self._log_progress()
         post = record_to_post(rec)
         if post is None or not (self.start_ts <= post["created_utc"] < self.end_ts):
             return
@@ -107,6 +148,10 @@ class _Ingestor:
         if len(self._posts) >= BATCH_SIZE:
             self.flush()
 
+    def _log_progress(self) -> None:
+        if self.seen % PROGRESS_EVERY == 0:
+            log.info("progress: %d records seen, %d kept", self.seen, self.kept)
+
     def flush(self) -> None:
         if self._posts:
             db.upsert_posts(self.conn, self._posts)
@@ -115,18 +160,31 @@ class _Ingestor:
         log.info("progress: %d records seen, %d kept", self.seen, self.kept)
 
 
+def find_dumps(dump_dir: str | Path) -> list[Path]:
+    """Dump files in `dump_dir`, any supported format, deduped and sorted."""
+    dump_dir = Path(dump_dir)
+    found = {p for pattern in DUMP_PATTERNS for p in dump_dir.glob(pattern)}
+    return sorted(found)
+
+
 def ingest_dumps(cfg: dict, conn, ingestor: _Ingestor) -> None:
     dump_dir = Path(cfg["paths"]["arctic_dumps"])
-    files = sorted(dump_dir.glob("*.zst"))
+    files = find_dumps(dump_dir)
     if not files:
-        log.error("No .zst dumps in %s — download per-subreddit dumps from "
-                  "https://arctic-shift.photon-reddit.com/download-tool", dump_dir)
+        log.error("No dumps (%s) in %s — download per-subreddit dumps from "
+                  "https://arctic-shift.photon-reddit.com/download-tool",
+                  "/".join(DUMP_PATTERNS), dump_dir)
         return
     for path in files:
-        log.info("Streaming %s ...", path.name)
-        for rec in stream_zst(path):
-            ingestor.offer(rec)
+        before_seen, before_kept = ingestor.seen, ingestor.kept
+        log.info("Streaming %s (%.1f GB) ...", path.name,
+                 path.stat().st_size / 1e9)
+        for line in iter_raw_lines(path):
+            if line.strip():
+                ingestor.offer_raw(line)
         ingestor.flush()
+        log.info("%s: %d records scanned, %d kept", path.name,
+                 ingestor.seen - before_seen, ingestor.kept - before_kept)
 
 
 def ingest_api(cfg: dict, conn, ingestor: _Ingestor, subreddits: list[str]) -> None:
@@ -204,8 +262,9 @@ def main() -> None:
 
     ingestor.flush()
     total = conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
-    log.info("Done. %d records scanned, %d kept this run; posts table now has %d rows.",
-             ingestor.seen, ingestor.kept, total)
+    log.info("Done. %d records scanned (%d outside the backtest window), "
+             "%d kept this run; posts table now has %d rows.",
+             ingestor.seen, ingestor.out_of_window, ingestor.kept, total)
 
 
 if __name__ == "__main__":

@@ -50,8 +50,30 @@ The authoritative design document is [`implementation_plan.md`](implementation_p
 | Phase | Status |
 |---|---|
 | 0 — Environment setup | ✅ repo layout, config, requirements |
-| 1 — Data acquisition (§5) | ✅ collectors implemented: arctic_shift, reddit_live, market, news — **data collection runs pending**. Known issue (2026-07-03): unauthenticated reddit.com `.json` returns 403 from the dev network (www + old, any UA) — the plan's anticipated risk. Poller auto-rotates hosts; if it persists, use the Arctic Shift API with recent dates as the near-live fallback (§5.2 fallback c). |
+| 1 — Data acquisition (§5) | 🟡 collectors implemented; historical dumps ingested (2026-08-04): 66.8k posts / 86.2k ticker links / 3.7M bars / 320 news rows. Open gaps below. |
 | 2 — Event construction & labeling (§6) | ⏳ not started (minimal `pipeline/tickers.py` pulled forward — collectors need it to filter posts) |
+
+### Phase 1 open gaps (2026-08-04)
+
+- **Post count is 66.8k, below the §5.1 target of ≥200k.** Three causes, in impact
+  order: (a) `config/tickers.csv` holds only 241 tickers, so the universe filter
+  drops most posts; (b) `r_wallstreetbets_posts.jsonl` is a truncated download —
+  it ends 2021-01-29, so no WSB post in the backtest window comes from a dump
+  (the 18.2k WSB rows are all from the API run, covering only 182 days);
+  (c) ingestion honours `backtest_window.end: 2026-05-31`, while the dumps run
+  through 2026-07-28.
+- **Ticker precision needs the §6.1 empirical prune.** Company-name matching fires
+  on ordinary words: `target` → TGT (3.9k links), `reddit` → RDDT (5.6k), `block`
+  → SQ, `shell` → SHEL. Those nine names alone are 12% of all links. A further
+  18.8% of links are cashtags for symbols outside the universe (mix of real
+  small caps and pump spam) — no bars can be fetched for them as-is.
+- **Live poller still blocked** (2026-07-03): unauthenticated reddit.com `.json`
+  returns 403 from the dev network (www + old, any UA) — the plan's anticipated
+  risk. Poller auto-rotates hosts; if it persists, use the Arctic Shift API with
+  recent dates as the near-live fallback (§5.2 fallback c).
+- `data/raw/arctic_dumps/*.crswap` (2.9 GB) are partial browser-download temp
+  files, safe to delete. Comment dumps are scanned but never stored — the schema
+  has no comments table.
 | 3 — Features & state (§7) | ⏳ not started |
 | 4 — RL environment (§8) | ⏳ not started |
 | 5 — Training (§9) | ⏳ not started |
