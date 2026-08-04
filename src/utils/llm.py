@@ -106,6 +106,12 @@ class LLMClient:
             blob = json.loads(path.read_text(encoding="utf-8"))
         except ValueError:
             return None
+        if not isinstance(blob.get("data"), dict):
+            # A reply cached in the wrong shape would fail identically on every
+            # future run — a permanent crash loop for a resumable job. Treat it
+            # as a miss so the next call overwrites it.
+            log.warning("discarding malformed cache entry %s", path.name)
+            return None
         return LLMReply(blob["data"], blob.get("provider", "?"),
                         blob.get("model", "?"), cached=True)
 
@@ -251,19 +257,35 @@ class _BadKey(Exception):
     """This key will never work: revoked, mistyped, or not enabled for the API."""
 
 
+def _as_object(data: object, text: str) -> dict:
+    """Coerce a parsed reply to the single object callers expect.
+
+    Asking for one JSON object occasionally yields `[{...}]` — the model
+    answering in a list of one. Unwrapping is free; anything else is a reply we
+    genuinely cannot use, and it is the *prompt* that failed, not the key, so it
+    raises LLMRefused and the caller skips that item instead of dying.
+    """
+    if isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict):
+        return data[0]
+    if not isinstance(data, dict):
+        raise LLMRefused(f"expected a JSON object, got {type(data).__name__}: "
+                         f"{text[:200]!r}")
+    return data
+
+
 def parse_json(text: str) -> dict:
     """Parse a model reply as JSON, tolerating markdown fences and preamble."""
     text = (text or "").strip()
     if not text:
-        raise LLMError("empty response")
+        raise LLMRefused("empty response")
     try:
-        return json.loads(text)
+        return _as_object(json.loads(text), text)
     except ValueError:
         pass
     match = JSON_BLOCK_RE.search(text)
     if not match:
-        raise LLMError(f"no JSON object in response: {text[:200]!r}")
+        raise LLMRefused(f"no JSON object in response: {text[:200]!r}")
     try:
-        return json.loads(match.group(0))
+        return _as_object(json.loads(match.group(0)), text)
     except ValueError as exc:
-        raise LLMError(f"malformed JSON: {text[:200]!r}") from exc
+        raise LLMRefused(f"malformed JSON: {text[:200]!r}") from exc

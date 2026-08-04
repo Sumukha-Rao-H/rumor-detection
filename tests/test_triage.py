@@ -143,6 +143,67 @@ def test_triage_writes_verdicts_and_drops_empty_claims(tmp_path):
     assert rows["a2"][1] == 0
 
 
+def test_one_unusable_reply_does_not_end_the_batch(tmp_path):
+    """A list-shaped reply crash-looped a 4,275-pair run; it must now skip."""
+    conn = db.get_conn(tmp_path / "t.db")
+    _seed_event(conn, "A-1", "AAA", [("a1", "bad shape", 9)])
+    _seed_event(conn, "B-1", "BBB", [("b1", "merger news", 5)])
+
+    class Wobbly(FakeClient):
+        def complete_json(self, prompt, cache_key):
+            if "bad shape" in prompt:
+                return _Reply([{"is_rumor": False}])      # a list, not an object
+            return _Reply({"is_rumor": True, "claim_summary": "BBB merging",
+                           "claim_type": "merger"})
+
+    stats = triage(conn, _cfg(), Wobbly({}))
+    assert stats["skipped"] == 1 and stats["done"] == 1 and "aborted" not in stats
+    assert conn.execute("SELECT COUNT(*) FROM post_triage").fetchone()[0] == 1
+
+
+def test_a_model_answering_nothing_usably_aborts_loudly(tmp_path):
+    """Silently skipping thousands would look like success. It is not."""
+    from src.pipeline.triage import MAX_CONSECUTIVE_SKIPS
+
+    conn = db.get_conn(tmp_path / "t.db")
+    posts = [(f"p{i}", f"title {i}", 100 - i)
+             for i in range(MAX_CONSECUTIVE_SKIPS + 5)]
+    _seed_event(conn, "A-1", "AAA", posts)
+
+    class AlwaysGarbage(FakeClient):
+        def complete_json(self, prompt, cache_key):
+            self.calls += 1
+            return _Reply(["nonsense"])
+
+    client = AlwaysGarbage({})
+    stats = triage(conn, _cfg(), client)
+    assert stats["aborted"] == 1
+    assert stats["skipped"] == MAX_CONSECUTIVE_SKIPS
+    assert client.calls == MAX_CONSECUTIVE_SKIPS      # stopped, not ground on
+
+
+def test_skips_reset_on_a_good_reply(tmp_path):
+    """Occasional garbage between good answers must not trip the abort."""
+    from src.pipeline.triage import MAX_CONSECUTIVE_SKIPS
+
+    conn = db.get_conn(tmp_path / "t.db")
+    posts = [(f"p{i}", f"title {i}", 100 - i)
+             for i in range(MAX_CONSECUTIVE_SKIPS * 2)]
+    _seed_event(conn, "A-1", "AAA", posts)
+
+    class EveryOther(FakeClient):
+        def complete_json(self, prompt, cache_key):
+            self.calls += 1
+            if self.calls % 2:
+                return _Reply([])
+            return _Reply({"is_rumor": False, "claim_summary": "",
+                           "claim_type": "other"})
+
+    stats = triage(conn, _cfg(), EveryOther({}))
+    assert "aborted" not in stats
+    assert stats["done"] == MAX_CONSECUTIVE_SKIPS
+
+
 def test_refresh_events_uses_top_scoring_rumor_as_seed(tmp_path):
     conn = db.get_conn(tmp_path / "t.db")
     _seed_event(conn, "A-1", "AAA",

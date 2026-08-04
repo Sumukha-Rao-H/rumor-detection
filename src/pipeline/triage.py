@@ -44,6 +44,9 @@ log = logging.getLogger(__name__)
 CLAIM_TYPES = ("merger", "bankruptcy", "regulatory", "earnings", "contract",
                "legal", "offering", "other")
 BODY_CHARS = 1500  # Appendix D.1: selftext[:1500]
+# One garbled reply is a quirk; this many in a row means the model or the
+# prompt is broken, and skipping the rest of the batch would hide it.
+MAX_CONSECUTIVE_SKIPS = 20
 
 PROMPT = """You are labeling Reddit posts about stocks for a research dataset.
 A "rumor" is an unverified factual claim about a specific company that could \
@@ -131,6 +134,8 @@ def pending_pairs(conn, cfg: dict, prompt_version: str,
 
 def normalize(data: dict) -> dict:
     """Coerce a model reply into the three fields we store."""
+    if not isinstance(data, dict):
+        raise LLMRefused(f"reply was {type(data).__name__}, not an object")
     claim_type = str(data.get("claim_type") or "other").strip().lower()
     if claim_type not in CLAIM_TYPES:
         claim_type = "other"
@@ -156,6 +161,7 @@ def triage(conn, cfg: dict, client: LLMClient, limit: int | None = None,
     log.info("%d pairs to triage under prompt %s", len(pairs), prompt_version)
 
     stats = Counter()
+    consecutive_skips = 0
     for i, pair in enumerate(pairs, 1):
         prompt = build_prompt(pair)
         try:
@@ -163,16 +169,25 @@ def triage(conn, cfg: dict, client: LLMClient, limit: int | None = None,
             # under many ids (8.5% of pairs), and an identical prompt has an
             # identical answer. Resumability still comes from post_triage rows.
             reply = client.complete_json(prompt, cache_key=content_key(prompt))
+            fields = normalize(reply.data)
         except LLMRefused as exc:
-            # One unanswerable post must not end a run of thousands.
+            # One unanswerable post must not end a run of thousands — but a
+            # model that answers *nothing* usably is breakage to surface, not
+            # 4,000 silent skips.
             log.warning("skipping %s/%s: %s", pair.post_id, pair.ticker, exc)
             stats["skipped"] += 1
+            consecutive_skips += 1
+            if consecutive_skips >= MAX_CONSECUTIVE_SKIPS:
+                log.error("%d unusable replies in a row — stopping",
+                          consecutive_skips)
+                stats["aborted"] = 1
+                break
             continue
         except LLMError as exc:
             log.error("giving up at pair %d/%d: %s", i, len(pairs), exc)
             stats["aborted"] = 1
             break
-        fields = normalize(reply.data)
+        consecutive_skips = 0
         if fields["is_rumor"] and not fields["claim_summary"]:
             fields["is_rumor"] = 0
         db.upsert_triage(conn, [{
@@ -240,10 +255,12 @@ def main() -> None:
         client = LLMClient(cfg)
         stats = triage(conn, cfg, client, limit=args.limit,
                        seeds_only=args.seeds_only)
-        log.info("triaged %d pairs: %d rumors (%.0f%%), %d api calls, %d cached",
+        log.info("triaged %d pairs: %d rumors (%.0f%%), %d api calls, "
+                 "%d cached, %d skipped, %d key rotations",
                  stats.get("done", 0), stats.get("rumor", 0),
                  100 * stats.get("rumor", 0) / max(stats.get("done", 0), 1),
-                 client.calls, client.cache_hits)
+                 client.calls, client.cache_hits, stats.get("skipped", 0),
+                 client.key_rotations)
         types = {k[5:]: v for k, v in stats.items() if k.startswith("type:")}
         if types:
             log.info("claim types: %s", ", ".join(

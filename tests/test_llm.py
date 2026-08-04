@@ -67,6 +67,33 @@ def test_parse_json_raises_rather_than_guessing(raw):
         parse_json(raw)
 
 
+def test_parse_json_unwraps_a_one_element_list():
+    """Observed live: the model answered `[{...}]` and crashed the run."""
+    assert parse_json('[{"is_rumor": false}]') == {"is_rumor": False}
+
+
+@pytest.mark.parametrize("raw", ['[1, 2]', '"just a string"', '[{"a": 1}, {"b": 2}]'])
+def test_unusable_shapes_are_refused_not_fatal(raw):
+    """A reply we cannot read is this prompt's problem: skip it, don't abort."""
+    with pytest.raises(LLMRefused):
+        parse_json(raw)
+
+
+def test_a_malformed_cache_entry_is_re_asked_not_replayed(tmp_path, monkeypatch):
+    """A bad shape on disk would otherwise fail identically on every re-run."""
+    cfg = _cfg(tmp_path)
+    client = LLMClient(cfg)
+    cache = tmp_path / "cache"
+    cache.mkdir(exist_ok=True)
+    path = client._cache_path("k", "gem-1")
+    path.write_text(json.dumps({"cache_key": "k", "provider": "gemini",
+                                "model": "gem-1", "data": [{"is_rumor": False}]}))
+
+    monkeypatch.setattr(client, "_request", lambda p, prompt, key: '{"n": 1}')
+    assert client.complete_json("prompt", cache_key="k").data == {"n": 1}
+    assert json.loads(path.read_text())["data"] == {"n": 1}   # repaired on disk
+
+
 def test_cache_prevents_a_second_call(tmp_path, monkeypatch):
     client = LLMClient(_cfg(tmp_path))
     calls = []
