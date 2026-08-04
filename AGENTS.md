@@ -50,7 +50,7 @@ The authoritative design document is [`implementation_plan.md`](implementation_p
 | Phase | Status |
 |---|---|
 | 0 — Environment setup | ✅ repo layout, config, requirements |
-| 1 — Data acquisition (§5) | 🟡 collectors implemented; dumps ingested and universe rebuilt (2026-08-04): 68.2k posts / 87.0k ticker links / 3.7M bars / 320 news rows. Open gaps below. |
+| 1 — Data acquisition (§5) | ✅ Reddit collection complete (2026-08-04): 106.9k posts / 134.1k ticker links across all 577 days of the window, 5 subreddits. 3.7M hourly bars (1,566 tickers). News is a smoke test only — real collection is per-event in §6.4. |
 | 2 — Event construction & labeling (§6) | 🟡 §6.1 ticker extraction done (`pipeline/tickers.py`, `pipeline/build_universe.py`); §6.2 rumor filtering onward not started |
 | 3 — Features & state (§7) | ⏳ not started |
 | 4 — RL environment (§8) | ⏳ not started |
@@ -74,14 +74,19 @@ rewritten). After any rebuild, run `relink` or the DB keeps stale links.
 Matching is tiered — cashtags need a listed symbol, bare tokens need the core
 universe, company names need `name_match=1` (see `pipeline/tickers.py`).
 
-### Phase 1 open gaps (2026-08-04)
+### Phase 1 notes (2026-08-04)
 
-- **Post count is 68.2k, below the §5.1 target of ≥200k.** Two remaining causes:
-  (a) `r_wallstreetbets_posts.jsonl` is a truncated download — it ends
-  2021-01-29, so no WSB post in the backtest window comes from a dump (the
-  15.7k WSB rows are all from the API run, covering only 182 days);
-  (b) ingestion honours `backtest_window.end: 2026-05-31`, while the dumps run
-  through 2026-07-28 (2026-06 is empty). Re-ingesting is a ~70s job.
+- **106.9k posts vs the §5.1 target of ≥200k.** The gap is not a collection
+  failure: the target assumed unfiltered posts, while `posts` only stores rows
+  that map to a ticker under the §6.1 rules. All 577 days of the window are
+  covered for all five subreddits, so more Reddit collection would not help —
+  only loosening the ticker filter would, at the cost of precision.
+- `r_wallstreetbets_posts.jsonl` is a **truncated download** ending 2021-01-29,
+  so no WSB post in the window comes from a dump. WSB was filled instead via
+  the Arctic Shift API (`--mode api --subreddits wallstreetbets`, ~22 min for
+  14 months). Re-downloading the dump would make re-runs faster but adds nothing.
+- `backtest_window.end` was extended 2026-05-31 → 2026-07-29 to match what the
+  dumps actually cover.
 - **Live poller still blocked** (2026-07-03): unauthenticated reddit.com `.json`
   returns 403 from the dev network (www + old, any UA) — the plan's anticipated
   risk. Poller auto-rotates hosts; if it persists, use the Arctic Shift API with

@@ -17,7 +17,10 @@ subreddits: [wallstreetbets, stocks, StockMarket, investing, pennystocks]
 
 backtest_window:
   start: "2025-01-01"
-  end: "2026-05-31"
+  # Extended 2026-08-04 from 2026-05-31 to the last day the downloaded dumps
+  # actually cover (their newest record is 2026-07-28), gaining two months of
+  # events at no collection cost. End is exclusive.
+  end: "2026-07-29"
 
 reddit:
   user_agent: "nmamit-major-project-31:v1.0 (academic research)"
