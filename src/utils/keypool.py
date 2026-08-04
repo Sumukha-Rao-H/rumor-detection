@@ -61,6 +61,29 @@ def classify_quota(text: str) -> str:
     return UNKNOWN
 
 
+# The closing quote is optional: an error stored by an older, truncating
+# version of this code can end mid-message, and that is exactly the text most
+# in need of tidying.
+MESSAGE_RE = re.compile(r'"message"\s*:\s*"([^"]*)')
+STATUS_RE = re.compile(r"HTTP (\d+):?\s*")
+
+
+def short_reason(reason: str) -> str:
+    """Reduce a provider error to one readable line.
+
+    Both vendors answer with pretty-printed JSON, so the raw string is a dozen
+    lines of braces around one useful sentence. Keeping the status code and
+    that sentence is what makes `keypool` output scannable. Idempotent, so
+    re-shortening an already-shortened reason is a no-op.
+    """
+    reason = " ".join(reason.split())
+    status = STATUS_RE.match(reason)
+    prefix = f"HTTP {status.group(1)}: " if status else ""
+    body = reason[status.end():] if status else reason
+    message = MESSAGE_RE.search(body)
+    return (prefix + (message.group(1) if message else body).strip())[:110]
+
+
 def fingerprint(value: str) -> str:
     """Short, non-reversible id for a secret — safe to write to disk and logs."""
     return hashlib.sha1(value.encode()).hexdigest()[:12]
@@ -166,7 +189,9 @@ class KeyPool:
             entry = entries.get(key.fingerprint)
             if entry and entry.get("cooling_until", 0) > now:
                 key.cooling_until = int(entry["cooling_until"])
-                key.reason = entry.get("reason", "")
+                # Shorten on read too, so state written before short_reason()
+                # existed displays cleanly without waiting to be re-cooled.
+                key.reason = short_reason(entry.get("reason", ""))
 
     def _save_state(self) -> None:
         try:
@@ -216,14 +241,31 @@ class KeyPool:
             key.cooling_until = FOREVER
         else:
             key.cooling_until = now + self.cooldown_s
-        key.reason = " ".join(reason.split())[:120]   # provider JSON is multi-line
+        key.reason = short_reason(reason)
         self._save_state()
         log.warning("%s %s out of rotation: %s", self.provider, key.label,
                     key.status(now))
 
     def describe(self) -> str:
+        """A one-line summary for logs and exceptions.
+
+        Deliberately not per-key: this string lands in every "no keys left"
+        error, and spelling out twelve keys' states buried the two facts that
+        matter — how many are left and when the next one returns. Run
+        `python -m src.utils.keypool` for the full table.
+        """
         now = utc_now_ts()
-        return "; ".join(f"{k.label}={k.status(now)}" for k in self.keys)
+        disabled = [k for k in self.keys if k.cooling_until >= FOREVER]
+        cooling = [k for k in self.keys
+                   if not k.is_available(now) and k.cooling_until < FOREVER]
+        parts = [f"{len(self.available(now))}/{len(self.keys)} ready"]
+        if cooling:
+            soonest = min(k.cooling_until for k in cooling)
+            parts.append(f"{len(cooling)} cooling until {ts_to_iso(soonest)}")
+        if disabled:
+            parts.append(f"{len(disabled)} disabled "
+                         f"({', '.join(k.label for k in disabled)})")
+        return ", ".join(parts)
 
     def reset(self) -> None:
         """Put every key back in rotation — for after a key is re-issued."""

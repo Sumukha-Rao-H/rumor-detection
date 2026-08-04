@@ -12,6 +12,7 @@ from src.utils.keypool import (
     KeyPool,
     NoKeysAvailable,
     classify_quota,
+    short_reason,
     discover_keys,
 )
 from src.utils.timeutils import next_midnight_ts, utc_now_ts
@@ -199,12 +200,48 @@ def test_reset_puts_every_key_back(tmp_path, monkeypatch):
     assert len(KeyPool("gemini", cfg).available()) == 2
 
 
-def test_reason_is_flattened_to_one_line(tmp_path, monkeypatch):
+def test_reason_keeps_the_sentence_and_drops_the_json(tmp_path, monkeypatch):
     """Provider errors are multi-line JSON; `keypool` output must stay readable."""
     monkeypatch.setenv("GEMINI_API_KEY", "k")
     pool = KeyPool("gemini", _cfg(tmp_path))
-    pool.cool(pool.keys[0], DAY, '{\n  "error": {\n    "code": 429\n  }\n}')
-    assert "\n" not in pool.keys[0].reason
+    pool.cool(pool.keys[0], DAY, 'HTTP 429 {\n  "error": {\n    "code": 429,\n'
+                                 '    "message": "You exceeded your quota"\n  }\n}')
+    assert pool.keys[0].reason == "HTTP 429: You exceeded your quota"
+
+
+def test_short_reason_falls_back_to_flattening():
+    assert short_reason("connection\n  reset") == "connection reset"
+
+
+def test_short_reason_handles_a_message_cut_off_mid_string():
+    """State written by the earlier truncating version ends without its quote."""
+    assert short_reason('HTTP 429 { "error": { "code": 429, "message": '
+                        '"You exceeded your current quota, please check your pl'
+                        ) == "HTTP 429: You exceeded your current quota, please check your pl"
+
+
+def test_short_reason_is_idempotent():
+    """It runs on write *and* on read; twice must not mean 'HTTP 429: HTTP 429'."""
+    once = short_reason('HTTP 403 {"error": {"message": "Denied access."}}')
+    assert once == "HTTP 403: Denied access."
+    assert short_reason(once) == once
+
+
+def test_describe_summarises_instead_of_listing_every_key(tmp_path, monkeypatch):
+    """This string lands in every error; twelve key states made logs unreadable."""
+    for i in range(1, 13):
+        monkeypatch.setenv(f"GEMINI_API_KEY_{i}", f"k{i}")
+    pool = KeyPool("gemini", _cfg(tmp_path))
+    for key in pool.keys[:9]:
+        pool.cool(key, DAY, "HTTP 429 spent")
+    for key in pool.keys[9:11]:
+        pool.cool(key, "disabled", "HTTP 403 denied")
+
+    summary = pool.describe()
+    assert summary.startswith("1/12 ready")
+    assert "9 cooling until" in summary
+    assert "2 disabled (GEMINI_API_KEY_10, GEMINI_API_KEY_11)" in summary
+    assert len(summary) < 200 and summary.count("GEMINI_API_KEY") == 2
 
 
 def test_state_is_per_provider(tmp_path, monkeypatch):
