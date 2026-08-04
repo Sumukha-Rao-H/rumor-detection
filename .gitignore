@@ -19,6 +19,7 @@ data/raw/symbol_dir/*
 data/db/*
 data/processed/*
 data/llm_cache/
+data/llm_state.json
 !data/**/.gitkeep
 
 # ML artifacts

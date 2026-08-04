@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from src import db
 from src.pipeline.events import keyword_regex
 from src.utils.config import load_config
-from src.utils.llm import LLMClient, LLMError
+from src.utils.llm import LLMClient, LLMError, LLMRefused
 from src.utils.timeutils import utc_now_ts
 
 log = logging.getLogger(__name__)
@@ -163,6 +163,11 @@ def triage(conn, cfg: dict, client: LLMClient, limit: int | None = None,
             # under many ids (8.5% of pairs), and an identical prompt has an
             # identical answer. Resumability still comes from post_triage rows.
             reply = client.complete_json(prompt, cache_key=content_key(prompt))
+        except LLMRefused as exc:
+            # One unanswerable post must not end a run of thousands.
+            log.warning("skipping %s/%s: %s", pair.post_id, pair.ticker, exc)
+            stats["skipped"] += 1
+            continue
         except LLMError as exc:
             log.error("giving up at pair %d/%d: %s", i, len(pairs), exc)
             stats["aborted"] = 1

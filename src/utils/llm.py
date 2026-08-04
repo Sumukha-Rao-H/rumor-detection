@@ -5,14 +5,18 @@ Talks to Gemini and Groq over plain REST — neither vendor SDK is a dependency,
 so nothing here breaks when an SDK version moves, and both providers go through
 the project's existing RateLimiter/Backoff instead of their own retry logic.
 
-Three properties everything downstream relies on:
+Four properties everything downstream relies on:
 
   cached      every answer is written to data/llm_cache/ keyed by the caller's
               logical id plus the prompt version, so a re-run costs nothing and
               an interrupted multi-day job resumes exactly where it stopped.
-  failover    when the primary provider's daily quota runs out (repeated 429s)
-              the client switches to the fallback for the rest of the session
-              rather than dying halfway through a batch.
+  rotated     each provider draws from a KeyPool (see utils/keypool.py). A key
+              that hits its daily limit steps out until the provider's quota
+              resets and the run continues on the next key, so N free keys are
+              N times the daily budget rather than a manual swap.
+  failover    only when *every* key for the provider is spent does the client
+              move to the fallback provider — a model change is a dataset
+              change (§6.2), so it must be the last resort, not the first.
   strict      responses are parsed as JSON or raise; a model that returns prose
               is a bug to see, not a row to silently drop.
 """
@@ -28,17 +32,35 @@ from pathlib import Path
 
 import requests
 
-from src.utils.config import require_env
-from src.utils.ratelimit import Backoff, RateLimiter
+from src.utils.keypool import (
+    DAY,
+    UNKNOWN,
+    KeyPool,
+    NoKeysAvailable,
+    classify_quota,
+)
+from src.utils.ratelimit import Backoff
 
 log = logging.getLogger(__name__)
 
 JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 QUOTA_STATUSES = {429, 503}
+# A key the provider refuses outright: revoked, mistyped, or never enabled for
+# this API. Retrying cannot fix it, so the key leaves the pool for the session.
+BAD_KEY_STATUSES = {400, 401, 403}
 
 
 class LLMError(RuntimeError):
     """Raised when no provider could answer, or the answer was not JSON."""
+
+
+class LLMRefused(LLMError):
+    """The provider rejected this *prompt* (e.g. a safety block).
+
+    Distinct from LLMError because the fix is different: no key or provider is
+    at fault, so retrying or rotating just burns quota on a post that will
+    never be answered. Callers skip the item and move on.
+    """
 
 
 @dataclass
@@ -61,14 +83,10 @@ class LLMClient:
             order.append(self.cfg["fallback"])
         self.providers = order
         self._active = 0
-        self._limiters = {
-            name: RateLimiter(self.cfg[name].get("min_interval_s",
-                                                 self.cfg["min_interval_s"]))
-            for name in order
-        }
-        self._keys: dict[str, str] = {}
+        self._pools = {name: KeyPool(name, cfg) for name in order}
         self.calls = 0
         self.cache_hits = 0
+        self.key_rotations = 0
 
     # ---------------------------------------------------------------- caching
 
@@ -112,41 +130,64 @@ class LLMClient:
             if cached is not None:
                 self.cache_hits += 1
                 return cached
-            backoff = Backoff(base_s=20)
-            for _ in range(self.cfg["quota_failures_before_fallback"]):
-                self._limiters[name].wait()
-                try:
-                    text = self._request(name, prompt)
-                except _Retryable as exc:
-                    last_error = str(exc)
-                    backoff.sleep(f"{name}: {exc}")
-                    continue
-                except requests.RequestException as exc:
-                    last_error = str(exc)
-                    backoff.sleep(f"{name}: {exc}")
-                    continue
-                self.calls += 1
-                reply = LLMReply(parse_json(text), name, model, cached=False)
-                self._write_cache(cache_key, reply)
-                return reply
+            try:
+                return self._ask_provider(name, model, prompt, cache_key)
+            except NoKeysAvailable as exc:
+                last_error = str(exc)
             log.warning("%s exhausted (%s) — switching provider", name, last_error)
             self._active += 1
         raise LLMError(f"all providers failed: {last_error}")
 
+    def _ask_provider(self, name: str, model: str, prompt: str,
+                      cache_key: str) -> LLMReply:
+        """Try this provider's keys in turn until one answers.
+
+        A per-minute limit is the key's own pace, so it is retried in place;
+        only a daily limit, a dead key or repeated unexplained failures move us
+        to the next key. `acquire()` raises NoKeysAvailable once none are left.
+        """
+        pool = self._pools[name]
+        attempts = self.cfg["quota_failures_before_fallback"]
+        while True:
+            key = pool.acquire()      # raises NoKeysAvailable when the pool is dry
+            backoff = Backoff(base_s=20)
+            for attempt in range(attempts):
+                try:
+                    text = self._request(name, prompt, key.value)
+                except _BadKey as exc:
+                    pool.cool(key, "disabled", str(exc))
+                    break
+                except _Retryable as exc:
+                    if exc.scope == DAY:
+                        pool.cool(key, DAY, str(exc))
+                        break
+                    failure = str(exc)
+                except requests.RequestException as exc:
+                    failure = str(exc)
+                else:
+                    self.calls += 1
+                    reply = LLMReply(parse_json(text), name, model, cached=False)
+                    self._write_cache(cache_key, reply)
+                    return reply
+                if attempt + 1 < attempts:
+                    backoff.sleep(f"{name} {key.label}: {failure}")
+                else:
+                    # Nothing said "daily", but this key keeps failing. Rest it
+                    # briefly rather than retiring it — it may just be throttled.
+                    pool.cool(key, "soft", failure)
+            self.key_rotations += 1
+            log.info("%s: rotated off %s, %d/%d keys still ready",
+                     name, key.label, len(pool.available()), len(pool))
+
     # --------------------------------------------------------------- internal
 
-    def _key(self, provider: str) -> str:
-        if provider not in self._keys:
-            self._keys[provider] = require_env(self.cfg[provider]["key_env"])
-        return self._keys[provider]
-
-    def _request(self, provider: str, prompt: str) -> str:
+    def _request(self, provider: str, prompt: str, api_key: str) -> str:
         pcfg = self.cfg[provider]
         timeout = self.cfg["timeout_s"]
         if provider == "gemini":
             resp = requests.post(
                 f"{pcfg['api_base']}/models/{pcfg['model']}:generateContent",
-                params={"key": self._key(provider)},
+                params={"key": api_key},
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {
@@ -160,14 +201,16 @@ class LLMClient:
             self._raise_for_status(resp)
             candidates = resp.json().get("candidates") or []
             if not candidates:
-                raise _Retryable("empty candidates (likely a safety block)")
+                # The key is fine, this prompt is not. Rotating here would cool
+                # all twelve keys over one unanswerable post.
+                raise LLMRefused("empty candidates (likely a safety block)")
             parts = candidates[0].get("content", {}).get("parts") or []
             return "".join(p.get("text", "") for p in parts)
 
         if provider == "groq":
             resp = requests.post(
                 f"{pcfg['api_base']}/chat/completions",
-                headers={"Authorization": f"Bearer {self._key(provider)}"},
+                headers={"Authorization": f"Bearer {api_key}"},
                 json={
                     "model": pcfg["model"],
                     "messages": [{"role": "user", "content": prompt}],
@@ -185,13 +228,27 @@ class LLMClient:
     @staticmethod
     def _raise_for_status(resp: requests.Response) -> None:
         if resp.status_code in QUOTA_STATUSES or resp.status_code >= 500:
-            raise _Retryable(f"HTTP {resp.status_code} {resp.text[:120]}")
+            # Classify against the *whole* body before truncating it for the
+            # message: the "PerDay" vs "PerMinute" marker that decides whether
+            # to rotate keys sits deep in Gemini's error.details.
+            raise _Retryable(f"HTTP {resp.status_code} {resp.text[:200]}",
+                             scope=classify_quota(resp.text))
+        if resp.status_code in BAD_KEY_STATUSES:
+            raise _BadKey(f"HTTP {resp.status_code} {resp.text[:200]}")
         if not resp.ok:
             raise LLMError(f"HTTP {resp.status_code} {resp.text[:300]}")
 
 
 class _Retryable(Exception):
-    """Transient/quota failure: back off, then possibly change provider."""
+    """Transient/quota failure. `scope` says whether the key is out for the day."""
+
+    def __init__(self, message: str, scope: str = UNKNOWN):
+        super().__init__(message)
+        self.scope = scope
+
+
+class _BadKey(Exception):
+    """This key will never work: revoked, mistyped, or not enabled for the API."""
 
 
 def parse_json(text: str) -> dict:

@@ -11,6 +11,7 @@ paths:
   events: "data/processed/events.parquet"
   states: "data/processed/states"
   llm_cache: "data/llm_cache"
+  llm_state: "data/llm_state.json"   # which API keys are cooling, and until when
   symbol_dir: "data/raw/symbol_dir"
 
 subreddits: [wallstreetbets, stocks, StockMarket, investing, pennystocks]
@@ -144,7 +145,10 @@ llm:
   temperature: 0                  # plan Appendix D: deterministic labeling
   max_output_tokens: 400
   timeout_s: 90
-  quota_failures_before_fallback: 4
+  quota_failures_before_fallback: 4   # per key, before it is rested
+  # How long a key sits out after repeated failures that never said "per day".
+  # Short on purpose: it is probably throttling, not exhaustion.
+  key_cooldown_s: 900
   # Bump when a prompt changes — it is part of the cache key, so old answers
   # are not silently reused for a different question.
   prompt_version: "triage-v1"
@@ -153,10 +157,15 @@ llm:
     # Pinned, not "-latest": a research dataset must be reproducible. Verified
     # available 2026-08-04; 2.5-flash-lite is closed to new keys.
     model: "gemini-3.5-flash-lite"
+    # Keys are read from GEMINI_API_KEY, GEMINI_API_KEYS (comma-separated) and
+    # GEMINI_API_KEY_1..N — every free key is a separate daily quota, so the
+    # pool rotates through them (see src/utils/keypool.py).
     key_env: GEMINI_API_KEY
-    min_interval_s: 4.5           # free tier is ~15 req/min
+    min_interval_s: 4.5           # free tier is ~15 req/min, enforced per key
+    quota_reset_tz: "America/Los_Angeles"   # daily quota rolls over at PT midnight
   groq:
     api_base: "https://api.groq.com/openai/v1"
     model: "llama-3.3-70b-versatile"
     key_env: GROQ_API_KEY
     min_interval_s: 2.5
+    quota_reset_tz: "UTC"

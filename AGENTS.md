@@ -100,14 +100,43 @@ python -m src.pipeline.triage --events-only   # rollup only, no API calls
 
 Resumable and cached (`data/llm_cache/`, keyed by prompt version + model +
 prompt content), so an interrupted run continues rather than restarts. Free
-tier measured 2026-08-04: **gemini ~500 calls/day**, groq 70b 1,000/day,
-groq 8b 14,400/day. A background loop re-runs the command every 30 min so it
-picks up automatically when the daily quota resets:
+tier measured 2026-08-04: **gemini ~500 calls/day per key**, groq 70b
+1,000/day, groq 8b 14,400/day. A background loop re-runs the command every
+30 min so it picks up automatically when the daily quota resets:
 
 ```
 setsid nohup bash -c 'while true; do python -m src.pipeline.triage --seeds-only \
   >> triage.log 2>&1; sleep 1800; done' &
 ```
+
+### API key rotation (`src/utils/keypool.py`) — 2026-08-04
+
+Free-tier quota is **per key**, so several keys are several daily budgets.
+Put them in `.env` as `GEMINI_API_KEY`, `GEMINI_API_KEYS` (comma-separated)
+or `GEMINI_API_KEY_1..N`; all three spellings are read and de-duplicated.
+
+```
+python -m src.utils.keypool            # which keys are live, spent, or refused
+python -m src.utils.keypool --reset    # after replacing a key
+```
+
+Requests go to whichever key is ready soonest, so a batch spreads across the
+pool instead of draining one person's quota. The three 429-ish failures are
+**not** interchangeable and the code must keep treating them separately:
+
+| failure | response | why |
+|---|---|---|
+| per-minute (`RPM`/`PerMinute`) | back off, retry the *same* key | rotating here burns every key in a minute |
+| per-day (`RPD`/`PerDay`) | cool until midnight in `quota_reset_tz` | the key really is spent |
+| 400/401/403 | retire for the session | borrowed keys include revoked ones |
+
+`classify_quota()` reads the scope out of the **full** response body — Gemini
+hides it in `error.details[].quotaId`, past the 200-char message truncation.
+A Gemini safety block raises `LLMRefused` instead: the prompt is at fault, not
+the key, so triage skips that post rather than cooling twelve keys over it.
+
+Cooldowns persist to `data/llm_state.json` keyed by a hash of the key (never
+the key itself), so the 30-min resume loop does not re-probe spent keys.
 
 **Triage is single-model on purpose** (`llm.fallback: null`). On identical
 posts gemini-3.5-flash-lite called 36% of seeds rumors vs 10% for

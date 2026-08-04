@@ -20,9 +20,12 @@ class RateLimiter:
         self.min_interval_s = float(min_interval_s)
         self._last_call = 0.0
 
+    def time_until_ready(self) -> float:
+        """Seconds before the next call may go out (0 if it may go out now)."""
+        return max(0.0, self.min_interval_s - (time.monotonic() - self._last_call))
+
     def wait(self) -> None:
-        elapsed = time.monotonic() - self._last_call
-        remaining = self.min_interval_s - elapsed
+        remaining = self.time_until_ready()
         if remaining > 0:
             time.sleep(remaining)
         self._last_call = time.monotonic()

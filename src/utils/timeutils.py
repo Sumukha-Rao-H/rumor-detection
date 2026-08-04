@@ -7,7 +7,8 @@ banned — every helper here is timezone-aware.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 GDELT_FMT = "%Y%m%d%H%M%S"  # e.g. 20250101000000, always UTC
 
@@ -47,3 +48,17 @@ def gdelt_to_ts(s: str) -> int:
 
 def ts_to_iso(ts: int | float) -> str:
     return ts_to_dt(ts).strftime("%Y-%m-%d %H:%M:%SZ")
+
+
+def next_midnight_ts(tz_name: str, now_ts: int | float | None = None) -> int:
+    """Epoch seconds of the next midnight in `tz_name`.
+
+    API providers reset daily quotas at local midnight in their own timezone
+    (Gemini's free tier resets at midnight America/Los_Angeles), so "this key
+    is out of requests until tomorrow" is only expressible in their clock, not
+    ours. The answer is still returned as UTC epoch seconds like everything else.
+    """
+    tz = ZoneInfo(tz_name)
+    now = ts_to_dt(now_ts if now_ts is not None else utc_now_ts()).astimezone(tz)
+    tomorrow = (now + timedelta(days=1)).date()
+    return dt_to_ts(datetime.combine(tomorrow, datetime.min.time(), tzinfo=tz))
