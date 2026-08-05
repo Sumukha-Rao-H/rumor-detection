@@ -13,6 +13,7 @@ paths:
   llm_cache: "data/llm_cache"
   llm_state: "data/llm_state.json"   # which API keys are cooling, and until when
   symbol_dir: "data/raw/symbol_dir"
+  review: "data/review"    # CSV sheets a human edits (plan §6.4 stage 3)
 
 subreddits: [wallstreetbets, stocks, StockMarket, investing, pennystocks]
 
@@ -168,6 +169,9 @@ triage:
                       "chapter 11", delist, halt, FDA, approval, recall,
                       investigation, lawsuit, insider, SEC, "earnings leak"]
 
+review:
+  evidence_lines: 6               # headlines shown per row in the review sheet
+
 labeling:
   # §6.4's "no abnormal sustained price move" test — the only thing standing
   # between "nobody reported it" and a FALSE label, so both thresholds are the
@@ -223,6 +227,13 @@ split:
   val: 0.15
   test: 0.15
   method: temporal
+  # No ticker may appear on both sides of a split boundary within this many
+  # days. Adjacent events on one ticker share posts, price history and often
+  # the same underlying story, so a boundary cutting between them hands the
+  # later split its answer. Straddlers are dropped, not reassigned — moving
+  # them would relocate the leak, not remove it.
+  quarantine_days: 7
+  min_events: 300                 # plan §6.4 acceptance floor
 
 llm:
   provider: gemini

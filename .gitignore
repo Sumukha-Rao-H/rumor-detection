@@ -21,6 +21,7 @@ data/processed/*
 data/llm_cache/
 data/llm_state.json
 data/logs/
+data/review/
 !data/**/.gitkeep
 
 # ML artifacts
