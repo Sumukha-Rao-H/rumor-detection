@@ -204,13 +204,48 @@ def is_quiet(ret: float | None, z: float | None, cfg: dict) -> bool:
     return abs(ret) < float(lcfg["abnormal_return"]) and z < float(lcfg["volume_z"])
 
 
-def format_headlines(headlines: list[Headline], cfg: dict) -> str:
-    """Tier-tagged list. Primary sources first, so a truncated list keeps the
-    headlines that can actually settle the label."""
+STOPWORDS = frozenset(
+    "a an and are as at be by for from has have in is it its of on or that the "
+    "to was were will with about after before its it's this these those they "
+    "he she we you i not no but if than then so such can could would should "
+    "may might must new says said report reports reported stock stocks share "
+    "shares company inc corp corporation ltd plc group holdings".split())
+
+
+def content_words(text: str) -> set[str]:
+    """Meaningful tokens of a claim or headline, for relevance scoring."""
+    return {w for w in _normalize_text(text).split()
+            if len(w) > 2 and w not in STOPWORDS}
+
+
+def relevance(claim: str, headline: Headline) -> float:
+    """How much of the claim's vocabulary the headline shares.
+
+    A 96-hour window on a mega-cap returns hundreds of unrelated headlines, so
+    showing the model the *first* forty tells it almost nothing about a specific
+    merger claim. Scoring against the claim is what makes the window usable.
+    """
+    claim_words = content_words(claim)
+    if not claim_words:
+        return 0.0
+    return len(claim_words & content_words(headline.title)) / len(claim_words)
+
+
+def rank_headlines(claim: str, headlines: list[Headline],
+                   limit: int) -> list[Headline]:
+    """The `limit` headlines most worth showing, credible sources first."""
+    ordered = sorted(headlines,
+                     key=lambda h: (h.tier != PRIMARY, -relevance(claim, h),
+                                    h.seen_utc))
+    return sorted(ordered[:limit], key=lambda h: (h.tier != PRIMARY, h.seen_utc))
+
+
+def format_headlines(headlines: list[Headline], cfg: dict,
+                     claim: str = "") -> str:
+    """Tier-tagged list, most relevant first within each tier."""
     lcfg = cfg["labeling"]
     chars = int(lcfg["headline_chars"])
-    ordered = sorted(headlines, key=lambda h: (h.tier != PRIMARY, h.seen_utc))
-    shown = ordered[:int(lcfg["max_headlines"])]
+    shown = rank_headlines(claim, headlines, int(lcfg["max_headlines"]))
     return "\n".join(
         f"- [{'CREDIBLE' if h.tier == PRIMARY else 'aggregator'}] "
         f"({h.domain}, {ts_to_iso(h.seen_utc)}) {h.title[:chars]}"
@@ -218,9 +253,10 @@ def format_headlines(headlines: list[Headline], cfg: dict) -> str:
 
 
 def build_prompt(event: Event, headlines: list[Headline], cfg: dict) -> str:
-    return PROMPT.format(t0=ts_to_iso(event.t0_utc), claim=event.claim_summary,
-                         headlines=format_headlines(headlines, cfg),
-                         horizon=int(cfg["event"]["label_horizon_hours"]))
+    return PROMPT.format(
+        t0=ts_to_iso(event.t0_utc), claim=event.claim_summary,
+        headlines=format_headlines(headlines, cfg, event.claim_summary),
+        horizon=int(cfg["event"]["label_horizon_hours"]))
 
 
 def content_key(prompt: str) -> str:
@@ -307,14 +343,31 @@ def decide(event: Event, fields: dict, headlines: list[Headline],
 
 
 def pending_events(conn, cfg: dict, prompt_version: str) -> list[Event]:
-    """Rumor events with no proposal yet, oldest first."""
+    """Rumor events with no proposal yet, most decidable first.
+
+    Ordered by what the event can yield rather than by date: only a credible
+    headline can produce a TRUE label, so those events come first, then ones
+    with aggregator coverage, then the silent majority the tape decides on its
+    own. Free-tier quota decides where a run stops, and a run that stops early
+    should have spent its calls where a verdict was reachable.
+    """
     done = db.proposed_event_ids(conn, prompt_version)
     rows = conn.execute(
         """SELECT event_id, ticker, t0_utc, claim_summary FROM events
            WHERE n_rumor_posts > 0 AND label IS NULL AND claim_summary IS NOT NULL
            ORDER BY t0_utc"""
     ).fetchall()
-    return [Event(*row) for row in rows if row[0] not in done]
+    events = [Event(*row) for row in rows if row[0] not in done]
+
+    def rank(event: Event) -> tuple:
+        headlines, _ = event_headlines(conn, cfg, event)
+        primary = sum(1 for h in headlines if h.tier == PRIMARY)
+        # Deliberately not ordered by headline *count*: that promotes mega-caps,
+        # whose 96-hour window returns 200 headlines about everything except
+        # the claim. Coverage tier is the signal; date breaks the tie.
+        return (0 if primary else 1 if headlines else 2, event.t0_utc)
+
+    return sorted(events, key=rank)
 
 
 def propose(conn, cfg: dict, client: LLMClient | None, limit: int | None = None,

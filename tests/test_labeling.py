@@ -7,8 +7,8 @@ import pytest
 from src import db
 from src.pipeline.labeling import (
     PRIMARY, SECONDARY, Event, Headline, build_prompt, decide, event_headlines,
-    is_quiet, market_move, match_headline, normalize, pending_events, propose,
-    select_headlines,
+    format_headlines, is_quiet, market_move, match_headline, normalize,
+    pending_events, propose, relevance, select_headlines,
 )
 from src.utils.llm import LLMRefused
 
@@ -355,3 +355,47 @@ def test_the_prompt_carries_the_claim_and_its_headlines():
     assert "AAA will be acquired" in prompt
     assert "reuters.com" in prompt and "Acme acquired by Globex" in prompt
     assert "72 hours" in prompt
+
+
+def test_relevant_headlines_survive_truncation(tmp_path):
+    """A mega-cap window returns 200 headlines about everything but the claim."""
+    cfg = _cfg()
+    cfg["labeling"]["max_headlines"] = 3
+    noise = [Headline(f"Acme opens store number {i}", "reuters.com", T0 + i)
+             for i in range(30)]
+    needle = Headline("Acme to be acquired by Globex", "reuters.com", T0 + 99)
+    prompt = build_prompt(Event("A-1", "AAA", T0, "Acme will be acquired by Globex"),
+                          noise + [needle], cfg)
+    assert "acquired by Globex" in prompt
+
+
+def test_relevance_scores_shared_claim_vocabulary():
+    claim = "Acme will be acquired by Globex"
+    on = Headline("Globex acquired Acme", "reuters.com", 1)
+    off = Headline("Unrelated market wrap", "reuters.com", 1)
+    assert relevance(claim, on) > relevance(claim, off)
+
+
+def test_credible_headlines_outrank_a_more_relevant_aggregator():
+    """Relevance orders within a tier; it must not promote across tiers."""
+    cfg = _cfg()
+    cfg["labeling"]["max_headlines"] = 1
+    claim = "Acme will be acquired by Globex"
+    heads = [Headline("Acme acquired by Globex confirmed", "benzinga.com", 1,
+                      SECONDARY),
+             Headline("Acme quarterly note", "reuters.com", 2, PRIMARY)]
+    assert "[CREDIBLE]" in format_headlines(heads, cfg, claim)
+
+
+def test_pending_puts_credible_coverage_first(tmp_path):
+    """Only a credible headline can yield TRUE, and quota decides where we stop."""
+    conn = db.get_conn(tmp_path / "t.db")
+    _event(conn, "SILENT", "SIL")
+    _event(conn, "AGG", "AGG")
+    _event(conn, "CRED", "CRD")
+    db.upsert_news(conn, [
+        ("u1", "AGG", "chatter", "benzinga.com", T0 + HOUR, "finnhub"),
+        ("u2", "CRD", "wire copy", "reuters.com", T0 + HOUR, "gdelt"),
+    ])
+    order = [e.event_id for e in pending_events(conn, _cfg(), "label-v1")]
+    assert order == ["CRED", "AGG", "SILENT"]

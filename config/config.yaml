@@ -168,7 +168,10 @@ labeling:
   headline_chars: 200
   # Bump when the labeling prompt changes — proposals record it, so a revision
   # re-proposes rather than silently mixing two prompts' verdicts.
-  prompt_version: "label-v1"
+  # v2: headlines are ranked by relevance to the claim before truncation. v1
+  # showed the first N of a 96-hour window, which on a mega-cap meant forty
+  # headlines about everything except the claim.
+  prompt_version: "label-v2"
 
 event:
   gap_hours: 12
