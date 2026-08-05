@@ -6,9 +6,9 @@ import pytest
 
 from src import db
 from src.pipeline.labeling import (
-    Event, Headline, build_prompt, decide, event_headlines, is_quiet,
-    market_move, match_headline, normalize, pending_events, propose,
-    whitelisted,
+    PRIMARY, SECONDARY, Event, Headline, build_prompt, decide, event_headlines,
+    is_quiet, market_move, match_headline, normalize, pending_events, propose,
+    select_headlines,
 )
 from src.utils.llm import LLMRefused
 
@@ -20,7 +20,8 @@ T0 = 1_700_000_000 // DAY * DAY + 12 * HOUR   # midday UTC, so t0-24h stays in r
 def _cfg():
     return {
         "news": {"event_pre_hours": 24,
-                 "whitelist": ["reuters.com", "sec.gov"]},
+                 "whitelist": ["reuters.com", "sec.gov"],
+                 "secondary_sources": ["benzinga.com", "finance.yahoo.com"]},
         "event": {"label_horizon_hours": 72},
         "market": {"interval": "60m"},
         "labeling": {"abnormal_return": 0.04, "volume_z": 2.0, "return_days": 3,
@@ -51,18 +52,24 @@ def _row(title, domain, seen_utc):
 # --- source whitelist -------------------------------------------------------
 
 def test_whitelist_accepts_subdomains_of_credible_sources():
-    kept = whitelisted([_row("a", "feeds.reuters.com", 1)], ["reuters.com"])
-    assert [h.domain for h in kept] == ["feeds.reuters.com"]
+    kept = select_headlines([_row("a", "feeds.reuters.com", 1)], _cfg())
+    assert [(h.domain, h.tier) for h in kept] == [("feeds.reuters.com", PRIMARY)]
 
 
 def test_whitelist_rejects_lookalike_domains():
     """reuters.com.spam.net must not launder a headline into a TRUE label."""
-    assert whitelisted([_row("a", "reuters.com.spam.net", 1)], ["reuters.com"]) == []
+    assert select_headlines([_row("a", "reuters.com.spam.net", 1)], _cfg()) == []
 
 
-def test_whitelist_drops_uncredible_sources():
+def test_unknown_sources_are_dropped_entirely():
     rows = [_row("real", "reuters.com", 1), _row("blog", "randomblog.io", 2)]
-    assert [h.title for h in whitelisted(rows, ["reuters.com"])] == ["real"]
+    assert [h.title for h in select_headlines(rows, _cfg())] == ["real"]
+
+
+def test_aggregators_are_kept_as_the_second_tier():
+    rows = [_row("wire", "reuters.com", 1), _row("aggregated", "benzinga.com", 2)]
+    assert [(h.title, h.tier) for h in select_headlines(rows, _cfg())] == [
+        ("wire", PRIMARY), ("aggregated", SECONDARY)]
 
 
 def test_event_headlines_reports_the_prefilter_count(tmp_path):
@@ -75,7 +82,7 @@ def test_event_headlines_reports_the_prefilter_count(tmp_path):
     ])
     kept, n_all = event_headlines(conn, _cfg(), event)
     assert [h.title for h in kept] == ["credible"]
-    assert n_all == 2          # both in-window rows, before the whitelist
+    assert n_all == 2          # both in-window rows, before the tier filter
 
 
 # --- the market rule --------------------------------------------------------
@@ -210,12 +217,56 @@ def test_a_true_the_model_cannot_point_at_goes_to_a_human():
     assert got["t_official_utc"] is None
 
 
-def test_a_denial_expires_at_the_horizon_when_unmatched():
+def test_a_denial_the_model_cannot_cite_is_not_trusted():
+    """An uncitable denial is only 'nothing confirmed it' — let the tape decide."""
     event = Event("A-1", "AAA", T0, "acquired")
-    got = decide(event, _fields("FALSE", "Acme denies merger talk"), [],
+    moved = decide(event, _fields("FALSE", "Acme denies merger talk"), [],
+                   0.10, 3.0, _cfg())
+    assert moved["verdict"] == "UNVERIFIED" and moved["rule"] == "moved"
+    quiet = decide(event, _fields("FALSE", "Acme denies merger talk"), [],
+                   0.01, 0.5, _cfg())
+    assert quiet["verdict"] == "FALSE" and quiet["rule"] == "quiet"
+
+
+def test_an_aggregator_confirmation_goes_to_review_not_to_a_label():
+    """Benzinga republishing the rumor is not the same as confirming it."""
+    event = Event("A-1", "AAA", T0, "acquired")
+    heads = [Headline("Acme acquired by Globex", "benzinga.com", T0 + HOUR,
+                      SECONDARY)]
+    got = decide(event, _fields("TRUE", "Acme acquired by Globex"), heads,
                  0.10, 3.0, _cfg())
-    assert got["verdict"] == "FALSE" and got["rule"] == "denied_unmatched"
-    assert got["t_official_utc"] == T0 + 72 * HOUR
+    assert got["verdict"] == "UNVERIFIED" and got["rule"] == "confirmed_secondary"
+    assert got["t_official_utc"] == T0 + HOUR   # kept for the reviewer
+
+
+def test_an_aggregator_report_blocks_the_quiet_false_rule():
+    """A claim that WAS reported did not go unreported — a flat tape proves
+    nothing about it, so the §6.4 silence rule must not fire."""
+    event = Event("A-1", "AAA", T0, "acquired")
+    heads = [Headline("Acme acquired by Globex", "benzinga.com", T0 + HOUR,
+                      SECONDARY)]
+    got = decide(event, _fields("TRUE", "Acme acquired by Globex"), heads,
+                 0.001, 0.1, _cfg())
+    assert got["verdict"] == "UNVERIFIED"
+
+
+def test_an_aggregator_denial_also_goes_to_review():
+    event = Event("A-1", "AAA", T0, "acquired")
+    heads = [Headline("Acme denies talks", "benzinga.com", T0 + HOUR, SECONDARY)]
+    got = decide(event, _fields("FALSE", "Acme denies talks"), heads,
+                 0.10, 3.0, _cfg())
+    assert got["verdict"] == "UNVERIFIED" and got["rule"] == "denied_secondary"
+
+
+def test_the_prompt_tags_each_headlines_tier():
+    event = Event("A-1", "AAA", T0, "acquired")
+    heads = [Headline("aggregated take", "benzinga.com", T0 + 2 * HOUR, SECONDARY),
+             Headline("wire copy", "reuters.com", T0 + HOUR, PRIMARY)]
+    prompt = build_prompt(event, heads, _cfg())
+    assert "[CREDIBLE] (reuters.com" in prompt
+    assert "[aggregator] (benzinga.com" in prompt
+    # Credible first, so truncation drops the headlines that cannot decide.
+    assert prompt.index("wire copy") < prompt.index("aggregated take")
 
 
 def test_a_denial_uses_the_denying_headlines_time():

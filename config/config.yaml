@@ -58,8 +58,19 @@ news:
   finnhub_lookback_days: 340
   event_pre_hours: 24             # §6.4 window is [t0 - 24h, t0 + 72h]
   max_records: 250                # per merged span; GDELT's ceiling
+  # Tier 1 — the only sources that can settle a §6.4 label on their own.
   whitelist: [reuters.com, bloomberg.com, apnews.com, cnbc.com, wsj.com, ft.com,
               prnewswire.com, businesswire.com, sec.gov]
+  # Tier 2 — shown to the model and the human reviewer for context, but never
+  # decisive: these republish unconfirmed market chatter, so an article that
+  # merely reports a rumor is indistinguishable from one confirming it. An
+  # event supported only by tier 2 goes to review (rule confirmed_secondary).
+  # dowjones.com is a primary newswire and arguably belongs in tier 1 — left
+  # here pending a look at what it actually carries in our window.
+  secondary_sources: [finance.yahoo.com, benzinga.com, seekingalpha.com,
+                      marketwatch.com, dowjones.com, barrons.com, zacks.com,
+                      tipranks.com, investing.com, fool.com, chartmill.com,
+                      fintel.io, globenewswire.com]
   # Finnhub's `url` is a redirect through finnhub.io, so the publisher survives
   # only in its `source` field — as a name, not a domain. Without this map every
   # Finnhub headline is attributed to "finnhub.io" and matches no whitelist
@@ -85,6 +96,8 @@ news:
     "Business Wire": businesswire.com
     GlobeNewswire: globenewswire.com
     SEC: sec.gov
+    DowJones: dowjones.com
+    "Dow Jones": dowjones.com
     Benzinga: benzinga.com
     SeekingAlpha: seekingalpha.com
     Zacks: zacks.com

@@ -14,7 +14,16 @@ then applies §6.4's arithmetic rule to the events where nothing did.
     UNVERIFIED   everything else, including every event whose market data is
                  too thin to apply the quiet rule. Excluded from train/eval.
 
-Three decisions worth knowing about:
+Sources come in two tiers, because measured 2026-08-05 the free news APIs
+return mostly aggregators: only `news.whitelist` can settle a label, while
+`news.secondary_sources` (Yahoo, Benzinga, SeekingAlpha …) is shown to the
+model and the reviewer as context. A claim only an aggregator supports goes to
+review rather than becoming a label — those sites republish market chatter, so
+an article merely *reporting* the rumor reads exactly like one confirming it.
+Crucially such an event is also held back from the quiet rule: a claim that was
+reported did not go unreported, so a flat tape says nothing about its truth.
+
+Three more decisions worth knowing about:
 
   proposals    nothing here writes events.label. Rows land in `label_proposals`
                and a human promotes them (stage 3). The plan is emphatic that
@@ -66,10 +75,15 @@ VERDICTS = ("TRUE", "FALSE", "UNVERIFIED")
 MAX_CONSECUTIVE_SKIPS = 20
 
 PROMPT = """CLAIM (from Reddit, posted {t0}): {claim}
-CANDIDATE NEWS HEADLINES (source, UTC time):
+CANDIDATE NEWS HEADLINES (tier, source, UTC time):
 {headlines}
 
+[CREDIBLE] marks an established news organisation or official filing.
+[aggregator] marks a site that also republishes unconfirmed market chatter — a
+headline merely repeating the claim is not confirmation of it.
+
 Did credible news CONFIRM or DENY the claim within {horizon} hours?
+Quote the deciding headline exactly as it appears above.
 Respond ONLY with JSON:
 {{"verdict": "TRUE|FALSE|UNVERIFIED", \
 "t_official": "<UTC of earliest deciding headline or null>",
@@ -84,35 +98,55 @@ class Event:
     claim_summary: str
 
 
+PRIMARY = "primary"
+SECONDARY = "secondary"
+
+
 @dataclass
 class Headline:
     title: str
     domain: str
     seen_utc: int
+    tier: str = PRIMARY
 
 
-def whitelisted(headlines: list, whitelist: list[str]) -> list[Headline]:
-    """Keep only headlines from credible sources (config news.whitelist).
+def _matches(domain: str, sources: list[str]) -> bool:
+    """Domain-suffix match, so `feeds.reuters.com` counts as Reuters while
+    `reuters.com.example.net` does not."""
+    domain = (domain or "").lower()
+    return any(domain == s or domain.endswith("." + s)
+               for s in (d.lower().lstrip(".") for d in sources))
 
-    Matched on the domain suffix so `feeds.reuters.com` counts as Reuters while
-    `reuters.com.example.net` does not.
+
+def select_headlines(rows: list, cfg: dict) -> list[Headline]:
+    """Split headlines into the two credibility tiers, dropping the rest.
+
+    Only `news.whitelist` (tier 1) can settle a label on its own.
+    `news.secondary_sources` (tier 2) is shown to the model and the reviewer
+    for context: aggregators republish rumors, so an article that merely
+    *reports* the claim reads exactly like one confirming it.
     """
-    allowed = tuple(d.lower().lstrip(".") for d in whitelist)
+    ncfg = cfg["news"]
     kept = []
-    for row in headlines:
+    for row in rows:
         domain = (row["source_domain"] or "").lower()
-        if any(domain == a or domain.endswith("." + a) for a in allowed):
-            kept.append(Headline(row["title"] or "", domain, row["seen_utc"]))
+        if _matches(domain, ncfg["whitelist"]):
+            tier = PRIMARY
+        elif _matches(domain, ncfg.get("secondary_sources") or []):
+            tier = SECONDARY
+        else:
+            continue
+        kept.append(Headline(row["title"] or "", domain, row["seen_utc"], tier))
     return kept
 
 
 def event_headlines(conn, cfg: dict, event: Event) -> tuple[list[Headline], int]:
-    """(whitelist headlines in the event window, count before filtering)."""
+    """(tiered headlines in the event window, count before filtering)."""
     pre = int(cfg["news"]["event_pre_hours"]) * HOUR
     post = int(cfg["event"]["label_horizon_hours"]) * HOUR
     rows = db.news_in_window(conn, event.ticker, event.t0_utc - pre,
                              event.t0_utc + post)
-    return whitelisted(rows, cfg["news"]["whitelist"]), len(rows)
+    return select_headlines(rows, cfg), len(rows)
 
 
 def _daily_volume(bars: list) -> dict[int, float]:
@@ -171,11 +205,16 @@ def is_quiet(ret: float | None, z: float | None, cfg: dict) -> bool:
 
 
 def format_headlines(headlines: list[Headline], cfg: dict) -> str:
+    """Tier-tagged list. Primary sources first, so a truncated list keeps the
+    headlines that can actually settle the label."""
     lcfg = cfg["labeling"]
     chars = int(lcfg["headline_chars"])
-    shown = headlines[:int(lcfg["max_headlines"])]
-    return "\n".join(f"- ({h.domain}, {ts_to_iso(h.seen_utc)}) {h.title[:chars]}"
-                     for h in shown)
+    ordered = sorted(headlines, key=lambda h: (h.tier != PRIMARY, h.seen_utc))
+    shown = ordered[:int(lcfg["max_headlines"])]
+    return "\n".join(
+        f"- [{'CREDIBLE' if h.tier == PRIMARY else 'aggregator'}] "
+        f"({h.domain}, {ts_to_iso(h.seen_utc)}) {h.title[:chars]}"
+        for h in shown)
 
 
 def build_prompt(event: Event, headlines: list[Headline], cfg: dict) -> str:
@@ -237,6 +276,13 @@ def decide(event: Event, fields: dict, headlines: list[Headline],
     match = match_headline(fields.get("deciding_headline") or "", headlines)
     t_official = match.seen_utc if match else None
 
+    if match is not None and match.tier == SECONDARY:
+        # An aggregator is evidence, just not enough to settle a label. It must
+        # also stop the quiet rule below: a claim Benzinga reported did not
+        # go unreported, so a flat tape says nothing about whether it was true.
+        return {**fields, "verdict": "UNVERIFIED", "t_official_utc": t_official,
+                "rule": "confirmed_secondary" if verdict == "TRUE"
+                        else "denied_secondary"}
     if verdict == "TRUE" and match is None:
         # The model claims a confirmation it cannot point at. Without a real
         # headline there is no t_official, and a TRUE with no timestamp is
@@ -247,12 +293,11 @@ def decide(event: Event, fields: dict, headlines: list[Headline],
         rule = "confirmed_pre_t0" if t_official < event.t0_utc else "confirmed"
         return {**fields, "verdict": "TRUE", "rule": rule,
                 "t_official_utc": t_official}
-    if verdict == "FALSE":
-        # A denial we cannot locate still means "no credible confirmation", so
-        # the claim expires at the horizon rather than at an unknown moment.
-        return {**fields, "verdict": "FALSE",
-                "rule": "denied" if match else "denied_unmatched",
-                "t_official_utc": t_official or event.t0_utc + horizon}
+    if verdict == "FALSE" and match is not None:
+        return {**fields, "verdict": "FALSE", "rule": "denied",
+                "t_official_utc": t_official}
+    # A denial the model cannot cite is only "no credible confirmation", which
+    # is what the quiet rule already tests. Fall through rather than trust it.
     if is_quiet(ret, z, cfg):
         return {**fields, "verdict": "FALSE", "rule": "quiet",
                 "t_official_utc": event.t0_utc + horizon}
@@ -287,6 +332,7 @@ def propose(conn, cfg: dict, client: LLMClient | None, limit: int | None = None,
         headlines, n_all = event_headlines(conn, cfg, event)
         ret, z = market_move(conn, cfg, event)
         stats["headlines"] += len(headlines)
+        stats["primary_headlines"] += sum(1 for h in headlines if h.tier == PRIMARY)
 
         if not headlines:
             # Nothing credible was published: no question left for a model.
