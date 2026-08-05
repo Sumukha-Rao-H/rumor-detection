@@ -47,9 +47,17 @@ market:
 
 news:
   gdelt_base: "https://api.gdeltproject.org/api/v2/doc/doc"
-  gdelt_min_interval_s: 5.0
+  # Measured 2026-08-05: the documented "one call every 5 seconds" still draws
+  # 429s under sustained load — at 10s spacing roughly two calls in three were
+  # still refused. Pace slower and let Backoff handle what remains.
+  gdelt_min_interval_s: 20.0
   finnhub_min_interval_s: 1.1     # free tier ~60 calls/min
-  max_records: 75
+  # Finnhub's free company-news archive is a rolling ~12 months. Older requests
+  # return an empty list with HTTP 200, so windows past this are skipped rather
+  # than mistaken for "no news" (measured: 0 rows at 2025-08, 114 at 2025-09).
+  finnhub_lookback_days: 340
+  event_pre_hours: 24             # §6.4 window is [t0 - 24h, t0 + 72h]
+  max_records: 250                # per merged span; GDELT's ceiling
   whitelist: [reuters.com, bloomberg.com, apnews.com, cnbc.com, wsj.com, ft.com,
               prnewswire.com, businesswire.com, sec.gov]
 

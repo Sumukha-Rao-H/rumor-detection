@@ -56,6 +56,16 @@ CREATE TABLE IF NOT EXISTS post_triage (
   PRIMARY KEY (post_id, ticker)
 );
 CREATE INDEX IF NOT EXISTS idx_triage_rumor ON post_triage (is_rumor);
+
+-- Which [start, end] news windows have already been fetched, per API
+-- (plan §6.4 stage 1). Without this a resumed run re-queries spans it already
+-- has: GDELT is rate-limited to one call every several seconds, so repeating
+-- ~1,000 of them costs hours.
+CREATE TABLE IF NOT EXISTS news_spans (
+  ticker TEXT, start_utc INTEGER, end_utc INTEGER, api TEXT,
+  n_rows INTEGER, fetched_utc INTEGER,
+  PRIMARY KEY (ticker, start_utc, end_utc, api)
+);
 """
 
 # Columns added after the first DBs were created (plan §6.3). ALTER is the only
@@ -178,6 +188,35 @@ def upsert_news(conn: sqlite3.Connection, rows: list[tuple]) -> int:
     conn.commit()
     after = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
     return after - before
+
+
+def mark_news_span(conn: sqlite3.Connection, ticker: str, start_utc: int,
+                   end_utc: int, api: str, n_rows: int, fetched_utc: int) -> None:
+    """Record that one (ticker, window, api) query has been made."""
+    with conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO news_spans
+               (ticker, start_utc, end_utc, api, n_rows, fetched_utc)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (ticker, start_utc, end_utc, api, n_rows, fetched_utc),
+        )
+
+
+def fetched_news_spans(conn: sqlite3.Connection, api: str) -> set[tuple]:
+    """(ticker, start_utc, end_utc) already queried against `api`."""
+    return {tuple(row) for row in conn.execute(
+        "SELECT ticker, start_utc, end_utc FROM news_spans WHERE api = ?", (api,))}
+
+
+def news_in_window(conn: sqlite3.Connection, ticker: str, start_utc: int,
+                   end_utc: int) -> list[sqlite3.Row]:
+    """Headlines for one ticker inside [start, end], oldest first."""
+    return conn.execute(
+        """SELECT url, title, source_domain, seen_utc, api FROM news
+           WHERE ticker = ? AND seen_utc BETWEEN ? AND ?
+           ORDER BY seen_utc""",
+        (ticker, start_utc, end_utc),
+    ).fetchall()
 
 
 EVENT_COLUMNS = (

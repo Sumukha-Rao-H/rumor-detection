@@ -36,6 +36,15 @@ log = logging.getLogger(__name__)
 FINNHUB_BASE = "https://finnhub.io/api/v1"
 
 
+class NewsUnavailable(RuntimeError):
+    """The query never completed — distinct from completing with no articles.
+
+    §6.4 turns "no confirming headline" into a FALSE label, so recording a
+    rate-limited query as an empty result would manufacture ground truth out of
+    our own throttling. Callers must not treat this as evidence of absence.
+    """
+
+
 def domain_of(url: str) -> str:
     netloc = urlparse(url).netloc.lower()
     return netloc[4:] if netloc.startswith("www.") else netloc
@@ -92,11 +101,12 @@ def fetch_gdelt(cfg: dict, session: requests.Session, query: str,
             continue
         try:
             return resp.json().get("articles", [])
-        except ValueError:  # GDELT returns plain-text errors with HTTP 200
-            log.error("GDELT non-JSON response: %s", resp.text[:200])
-            return []
-    log.error("GDELT: giving up after repeated failures for %r", query)
-    return []
+        except ValueError:
+            # GDELT answers HTTP 200 with a plain-text throttle notice, so a
+            # non-JSON body is a rate limit to retry, not an empty result.
+            backoff.sleep(f"GDELT non-JSON response: {resp.text[:100]}")
+            continue
+    raise NewsUnavailable(f"GDELT gave up after repeated failures for {query!r}")
 
 
 def fetch_finnhub(session: requests.Session, api_key: str, ticker: str,
@@ -127,9 +137,13 @@ def collect(cfg: dict, conn, ticker: str, query: str | None,
     if "gdelt" in apis:
         RateLimiter(ncfg["gdelt_min_interval_s"]).wait()
         q = query or default_gdelt_query(cfg, ticker)
-        articles = fetch_gdelt(cfg, session, q, start_ts, end_ts)
-        n = db.upsert_news(conn, gdelt_articles_to_rows(articles, ticker))
-        log.info("GDELT %r: %d articles, %d new", q, len(articles), n)
+        try:
+            articles = fetch_gdelt(cfg, session, q, start_ts, end_ts)
+        except NewsUnavailable as exc:
+            log.error("%s", exc)
+        else:
+            n = db.upsert_news(conn, gdelt_articles_to_rows(articles, ticker))
+            log.info("GDELT %r: %d articles, %d new", q, len(articles), n)
 
     if "finnhub" in apis:
         api_key = require_env("FINNHUB_API_KEY")
