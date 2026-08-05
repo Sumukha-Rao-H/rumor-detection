@@ -51,7 +51,7 @@ The authoritative design document is [`implementation_plan.md`](implementation_p
 |---|---|
 | 0 — Environment setup | ✅ repo layout, config, requirements |
 | 1 — Data acquisition (§5) | ✅ Reddit collection complete (2026-08-04): 106.9k posts / 134.1k ticker links across all 577 days of the window, 5 subreddits. 3.7M hourly bars (1,566 tickers). News is a smoke test only — real collection is per-event in §6.4. |
-| 2 — Event construction & labeling (§6) | 🟡 §6.1 extraction + §6.2 keyword pre-filter + §6.3 clustering done (`pipeline/events.py`): **4,770 unlabeled candidate events**, 866 tickers, 2025-01-01..2026-07-28. §6.2 LLM triage and §6.4 labeling not started |
+| 2 — Event construction & labeling (§6) | 🟡 §6.1–§6.3 done (`pipeline/events.py`): 4,770 candidate events. **§6.2 LLM triage complete (2026-08-05)**: all 4,770 seeds judged, **1,170 rumor events** over 422 tickers, 2025-01-01..2026-07-28 — above the §6.2 target of 500–800. §6.4 ground-truth labeling not started |
 | 3 — Features & state (§7) | ⏳ not started |
 | 4 — RL environment (§8) | ⏳ not started |
 | 5 — Training (§9) | ⏳ not started |
@@ -97,6 +97,12 @@ which have no company claim to confirm. Both are config-switchable.
 python -m src.pipeline.triage --seeds-only    # judge each event's top post
 python -m src.pipeline.triage --events-only   # rollup only, no API calls
 ```
+
+**Done 2026-08-05**: 4,794 seed posts judged, 1,193 called rumors (25%),
+yielding **1,170 rumor events**. Claim mix: contract 336, merger 322,
+regulatory 150, other 133, offering 87, legal 69, earnings 61, bankruptcy 12.
+Cost 4,794 calls over ~2.5h of wall clock across two daily quota cycles.
+Re-running is free — every answer is cached and `post_triage` records the rest.
 
 Resumable and cached (`data/llm_cache/`, keyed by prompt version + model +
 prompt content), so an interrupted run continues rather than restarts. Free
