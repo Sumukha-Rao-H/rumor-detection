@@ -34,10 +34,12 @@ import requests
 
 from src.utils.keypool import (
     DAY,
+    SERVICE,
     UNKNOWN,
     KeyPool,
     NoKeysAvailable,
     classify_quota,
+    short_reason,
 )
 from src.utils.ratelimit import Backoff
 
@@ -154,9 +156,11 @@ class LLMClient:
         """
         pool = self._pools[name]
         attempts = self.cfg["quota_failures_before_fallback"]
+        outages = 0
         while True:
             key = pool.acquire()      # raises NoKeysAvailable when the pool is dry
             backoff = Backoff(base_s=20)
+            scope = UNKNOWN
             for attempt in range(attempts):
                 try:
                     text = self._request(name, prompt, key.value)
@@ -167,9 +171,13 @@ class LLMClient:
                     if exc.scope == DAY:
                         pool.cool(key, DAY, str(exc))
                         break
-                    failure = str(exc)
+                    scope, failure = exc.scope, str(exc)
+                except (requests.Timeout, requests.ConnectionError) as exc:
+                    # Never reached the provider, so nothing was learned about
+                    # this key. Same reasoning as a 5xx.
+                    scope, failure = SERVICE, str(exc)
                 except requests.RequestException as exc:
-                    failure = str(exc)
+                    scope, failure = UNKNOWN, str(exc)
                 else:
                     self.calls += 1
                     reply = LLMReply(parse_json(text), name, model, cached=False)
@@ -177,10 +185,24 @@ class LLMClient:
                     return reply
                 if attempt + 1 < attempts:
                     backoff.sleep(f"{name} {key.label}: {failure}")
+                elif scope == SERVICE:
+                    # The provider is down, not the key. Cooling it would spend
+                    # the pool on an outage that every key shares; wait it out
+                    # on the same credential instead.
+                    outages += 1
+                    if outages >= self.cfg["service_outage_rounds"]:
+                        raise LLMError(
+                            f"{name} unavailable after {outages} rounds: {failure}")
+                    log.warning("%s is having an outage (round %d/%d): %s",
+                                name, outages, self.cfg["service_outage_rounds"],
+                                short_reason(failure))
+                    backoff.sleep(f"{name} outage")
                 else:
                     # Nothing said "daily", but this key keeps failing. Rest it
                     # briefly rather than retiring it — it may just be throttled.
                     pool.cool(key, "soft", failure)
+            if scope == SERVICE:
+                continue          # same key, no rotation: nothing was its fault
             self.key_rotations += 1
             log.info("%s: rotated off %s, %d/%d keys still ready",
                      name, key.label, len(pool.available()), len(pool))
@@ -237,8 +259,10 @@ class LLMClient:
             # Classify against the *whole* body before truncating it for the
             # message: the "PerDay" vs "PerMinute" marker that decides whether
             # to rotate keys sits deep in Gemini's error.details.
+            scope = (SERVICE if resp.status_code >= 500
+                     else classify_quota(resp.text))
             raise _Retryable(f"HTTP {resp.status_code} {resp.text[:200]}",
-                             scope=classify_quota(resp.text))
+                             scope=scope)
         if resp.status_code in BAD_KEY_STATUSES:
             raise _BadKey(f"HTTP {resp.status_code} {resp.text[:200]}")
         if not resp.ok:

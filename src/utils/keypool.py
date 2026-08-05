@@ -47,6 +47,10 @@ PER_MINUTE_RE = re.compile(r"per[\s_-]?minute|\bRPM\b|\bTPM\b", re.IGNORECASE)
 DAY = "day"
 MINUTE = "minute"
 UNKNOWN = "unknown"
+# The provider's backend is down or overloaded, which has nothing to do with
+# which key asked. Every key reaches the same servers, so rotating cannot help
+# and cooling one costs the pool a healthy credential for no reason.
+SERVICE = "service"
 
 FOREVER = 4_102_444_800  # 2100-01-01, i.e. "not coming back this session"
 

@@ -265,3 +265,32 @@ def test_cache_file_records_provenance(tmp_path, monkeypatch):
     client.complete_json("prompt", cache_key="k")
     blob = json.loads(next((tmp_path / "cache").glob("*.json")).read_text())
     assert blob["provider"] == "gemini" and blob["prompt_version"] == "v1"
+
+
+def test_a_server_outage_does_not_cool_the_key(tmp_path, monkeypatch):
+    """503 is the provider's backend; every key reaches it, so rotating cannot
+    help and cooling one spends a healthy credential on someone else's fault."""
+    import requests
+
+    from src.utils import llm as llm_mod
+
+    cfg = _cfg(tmp_path)
+    cfg["llm"]["service_outage_rounds"] = 3
+    monkeypatch.setenv("GEMINI_API_KEY_1", "k1")
+    monkeypatch.setenv("GEMINI_API_KEY_2", "k2")
+    client = llm_mod.LLMClient(cfg)
+    monkeypatch.setattr(llm_mod.Backoff, "sleep", lambda self, why=None: None)
+
+    def always_503(self, provider, prompt, key):
+        resp = requests.Response()
+        resp.status_code = 503
+        resp._content = b'{"error": {"message": "The model is overloaded."}}'
+        llm_mod.LLMClient._raise_for_status(resp)
+
+    monkeypatch.setattr(llm_mod.LLMClient, "_request", always_503)
+    with pytest.raises(llm_mod.LLMError, match="unavailable"):
+        client.complete_json("hi", cache_key="c1")
+
+    pool = client._pools["gemini"]
+    assert len(pool.available()) == len(pool)   # nothing was cooled
+    assert client.key_rotations == 0

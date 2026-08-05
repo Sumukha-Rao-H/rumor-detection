@@ -220,6 +220,12 @@ llm:
   max_output_tokens: 400
   timeout_s: 90
   quota_failures_before_fallback: 4   # per key, before it is rested
+  # A 5xx or a read timeout is the provider's backend, not the key — every key
+  # reaches the same servers. Those rounds wait on the same credential instead
+  # of burning the pool; this many in a row means the outage is not passing and
+  # the run should stop rather than grind (measured 2026-08-05: Gemini served
+  # 503s for ~20 minutes and cooled 4 healthy keys before this existed).
+  service_outage_rounds: 6
   # How long a key sits out after repeated failures that never said "per day".
   # Short on purpose: it is probably throttling, not exhaustion.
   key_cooldown_s: 900
