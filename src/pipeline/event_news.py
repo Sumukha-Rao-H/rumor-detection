@@ -192,7 +192,8 @@ def _fetch(api: str, cfg: dict, session, window: Window, universe: dict,
     if api == "finnhub":
         items = fetch_finnhub(session, api_key, window.ticker,
                               window.start_utc, window.end_utc)
-        return finnhub_items_to_rows(items, window.ticker)
+        return finnhub_items_to_rows(items, window.ticker,
+                                     cfg["news"].get("finnhub_source_domains"))
     raise ValueError(f"unknown api {api!r}")
 
 

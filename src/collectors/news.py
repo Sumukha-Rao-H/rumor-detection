@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 from urllib.parse import urlparse
 
 import requests
@@ -66,15 +67,35 @@ def gdelt_articles_to_rows(articles: list[dict], ticker: str) -> list[tuple]:
     return rows
 
 
-def finnhub_items_to_rows(items: list[dict], ticker: str) -> list[tuple]:
+def finnhub_source_domain(source: str, aliases: dict) -> str:
+    """Publisher name -> domain, for whitelist matching.
+
+    Finnhub's `url` is a redirect through finnhub.io, so the URL carries no
+    publisher identity at all — `source` ("Reuters", "CNBC") is the only signal
+    there is. Names outside the alias table are slugified rather than dropped:
+    an unrecognised publisher must stay visible and simply fail to match the
+    credibility whitelist, not silently inherit someone else's domain.
+    """
+    name = (source or "").strip()
+    if not name:
+        return ""
+    for alias, domain in aliases.items():
+        if alias.lower() == name.lower():
+            return domain.lower()
+    return re.sub(r"[^a-z0-9]+", "", name.lower())
+
+
+def finnhub_items_to_rows(items: list[dict], ticker: str,
+                          aliases: dict | None = None) -> list[tuple]:
     """Finnhub /company-news entries -> news rows."""
     rows = []
     for item in items:
         url, ts = item.get("url"), item.get("datetime")
         if not url or not ts:
             continue
+        domain = finnhub_source_domain(item.get("source"), aliases or {})
         rows.append((url, ticker, item.get("headline") or "",
-                     domain_of(url), int(ts), "finnhub"))
+                     domain or domain_of(url), int(ts), "finnhub"))
     return rows
 
 
@@ -149,7 +170,8 @@ def collect(cfg: dict, conn, ticker: str, query: str | None,
         api_key = require_env("FINNHUB_API_KEY")
         RateLimiter(ncfg["finnhub_min_interval_s"]).wait()
         items = fetch_finnhub(session, api_key, ticker, start_ts, end_ts)
-        n = db.upsert_news(conn, finnhub_items_to_rows(items, ticker))
+        n = db.upsert_news(conn, finnhub_items_to_rows(
+            items, ticker, ncfg.get("finnhub_source_domains")))
         log.info("Finnhub %s: %d items, %d new", ticker, len(items), n)
 
 

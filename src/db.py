@@ -66,6 +66,24 @@ CREATE TABLE IF NOT EXISTS news_spans (
   n_rows INTEGER, fetched_utc INTEGER,
   PRIMARY KEY (ticker, start_utc, end_utc, api)
 );
+
+-- Machine label proposals (plan §6.4 stage 2). Deliberately NOT events.label:
+-- the plan requires a human to review every label, and keeping proposals in
+-- their own table makes it impossible to train on an unreviewed one by
+-- accident. The review UI (stage 3) is what promotes a row into events.
+CREATE TABLE IF NOT EXISTS label_proposals (
+  event_id TEXT PRIMARY KEY,
+  verdict TEXT,               -- TRUE|FALSE|UNVERIFIED, after the market rule
+  llm_verdict TEXT,           -- what the model alone said
+  t_official_utc INTEGER,
+  deciding_headline TEXT,
+  confidence REAL,
+  rule TEXT,                  -- which §6.4 branch decided it
+  ret_3d REAL, volume_z REAL, -- the abnormal-move check, NULL if no bars
+  n_headlines INTEGER,        -- whitelist headlines shown to the model
+  n_headlines_all INTEGER,    -- before the whitelist filter
+  provider TEXT, model TEXT, prompt_version TEXT, created_utc INTEGER
+);
 """
 
 # Columns added after the first DBs were created (plan §6.3). ALTER is the only
@@ -295,6 +313,50 @@ def triaged_pairs(conn: sqlite3.Connection, prompt_version: str) -> set[tuple[st
             (prompt_version,),
         )
     }
+
+
+PROPOSAL_COLUMNS = (
+    "event_id", "verdict", "llm_verdict", "t_official_utc", "deciding_headline",
+    "confidence", "rule", "ret_3d", "volume_z", "n_headlines", "n_headlines_all",
+    "provider", "model", "prompt_version", "created_utc",
+)
+
+
+def upsert_label_proposals(conn: sqlite3.Connection, rows: list[dict]) -> int:
+    """Insert/replace machine label proposals. Returns the number of new rows."""
+    if not rows:
+        return 0
+    before = conn.execute("SELECT COUNT(*) FROM label_proposals").fetchone()[0]
+    conn.executemany(
+        f"""
+        INSERT INTO label_proposals ({", ".join(PROPOSAL_COLUMNS)})
+        VALUES ({", ".join(":" + c for c in PROPOSAL_COLUMNS)})
+        ON CONFLICT(event_id) DO UPDATE SET
+          {", ".join(f"{c} = excluded.{c}" for c in PROPOSAL_COLUMNS[1:])}
+        """,
+        [{c: r.get(c) for c in PROPOSAL_COLUMNS} for r in rows],
+    )
+    conn.commit()
+    after = conn.execute("SELECT COUNT(*) FROM label_proposals").fetchone()[0]
+    return after - before
+
+
+def proposed_event_ids(conn: sqlite3.Connection, prompt_version: str) -> set[str]:
+    """Events already proposed under this prompt version."""
+    return {row[0] for row in conn.execute(
+        "SELECT event_id FROM label_proposals WHERE prompt_version = ?",
+        (prompt_version,))}
+
+
+def bars_in_range(conn: sqlite3.Connection, ticker: str, start_utc: int,
+                  end_utc: int, interval: str = "60m") -> list[sqlite3.Row]:
+    """Bars for one ticker inside [start, end], oldest first."""
+    return conn.execute(
+        """SELECT ts_utc, close, volume FROM bars
+           WHERE ticker = ? AND interval = ? AND ts_utc BETWEEN ? AND ?
+           ORDER BY ts_utc""",
+        (ticker, interval, start_utc, end_utc),
+    ).fetchall()
 
 
 def prune_events(conn: sqlite3.Connection, keep_ids: set[str]) -> int:
