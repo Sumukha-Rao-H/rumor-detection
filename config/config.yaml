@@ -187,7 +187,11 @@ labeling:
   # v2: headlines are ranked by relevance to the claim before truncation. v1
   # showed the first N of a 96-hour window, which on a mega-cap meant forty
   # headlines about everything except the claim.
-  prompt_version: "label-v2"
+  # v3: SEC filings joined the evidence pool (636 of them, reaching 289 events
+  # that previously had no credible source at all). The prompt is unchanged —
+  # the version moves because the evidence did, and mixing verdicts made before
+  # and after would misreport where the labels came from.
+  prompt_version: "label-v3"
 
 event:
   gap_hours: 12
