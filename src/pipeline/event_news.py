@@ -45,6 +45,12 @@ from dataclasses import dataclass
 import requests
 
 from src import db
+from src.collectors.edgar import (
+    EdgarUnavailable,
+    fetch_filings,
+    filings_to_rows,
+    load_cik_map,
+)
 from src.collectors.news import (
     NewsUnavailable,
     fetch_finnhub,
@@ -132,12 +138,20 @@ def collect(conn, cfg: dict, apis: list[str], limit: int | None = None,
     Use "all" for belt-and-braces source diversity if there is time to spare.
     """
     windows = event_windows(conn, cfg)
-    universe = load_universe(cfg["tickers"]["universe_csv"])
+    names = load_universe(cfg["tickers"]["universe_csv"])
     session = requests.Session()
     session.headers["User-Agent"] = cfg["reddit"]["user_agent"]
     stats: dict[str, int] = {"windows": len(windows)}
 
     for api in apis:
+        # EDGAR is keyed by CIK, not company name, and SEC refuses requests
+        # that do not name a contact in the User-Agent.
+        if api == "edgar":
+            session.headers["User-Agent"] = cfg["news"]["edgar_user_agent"]
+            universe = load_cik_map(cfg, session)
+        else:
+            session.headers["User-Agent"] = cfg["reddit"]["user_agent"]
+            universe = names
         done = db.fetched_news_spans(conn, api)
         todo = [w for w in windows if w.key() not in done]
         if api == "finnhub":
@@ -160,7 +174,8 @@ def collect(conn, cfg: dict, apis: list[str], limit: int | None = None,
             limiter.wait()
             try:
                 rows = _fetch(api, cfg, session, window, universe, key)
-            except (requests.RequestException, NewsUnavailable) as exc:
+            except (requests.RequestException, NewsUnavailable,
+                    EdgarUnavailable) as exc:
                 # Deliberately not marked done: an unanswered query must stay
                 # outstanding, or §6.4 would read our throttling as "no news"
                 # and label the event FALSE.
@@ -183,6 +198,12 @@ def collect(conn, cfg: dict, apis: list[str], limit: int | None = None,
 
 def _fetch(api: str, cfg: dict, session, window: Window, universe: dict,
            api_key: str | None) -> list[tuple]:
+    if api == "edgar":
+        cik = universe.get(window.ticker)
+        if not cik:
+            return []          # not an SEC registrant; nothing to look up
+        hits = fetch_filings(cfg, session, cik, window.start_utc, window.end_utc)
+        return filings_to_rows(hits, window.ticker, cfg)
     if api == "gdelt":
         name = universe.get(window.ticker)
         query = f'"{name}"' if name else window.ticker
@@ -199,8 +220,8 @@ def _fetch(api: str, cfg: dict, session, window: Window, universe: dict,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--apis", default="finnhub,gdelt",
-                        help="comma-separated subset of finnhub,gdelt")
+    parser.add_argument("--apis", default="edgar,finnhub,gdelt",
+                        help="comma-separated subset of edgar,finnhub,gdelt")
     parser.add_argument("--limit", type=int, help="fetch at most N windows per API")
     parser.add_argument("--gdelt-scope", choices=("gap", "all"), default="gap",
                         help="'gap' (default) queries GDELT only where Finnhub "

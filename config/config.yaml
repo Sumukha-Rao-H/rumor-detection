@@ -52,6 +52,22 @@ news:
   # still refused. Pace slower and let Backoff handle what remains.
   gdelt_min_interval_s: 20.0
   finnhub_min_interval_s: 1.1     # free tier ~60 calls/min
+  # SEC EDGAR full-text search — keyless, 2001 onward, and for merger /
+  # bankruptcy / offering claims the filing is the confirmation itself.
+  edgar_base: "https://efts.sec.gov/LATEST/search-index"
+  edgar_tickers_url: "https://www.sec.gov/files/company_tickers.json"
+  # SEC asks for 10 req/s and a User-Agent naming a contact; going faster gets
+  # the IP blocked, and going anonymous gets the request refused.
+  edgar_min_interval_s: 0.15
+  edgar_user_agent: "NMAMIT ISE Project 31 sumukharaoh05@gmail.com"
+  # 8-K carries the discrete corporate events; the rest cover the claim types
+  # an 8-K does not (S-4/425 merger paperwork, SC TO/13D takeovers, 424B
+  # offerings).
+  edgar_forms: ["8-K", "S-4", "425", "SC TO-T", "SC 13D", "424B3", "424B5"]
+  # Filings carry a date but no clock. Placing them late in the US business day
+  # errs towards learning *later* than we did: erring early would invent
+  # foresight, erring late only forfeits the reward's early-commit bonus.
+  edgar_filing_hour_utc: 21
   # Finnhub's free company-news archive is a rolling ~12 months. Older requests
   # return an empty list with HTTP 200, so windows past this are skipped rather
   # than mistaken for "no news" (measured: 0 rows at 2025-08, 114 at 2025-09).
