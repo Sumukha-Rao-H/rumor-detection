@@ -352,7 +352,7 @@ def bars_in_range(conn: sqlite3.Connection, ticker: str, start_utc: int,
                   end_utc: int, interval: str = "60m") -> list[sqlite3.Row]:
     """Bars for one ticker inside [start, end], oldest first."""
     return conn.execute(
-        """SELECT ts_utc, close, volume FROM bars
+        """SELECT ts_utc, open, high, low, close, volume FROM bars
            WHERE ticker = ? AND interval = ? AND ts_utc BETWEEN ? AND ?
            ORDER BY ts_utc""",
         (ticker, interval, start_utc, end_utc),

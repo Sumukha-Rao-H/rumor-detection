@@ -43,16 +43,47 @@ DAY = 86400
 SPLITS = ("train", "val", "test")
 
 
-def labeled_events(conn) -> pd.DataFrame:
-    """Human-reviewed labeled events, oldest first."""
-    rows = conn.execute(
-        """SELECT event_id, ticker, t0_utc, claim_summary, claim_type, label,
-                  t_official_utc, label_source, n_posts, n_rumor_posts,
-                  subreddits, post_ids
-           FROM events
-           WHERE label IS NOT NULL AND human_reviewed = 1
-           ORDER BY t0_utc, event_id"""
-    ).fetchall()
+PROVISIONAL = "machine-provisional"
+
+# Machine verdicts standing in for labels. Everything downstream keys off
+# label_source, so a run built this way is identifiable after the fact.
+_PROVISIONAL_SQL = """
+    SELECT e.event_id, e.ticker, e.t0_utc, e.claim_summary, e.claim_type,
+           CASE p.verdict WHEN 'TRUE' THEN 1 ELSE 0 END AS label,
+           COALESCE(p.t_official_utc, e.t0_utc + ? ) AS t_official_utc,
+           ? AS label_source,
+           e.n_posts, e.n_rumor_posts, e.subreddits, e.post_ids
+    FROM label_proposals p JOIN events e ON e.event_id = p.event_id
+    WHERE p.verdict IN ('TRUE', 'FALSE') AND p.prompt_version = ?
+    ORDER BY e.t0_utc, e.event_id"""
+
+
+def labeled_events(conn, cfg: dict | None = None,
+                   provisional: bool = False) -> pd.DataFrame:
+    """Human-reviewed labeled events, oldest first.
+
+    `provisional` swaps in the machine's verdicts instead. They are not labels
+    and must never reach a reported result — review.py exists precisely so
+    unreviewed verdicts cannot — but Phase 3 onwards needs *some* dataset to be
+    exercised end to end before review finishes. Callers have to ask for it,
+    the rows are stamped `machine-provisional`, and the default is unchanged.
+    """
+    if provisional:
+        if cfg is None:
+            raise ValueError("provisional export needs the config")
+        horizon = int(cfg["event"]["label_horizon_hours"]) * 3600
+        rows = conn.execute(_PROVISIONAL_SQL,
+                            (horizon, PROVISIONAL,
+                             cfg["labeling"]["prompt_version"])).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT event_id, ticker, t0_utc, claim_summary, claim_type, label,
+                      t_official_utc, label_source, n_posts, n_rumor_posts,
+                      subreddits, post_ids
+               FROM events
+               WHERE label IS NOT NULL AND human_reviewed = 1
+               ORDER BY t0_utc, event_id"""
+        ).fetchall()
     frame = pd.DataFrame([dict(r) for r in rows])
     if not frame.empty:
         frame["subreddits"] = frame["subreddits"].map(_loads)
@@ -127,8 +158,9 @@ def describe(frame: pd.DataFrame) -> dict:
     return out
 
 
-def export(conn, cfg: dict, path: Path | None = None) -> tuple[pd.DataFrame, dict]:
-    frame = assign_splits(labeled_events(conn), cfg)
+def export(conn, cfg: dict, path: Path | None = None,
+           provisional: bool = False) -> tuple[pd.DataFrame, dict]:
+    frame = assign_splits(labeled_events(conn, cfg, provisional), cfg)
     stats = describe(frame)
     if path is not None and not frame.empty:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,6 +173,10 @@ def main() -> None:
     parser.add_argument("--out", help="parquet path (default: paths.events)")
     parser.add_argument("--stats", action="store_true",
                         help="report without writing the file")
+    parser.add_argument("--from-proposals", action="store_true",
+                        help="build from machine verdicts instead of reviewed "
+                             "labels — for exercising Phase 3+ before review "
+                             "finishes. NOT a reportable dataset.")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
@@ -148,7 +184,10 @@ def main() -> None:
     cfg = load_config()
     conn = db.get_conn(cfg["paths"]["db"])
     path = None if args.stats else Path(args.out or cfg["paths"]["events"])
-    frame, stats = export(conn, cfg, path)
+    if args.from_proposals:
+        log.warning("building from MACHINE verdicts — provisional, not a "
+                    "reportable dataset (rows stamped %s)", PROVISIONAL)
+    frame, stats = export(conn, cfg, path, provisional=args.from_proposals)
 
     log.info("%d labeled events, %d positive (minority share %.1f%%)",
              stats["rows"], stats.get("positives", 0),
