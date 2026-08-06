@@ -47,17 +47,77 @@ The authoritative design document is [`implementation_plan.md`](implementation_p
 
 ## Project status (update this section as phases complete)
 
-| Phase | Status |
-|---|---|
-| 0 — Environment setup | ✅ repo layout, config, requirements |
-| 1 — Data acquisition (§5) | ✅ Reddit collection complete (2026-08-04): 106.9k posts / 134.1k ticker links across all 577 days of the window, 5 subreddits. 3.7M hourly bars (1,566 tickers). News is a smoke test only — real collection is per-event in §6.4. |
-| 2 — Event construction & labeling (§6) | 🟡 §6.1–§6.3 done (`pipeline/events.py`): 4,770 candidate events. **§6.2 LLM triage complete (2026-08-05)**: all 4,770 seeds judged, **1,170 rumor events** over 422 tickers, 2025-01-01..2026-07-28 — above the §6.2 target of 500–800. §6.4 ground-truth labeling not started |
-| 3 — Features & state (§7) | ⏳ not started |
-| 4 — RL environment (§8) | ⏳ not started |
-| 5 — Training (§9) | ⏳ not started |
-| 6 — LLM policy baseline (§10) | ⏳ not started |
-| 7 — Baselines & evaluation (§11) | ⏳ not started |
-| 8 — Streamlit demo (§12) | ⏳ not started |
+| Phase                                    | Status                                                                                                                                                                                                                                                                                                |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0 — Environment setup                   | ✅ repo layout, config, requirements                                                                                                                                                                                                                                                                  |
+| 1 — Data acquisition (§5)              | ✅ Reddit collection complete (2026-08-04): 106.9k posts / 134.1k ticker links across all 577 days of the window, 5 subreddits. 3.7M hourly bars (1,566 tickers). News is a smoke test only — real collection is per-event in §6.4.                                                                 |
+| 2 — Event construction & labeling (§6) | 🟡 §6.1–§6.3 done (`pipeline/events.py`): 4,770 candidate events. **§6.2 LLM triage complete (2026-08-05)**: all 4,770 seeds judged, **1,170 rumor events** over 422 tickers, 2025-01-01..2026-07-28 — above the §6.2 target of 500–800. **§6.4 machine proposals complete (2026-08-06)**: 42 TRUE / 413 FALSE / 715 UNVERIFIED. **Human review is the open item — 0 of 1,170 reviewed** |
+| 3 — Features & state (§7)              | ✅ `pipeline/features.py`: one (48, 418) tensor per event. Leakage test rebuilds each row with the future deleted and asserts it is unchanged                                                                                                                                                       |
+| 4 — RL environment (§8)                | ✅ `rl/env.py`: 3-action MDP, passes `gymnasium` `check_env`; reward accounting unit-tested                                                                                                                                                                                                          |
+| 5 — Training (§9)                      | 🟡 `rl/train.py`: PPO + DQN run end to end on CPU (~19 s). Only ever run on the **provisional** dataset so far — no real training run, no 5-seed protocol, no reward ablation                                                                                                                        |
+| 6 — LLM policy baseline (§10)          | ⏳ not started                                                                                                                                                                                                                                                                                        |
+| 7 — Baselines & evaluation (§11)       | 🟡 `eval/metrics.py` done (accuracy/F1, abstention, Brier, ECE, Δ) with random + immediate policies. §11.1's LogReg/XGBoost fixed-horizon baselines not written                                                                                                                                     |
+| 8 — Streamlit demo (§12)               | ✅ `app/dashboard.py`: event replay, policy comparison, dataset composition                                                                                                                                                                                                                          |
+
+### Labels, and the provisional dataset — 2026-08-06
+
+`events.label` is still NULL for every row: the machine's verdicts live in
+`label_proposals` and only a human promotes them (`pipeline/review.py`).
+That rule has not been relaxed. What was added is an explicit escape hatch so
+Phase 3+ could be built before review finishes:
+
+```
+python -m src.pipeline.dataset --from-proposals   # 451 events, 9.3% positive
+```
+
+Rows are stamped `machine-provisional`, the default export still refuses
+machine verdicts, and the dashboard shows a banner. **Nothing produced this way
+is reportable.** Every result in the report must come from a reviewed export.
+
+The imbalance is the live risk: on the provisional set PPO reaches 80.9%
+accuracy with **F1 = 0.000** — it answers FALSE on every event, which is the
+correct optimum for a 9.3% positive class. The env and reward are fine; the
+dataset is the problem.
+
+### Where TRUE labels come from — 2026-08-06
+
+Measured, so nobody re-derives it: every TRUE proposal traces to **two**
+domains, sec.gov (23) and cnbc.com (19). Coverage is not the gap — EDGAR spans
+cover all 1,170 events. The free tiers simply do not return primary sources:
+
+| source  | rows   | whitelist yield                    |
+| ------- | ------ | ---------------------------------- |
+| Finnhub | 30,735 | 4.5% (almost entirely CNBC)        |
+| GDELT   | 2,932  | 0.5% (mostly foreign aggregators)  |
+| EDGAR   | 636    | primary by definition              |
+
+prnewswire has 1 article and businesswire 0, so the press-release wires
+contribute nothing. Three dead ends already tested: topping up EDGAR (no gap),
+running GDELT harder (0.5% yield), and widening the horizon to 7 days (reaches
+27 more filings). `dowjones` rows are market commentary, not newswire copy —
+tier 2 is correct for them.
+
+Consequence: a filing inside the label horizon is the strongest remaining
+signal, so review is prioritised by it.
+
+```
+python -m src.pipeline.review export --bucket moved_filed   # 144 rows, do first
+python -m src.pipeline.review export --bucket moved         # the other 495
+python -m src.pipeline.review import data/review/<file>.csv
+```
+
+A TRUE with no `t_official` is refused on import — Δ is measured against that
+clock, and `moved` proposals carry no date to fall back on.
+
+### Market bar coverage — 2026-08-06
+
+`collect_ticker` resumes from the newest cached bar and only moves **forward**,
+so an earlier `--start` used to fetch nothing. Use `--backfill` to widen
+coverage backwards (upserts are idempotent). Two gaps this hid, both now
+filled: 96 event tickers had no bars at all, and labeling needs 22 days of
+baseline before t₀ while bars began at window start — which made every event
+in the first three weeks unlabelable. 182 of 228 `no_bars` events recovered;
+the remaining 46 are halted or delisted tickers with no usable tape.
 
 ### Ticker universe (regenerate, don't hand-edit) — 2026-08-04
 
@@ -130,11 +190,11 @@ Requests go to whichever key is ready soonest, so a batch spreads across the
 pool instead of draining one person's quota. The three 429-ish failures are
 **not** interchangeable and the code must keep treating them separately:
 
-| failure | response | why |
-|---|---|---|
-| per-minute (`RPM`/`PerMinute`) | back off, retry the *same* key | rotating here burns every key in a minute |
-| per-day (`RPD`/`PerDay`) | cool until midnight in `quota_reset_tz` | the key really is spent |
-| 400/401/403 | retire for the session | borrowed keys include revoked ones |
+| failure                            | response                                 | why                                       |
+| ---------------------------------- | ---------------------------------------- | ----------------------------------------- |
+| per-minute (`RPM`/`PerMinute`) | back off, retry the*same* key          | rotating here burns every key in a minute |
+| per-day (`RPD`/`PerDay`)       | cool until midnight in`quota_reset_tz` | the key really is spent                   |
+| 400/401/403                        | retire for the session                   | borrowed keys include revoked ones        |
 
 `classify_quota()` reads the scope out of the **full** response body — Gemini
 hides it in `error.details[].quotaId`, past the 200-char message truncation.
