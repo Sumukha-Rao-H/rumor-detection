@@ -13,10 +13,16 @@ server running.
 
 The sheet is ordered by what is worth a human's attention, not by event id:
 
-  moved      the largest bucket and the one that decides the dataset. The stock
-             moved on the claim but no free source published anything we could
-             cite — many are real confirmations nobody indexed. These are where
-             the missing TRUE labels are.
+  moved_filed  the subset of `moved` whose ticker filed with the SEC inside the
+             label horizon. Measured 2026-08-06: every TRUE label in the set so
+             far came from just two domains, sec.gov (23) and cnbc.com (19),
+             because the free news tiers return aggregators — GDELT yields 0.5%
+             whitelisted sources and Finnhub 4.5%. A filing in the window is
+             therefore the strongest remaining signal that a claim was real,
+             and 184 of the 639 moved events have one. Review these first.
+  moved      the rest of the largest bucket. The stock moved on the claim but no
+             free source published anything we could cite — many are real
+             confirmations nobody indexed.
   secondary  an aggregator supported the claim but cannot settle it alone.
              A person can tell "Reuters confirms" from "Benzinga repeats the
              rumor" in seconds; the labeler deliberately cannot.
@@ -53,8 +59,12 @@ log = logging.getLogger(__name__)
 # What the reviewer may write in the `label` column.
 ACCEPTED = {"TRUE": 1, "FALSE": 0, "SKIP": None, "": None}
 
+_FILED = ("EXISTS (SELECT 1 FROM news n WHERE n.ticker = e.ticker AND n.api = 'edgar'"
+          " AND n.seen_utc BETWEEN e.t0_utc AND e.t0_utc + {horizon})")
+
 BUCKETS = {
-    "moved": ("rule = 'moved'",),
+    "moved_filed": (f"rule = 'moved' AND {_FILED}",),
+    "moved": (f"rule = 'moved' AND NOT {_FILED}",),
     "secondary": ("rule IN ('confirmed_secondary', 'denied_secondary')",),
     "pre_t0": ("rule = 'confirmed_pre_t0'",),
     "confirmed": ("rule IN ('confirmed', 'denied')",),
@@ -73,12 +83,18 @@ COLUMNS = [
 ]
 
 
+def bucket_where(bucket: str, cfg: dict) -> str:
+    """The bucket's SQL predicate, with the label horizon filled in."""
+    if bucket not in BUCKETS:
+        raise SystemExit(f"unknown bucket {bucket!r}; pick from {sorted(BUCKETS)}")
+    return BUCKETS[bucket][0].format(
+        horizon=int(cfg["event"]["label_horizon_hours"]) * 3600)
+
+
 def sheet_rows(conn, cfg: dict, bucket: str, limit: int | None = None,
                include_reviewed: bool = False) -> list[dict]:
     """Proposals in one bucket, rendered for review."""
-    if bucket not in BUCKETS:
-        raise SystemExit(f"unknown bucket {bucket!r}; pick from {sorted(BUCKETS)}")
-    where = BUCKETS[bucket][0]
+    where = bucket_where(bucket, cfg)
     reviewed = "" if include_reviewed else " AND e.human_reviewed = 0"
     rows = conn.execute(
         f"""SELECT p.*, e.claim_summary, e.claim_type, e.ticker, e.t0_utc
@@ -196,7 +212,8 @@ def status(conn, cfg: dict) -> dict:
     """Where review stands, per bucket."""
     version = cfg["labeling"]["prompt_version"]
     out = {}
-    for name, (where,) in BUCKETS.items():
+    for name in BUCKETS:
+        where = bucket_where(name, cfg)
         row = conn.execute(
             f"""SELECT COUNT(*) total, SUM(e.human_reviewed) done
                 FROM label_proposals p JOIN events e ON e.event_id = p.event_id

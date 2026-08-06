@@ -247,3 +247,31 @@ def test_status_counts_progress_per_bucket(tmp_path):
     conn.execute("UPDATE events SET human_reviewed = 1 WHERE event_id='A-1'")
     conn.commit()
     assert status(conn, _cfg(tmp_path))["moved"] == (1, 2)
+
+
+def test_moved_splits_on_whether_the_ticker_filed_in_the_horizon(tmp_path):
+    """A filing inside the horizon is the strongest signal left that a claim was
+    real, so those rows are reviewed as their own bucket and the rest excluded."""
+    conn = db.get_conn(tmp_path / "t.db")
+    _event(conn, "A-1", ticker="AAA")
+    _event(conn, "B-1", ticker="BBB")
+    _proposal(conn, "A-1", rule="moved")
+    _proposal(conn, "B-1", rule="moved")
+    db.upsert_news(conn, [("u1", "AAA", "AAA files an 8-K", "sec.gov",
+                           T0 + 3600, "edgar")])
+
+    cfg = _cfg(tmp_path)
+    assert [r["event_id"] for r in sheet_rows(conn, cfg, "moved_filed")] == ["A-1"]
+    assert [r["event_id"] for r in sheet_rows(conn, cfg, "moved")] == ["B-1"]
+
+
+def test_a_filing_past_the_horizon_does_not_promote_the_row(tmp_path):
+    conn = db.get_conn(tmp_path / "t.db")
+    _event(conn, "A-1", ticker="AAA")
+    _proposal(conn, "A-1", rule="moved")
+    db.upsert_news(conn, [("u1", "AAA", "AAA files an 8-K", "sec.gov",
+                           T0 + 100 * 3600, "edgar")])
+
+    cfg = _cfg(tmp_path)
+    assert sheet_rows(conn, cfg, "moved_filed") == []
+    assert [r["event_id"] for r in sheet_rows(conn, cfg, "moved")] == ["A-1"]
