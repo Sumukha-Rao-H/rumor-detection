@@ -13,6 +13,7 @@ Usage:
   python -m src.collectors.market --tickers TSLA,AAPL --start 2025-01-01 --end 2025-06-01
   python -m src.collectors.market --from-db            # all tickers seen in posts + SPY
   python -m src.collectors.market --from-db --interval 1d
+  python -m src.collectors.market --tickers TSLA --start 2024-12-01 --backfill
 """
 
 from __future__ import annotations
@@ -71,11 +72,18 @@ def clamp_start(start_ts: int, interval: str, now_ts: int) -> int:
 
 
 def collect_ticker(conn, ticker: str, start_ts: int, end_ts: int,
-                   interval: str) -> int:
-    """Fetch and upsert bars for one ticker, resuming from the cache."""
+                   interval: str, resume: bool = True) -> int:
+    """Fetch and upsert bars for one ticker, resuming from the cache.
+
+    `resume` is the incremental path and only ever moves *forward*: it starts
+    from the newest cached bar, so a window that begins earlier than what is
+    already stored fetches nothing. Pass resume=False to widen coverage
+    backwards — upserts are idempotent, so re-requesting the overlap is
+    wasted bandwidth but never duplicate rows.
+    """
     now = utc_now_ts()
     start_ts = clamp_start(start_ts, interval, now)
-    cached = db.latest_bar_ts(conn, ticker, interval)
+    cached = db.latest_bar_ts(conn, ticker, interval) if resume else None
     if cached is not None and cached >= start_ts:
         start_ts = cached + 1  # incremental: refetch nothing we already have
     if start_ts >= end_ts:
@@ -101,6 +109,10 @@ def main() -> None:
     parser.add_argument("--start", help="YYYY-MM-DD (default: backtest_window.start)")
     parser.add_argument("--end", help="YYYY-MM-DD (default: now)")
     parser.add_argument("--interval", help="60m (default) or 1d")
+    parser.add_argument("--backfill", action="store_true",
+                        help="re-request the whole window instead of resuming "
+                             "from the newest cached bar — needed to extend "
+                             "coverage backwards")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -124,7 +136,8 @@ def main() -> None:
     for ticker in tickers:
         limiter.wait()
         try:
-            total += collect_ticker(conn, ticker, start_ts, end_ts, interval)
+            total += collect_ticker(conn, ticker, start_ts, end_ts, interval,
+                                    resume=not args.backfill)
         except Exception:
             log.exception("failed to collect %s — continuing", ticker)
     n_bars = conn.execute("SELECT COUNT(*) FROM bars").fetchone()[0]
