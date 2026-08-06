@@ -152,7 +152,7 @@ def _write(path, rows):
 def test_a_reviewed_sheet_writes_labels_and_marks_them_human(tmp_path):
     conn = db.get_conn(tmp_path / "t.db")
     _event(conn)
-    _proposal(conn)
+    _proposal(conn, t_official=T0 + 5 * 3600)  # a TRUE needs a clock to import
     path = tmp_path / "sheet.csv"
     _write(path, [{"event_id": "A-1", "label": "TRUE", "t_official": ""}])
 
@@ -227,6 +227,7 @@ def test_export_then_import_round_trips(tmp_path):
 
     rows = list(csv.DictReader(path.open(encoding="utf-8")))
     rows[0]["label"] = "TRUE"
+    rows[0]["t_official"] = "2025-06-02"  # a TRUE must carry its clock
     rows[1]["label"] = "FALSE"
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=rows[0].keys())
@@ -275,3 +276,41 @@ def test_a_filing_past_the_horizon_does_not_promote_the_row(tmp_path):
     cfg = _cfg(tmp_path)
     assert sheet_rows(conn, cfg, "moved_filed") == []
     assert [r["event_id"] for r in sheet_rows(conn, cfg, "moved")] == ["A-1"]
+
+
+def test_true_without_a_usable_t_official_is_refused(tmp_path):
+    """Delta is measured against t_official, so a dateless TRUE is unusable —
+    and `moved` proposals carry no date to fall back on."""
+    conn = db.get_conn(tmp_path / "t.db")
+    _event(conn)
+    _proposal(conn, rule="moved", t_official=None)
+    path = tmp_path / "sheet.csv"
+    _write(path, [{"event_id": "A-1", "label": "TRUE", "t_official": ""}])
+
+    with pytest.raises(SystemExit, match="no t_official"):
+        import_sheet(conn, _cfg(tmp_path), path)
+    assert conn.execute("SELECT label FROM events").fetchone()[0] is None
+
+
+def test_true_is_accepted_with_a_date_from_the_sheet(tmp_path):
+    from src.utils.timeutils import date_str_to_ts
+    conn = db.get_conn(tmp_path / "t.db")
+    _event(conn)
+    _proposal(conn, rule="moved", t_official=None)
+    path = tmp_path / "sheet.csv"
+    _write(path, [{"event_id": "A-1", "label": "TRUE",
+                   "t_official": "2025-06-02"}])
+
+    assert import_sheet(conn, _cfg(tmp_path), path)["applied"] == 1
+    row = conn.execute("SELECT label, t_official_utc FROM events").fetchone()
+    assert row[0] == 1 and row[1] == date_str_to_ts("2025-06-02")
+
+
+def test_a_dateless_false_is_still_fine(tmp_path):
+    """Only TRUE needs a clock — FALSE carries the horizon, not a document."""
+    conn = db.get_conn(tmp_path / "t.db")
+    _event(conn)
+    _proposal(conn, rule="moved", t_official=None)
+    path = tmp_path / "sheet.csv"
+    _write(path, [{"event_id": "A-1", "label": "FALSE", "t_official": ""}])
+    assert import_sheet(conn, _cfg(tmp_path), path)["applied"] == 1

@@ -175,6 +175,20 @@ def parse_decision(row: dict) -> tuple[str, int | None, int | None]:
     return event_id, label, t_official
 
 
+def _true_rows_without_a_clock(conn, decisions: list[tuple]) -> list[str]:
+    """event_ids labeled TRUE that would end up with t_official = NULL."""
+    candidates = [event_id for label, stamp, event_id in decisions
+                  if label == 1 and stamp is None]
+    if not candidates:
+        return []
+    marks = ",".join("?" * len(candidates))
+    dated = {r[0] for r in conn.execute(
+        f"""SELECT event_id FROM label_proposals
+            WHERE event_id IN ({marks}) AND t_official_utc IS NOT NULL""",
+        candidates)}
+    return [e for e in candidates if e not in dated]
+
+
 def import_sheet(conn, cfg: dict, path: Path) -> dict:
     """Apply a reviewed sheet. Only rows carrying a decision are written."""
     with path.open(newline="", encoding="utf-8") as handle:
@@ -192,6 +206,18 @@ def import_sheet(conn, cfg: dict, path: Path) -> dict:
     unknown = [d[2] for d in decisions if d[2] not in known]
     if unknown:
         raise SystemExit(f"{len(unknown)} unknown event_ids, e.g. {unknown[:3]}")
+
+    # A TRUE with no t_official is the one thing this sheet must not produce:
+    # Delta is measured against that clock, so the label would be unusable and
+    # silently so. The machine's timestamp covers a reviewer who is only
+    # correcting the verdict, but `moved` proposals carry none by construction
+    # — those are precisely the rows a human is asked to date.
+    undated = _true_rows_without_a_clock(conn, decisions)
+    if undated:
+        raise SystemExit(
+            f"{len(undated)} row(s) marked TRUE with no t_official and none on "
+            f"record, e.g. {undated[:3]}. Fill the t_official column (the date "
+            f"of the document that confirms the claim) and re-import.")
 
     # A reviewed label falls back to the machine's t_official when the reviewer
     # did not supply one — they are correcting the verdict, not the clock.
