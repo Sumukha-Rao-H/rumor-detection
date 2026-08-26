@@ -233,8 +233,10 @@ def detection_delay_summary(df: pd.DataFrame) -> DelayResult:
     "detected everything with no warning"; nan says there is nothing to
     measure. The always-quiet baseline lands here and must not error.
     """
-    frame = validate_predictions(df)
-    delays = detection_delays(frame)
+    # detection_delays validates; re-validating here would double the cost on
+    # every slice of the report table.
+    delays = detection_delays(df)
+    frame = validate_predictions(df) if delays.empty else df
 
     windows = window_summary(frame)
     n_positive = int(windows["is_positive"].sum())
