@@ -94,11 +94,25 @@ news:
   gdelt_base: "https://api.gdeltproject.org/api/v2/doc/doc"
   gdelt_min_interval_s: 5.0        # unreliable under load — breadth only, never a dependency
   max_records: 75
-  # Wire services and top-tier outlets. An appearance here is what "the news
-  # is public" means for the t0 correction.
-  whitelist: [reuters.com, bloomberg.com, apnews.com, cnbc.com, wsj.com, ft.com,
-              prnewswire.com, businesswire.com, globenewswire.com,
-              accesswire.com, sec.gov]
+  # What "the news is public" means for the t0 correction — TIERED, because a
+  # wire-only list would apply to almost nothing on free data.
+  #
+  # Measured 2026-08-26: Finnhub's free tier returned NO wire services across
+  # 1,080 articles / 5 tickers (Yahoo, Benzinga, SeekingAlpha, ChartMill, CNBC,
+  # Fintel), and GDELT was unreachable. Only CNBC matched the old list: 3%.
+  #
+  # Phase 4 reports t0 under tier 1 only AND tier 1+2, with the gap between
+  # them, so this choice is measured rather than assumed.
+  #
+  # Entries may be written as a domain or as a publisher name — both are
+  # normalised to a stem (lowercase, TLD dropped, non-alphanumerics stripped),
+  # so "reuters.com" and "Reuters" are the same publisher. Keep stems distinctive:
+  # a very short one like "ft" could in principle collide.
+  whitelist_tier1:   # the release itself: wires and top-tier outlets
+    [prnewswire.com, businesswire.com, globenewswire.com, accesswire.com,
+     reuters.com, bloomberg.com, apnews.com, wsj.com, ft.com, sec.gov]
+  whitelist_tier2:   # fast republishers of wire copy — usually within minutes
+    [CNBC, Benzinga, Yahoo, SeekingAlpha, MarketWatch, Barrons, Reuters Institute]
 
 # ------------------------------------------------------------
 # Features (review §7.2 — every statistic backward-looking only)

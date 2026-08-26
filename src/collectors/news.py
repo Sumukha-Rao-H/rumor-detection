@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 from urllib.parse import urlparse
 
 import requests
@@ -47,7 +48,49 @@ def domain_of(url: str) -> str:
     return netloc[4:] if netloc.startswith("www.") else netloc
 
 
-def gdelt_articles_to_rows(articles: list[dict], ticker: str) -> list[tuple]:
+def publisher_stem(identifier: str | None) -> str:
+    """Normalise a publisher identifier so a domain and a name compare equal.
+
+    Lowercase, drop the TLD, strip everything non-alphanumeric:
+
+        'reuters.com'    -> 'reuters'      'Reuters'      -> 'reuters'
+        'prnewswire.com' -> 'prnewswire'   'PR Newswire'  -> 'prnewswire'
+
+    The two APIs identify publishers differently — GDELT by domain, Finnhub by
+    display name — and this is what lets one whitelist cover both without a
+    hand-maintained mapping table that would need an entry per publisher.
+
+    Weakness worth knowing: a very short stem could collide ('ft.com' -> 'ft').
+    The whitelist is small and curated, so a collision shows up in review.
+    """
+    if not identifier:
+        return ""
+    text = identifier.strip().lower()
+    if "." in text and " " not in text:      # looks like a domain
+        text = text.rsplit(".", 1)[0]
+    return re.sub(r"[^a-z0-9]", "", text)
+
+
+def tier_of(cfg: dict, source_domain: str | None,
+            source_name: str | None) -> int | None:
+    """Credibility tier for a publisher, or None if it is on neither list.
+
+    Both identifiers are checked against both tiers: the tier is a property of
+    the publisher, not of which API happened to supply the row. If Finnhub ever
+    returns "Reuters", that is tier 1.
+    """
+    ncfg = cfg["news"]
+    stems = {publisher_stem(source_domain), publisher_stem(source_name)} - {""}
+    if not stems:
+        return None
+    for tier, key in ((1, "whitelist_tier1"), (2, "whitelist_tier2")):
+        allowed = {publisher_stem(entry) for entry in ncfg.get(key, [])}
+        if stems & allowed:
+            return tier
+    return None
+
+
+def gdelt_articles_to_rows(cfg: dict, articles: list[dict], ticker: str) -> list[tuple]:
     """GDELT artlist entries -> news rows.
 
     GDELT identifies a publisher by DOMAIN, so `source_domain` is filled and
@@ -62,12 +105,13 @@ def gdelt_articles_to_rows(articles: list[dict], ticker: str) -> list[tuple]:
             seen_utc = gdelt_to_ts(seendate)
         except ValueError:
             continue
+        domain = art.get("domain") or domain_of(url)
         rows.append((url, ticker, art.get("title") or "",
-                     art.get("domain") or domain_of(url), None, seen_utc, "gdelt"))
+                     domain, None, tier_of(cfg, domain, None), seen_utc, "gdelt"))
     return rows
 
 
-def finnhub_items_to_rows(items: list[dict], ticker: str) -> list[tuple]:
+def finnhub_items_to_rows(cfg: dict, items: list[dict], ticker: str) -> list[tuple]:
     """Finnhub /company-news entries -> news rows.
 
     The publisher comes from the `source` field ("Benzinga", "CNBC"), NOT from
@@ -83,9 +127,9 @@ def finnhub_items_to_rows(items: list[dict], ticker: str) -> list[tuple]:
         url, ts = item.get("url"), item.get("datetime")
         if not url or not ts:
             continue
+        name = (item.get("source") or "").strip() or None
         rows.append((url, ticker, item.get("headline") or "",
-                     None, (item.get("source") or "").strip() or None,
-                     int(ts), "finnhub"))
+                     None, name, tier_of(cfg, None, name), int(ts), "finnhub"))
     return rows
 
 
@@ -160,7 +204,7 @@ def collect(cfg: dict, conn, ticker: str, query: str | None,
         api_key = require_env("FINNHUB_API_KEY")
         (finnhub_limiter or RateLimiter(ncfg["finnhub_min_interval_s"])).wait()
         items = fetch_finnhub(cfg, session, api_key, ticker, start_ts, end_ts)
-        rows = finnhub_items_to_rows(items, ticker)
+        rows = finnhub_items_to_rows(cfg, items, ticker)
         parsed += len(rows)
         n = db.upsert_news(conn, rows)
         log.info("Finnhub %s: %d items, %d new", ticker, len(items), n)
@@ -169,7 +213,7 @@ def collect(cfg: dict, conn, ticker: str, query: str | None,
         (gdelt_limiter or RateLimiter(ncfg["gdelt_min_interval_s"])).wait()
         q = query or default_gdelt_query(conn, ticker)
         articles = fetch_gdelt(cfg, session, q, start_ts, end_ts)
-        rows = gdelt_articles_to_rows(articles, ticker)
+        rows = gdelt_articles_to_rows(cfg, articles, ticker)
         parsed += len(rows)
         n = db.upsert_news(conn, rows)
         log.info("GDELT %r: %d articles, %d new", q, len(articles), n)
@@ -186,9 +230,13 @@ def collect(cfg: dict, conn, ticker: str, query: str | None,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ticker", required=True)
+    parser.add_argument("--ticker")
+    parser.add_argument("--retier", action="store_true",
+                        help="recompute source_tier for every stored row from "
+                             "the current whitelist, then exit. Use after "
+                             "editing news.whitelist_tier1/tier2.")
     parser.add_argument("--query", help="GDELT query override, e.g. '\"Tesla\"'")
-    parser.add_argument("--start", required=True, help="YYYY-MM-DD")
+    parser.add_argument("--start", help="YYYY-MM-DD")
     parser.add_argument("--end", help="YYYY-MM-DD (default: now)")
     parser.add_argument("--apis", default="finnhub,gdelt",
                         help="comma-separated subset of finnhub,gdelt")
@@ -198,6 +246,15 @@ def main() -> None:
                         format="%(asctime)s [%(levelname)s] %(message)s")
     cfg = load_config()
     conn = db.get_conn(cfg["paths"]["db"])
+
+    if args.retier:
+        changed = db.retier_news(conn, cfg)
+        log.info("Re-tiered from current config: %d row(s) changed.", changed)
+        return
+
+    if not args.ticker or not args.start:
+        parser.error("--ticker and --start are required unless --retier is given")
+
     collect(
         cfg, conn,
         ticker=args.ticker.upper(),

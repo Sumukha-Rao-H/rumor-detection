@@ -102,26 +102,75 @@ def test_bars_upsert_and_latest(conn):
 
 def test_news_dedupe_by_url(conn):
     row = ("https://reuters.com/a", "TSLA", "Tesla acquires X", "reuters.com",
-           None, 1_750_000_000, "finnhub")
+           None, 1, 1_750_000_000, "finnhub")
     assert db.upsert_news(conn, [row]) == 1
     assert db.upsert_news(conn, [row]) == 0
 
 
 def test_earliest_news_ts_drives_the_t0_correction(conn):
+    """Tiers decide what counts as "the news is public".
+
+    A stock-screener blog picks it up first, then a republisher, then the wire
+    itself. Which timestamp becomes t0 depends entirely on how far down the
+    tiers you are willing to look — which is why Phase 4 reports both.
+    """
     db.upsert_news(conn, [
-        # A blog picks it up first, then the wire, then the 8-K is accepted.
         ("https://smallblog.example/a", "AAPL", "chatter", "smallblog.example",
-         None, 1_750_000_000, "gdelt"),
-        ("https://businesswire.com/b", "AAPL", "press release", "businesswire.com",
-         None, 1_750_001_000, "finnhub"),
+         None, None, 1_750_000_000, "gdelt"),            # untiered
+        ("https://finnhub.io/api/news?id=b", "AAPL", "pickup", None,
+         "Benzinga", 2, 1_750_000_500, "finnhub"),        # tier 2
+        ("https://businesswire.com/c", "AAPL", "press release", "businesswire.com",
+         None, 1, 1_750_001_000, "gdelt"),                # tier 1
     ])
     lo, hi = 1_749_900_000, 1_750_010_000
-    assert db.earliest_news_ts(conn, "AAPL", lo, hi) == 1_750_000_000
-    # Restricting to credible domains skips the blog.
-    assert db.earliest_news_ts(
-        conn, "AAPL", lo, hi, domains={"businesswire.com"}) == 1_750_001_000
-    assert db.earliest_news_ts(conn, "AAPL", lo, hi, domains={"reuters.com"}) is None
+
+    # tier 1 only — the release itself
+    assert db.earliest_news_ts(conn, "AAPL", lo, hi, max_tier=1) == 1_750_001_000
+    # tier 1+2 (default) — a republisher counts, so t0 moves earlier
+    assert db.earliest_news_ts(conn, "AAPL", lo, hi) == 1_750_000_500
+    # anything at all — the blog wins, which is why this is not the default
+    assert db.earliest_news_ts(conn, "AAPL", lo, hi, max_tier=None) == 1_750_000_000
+
     assert db.earliest_news_ts(conn, "TSLA", lo, hi) is None
+
+
+def test_retier_after_a_whitelist_change(conn):
+    """The escape hatch for stale stored tiers.
+
+    Stored tiers go stale the moment the whitelist is tuned. This asserts the
+    fix actually moves rows rather than being an untested promise.
+    """
+    from src.utils.config import load_config
+
+    cfg = load_config()
+    db.upsert_news(conn, [
+        ("https://x/1", "MSFT", "t", None, "ChartMill", None, 1_750_000_000, "finnhub"),
+    ])
+    assert conn.execute(
+        "SELECT source_tier FROM news WHERE url='https://x/1'").fetchone()[0] is None
+
+    cfg["news"]["whitelist_tier2"] = list(cfg["news"]["whitelist_tier2"]) + ["ChartMill"]
+    assert db.retier_news(conn, cfg) == 1
+    assert conn.execute(
+        "SELECT source_tier FROM news WHERE url='https://x/1'").fetchone()[0] == 2
+
+    # and back again — retiering is not one-way
+    cfg["news"]["whitelist_tier2"] = [
+        e for e in cfg["news"]["whitelist_tier2"] if e != "ChartMill"]
+    assert db.retier_news(conn, cfg) == 1
+    assert conn.execute(
+        "SELECT source_tier FROM news WHERE url='https://x/1'").fetchone()[0] is None
+
+
+def test_retier_is_a_noop_when_nothing_changed(conn):
+    from src.utils.config import load_config
+
+    db.upsert_news(conn, [
+        ("https://y/1", "MSFT", "t", "reuters.com", None, 1, 1_750_000_000, "gdelt"),
+    ])
+    cfg = load_config()
+    db.retier_news(conn, cfg)
+    assert db.retier_news(conn, cfg) == 0
 
 
 def test_meta_records_snapshot_provenance(conn):

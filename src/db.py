@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS news (
   -- know what it is holding:
   source_domain TEXT,            -- GDELT: 'reuters.com'. NULL for Finnhub.
   source_name TEXT,              -- Finnhub: 'Benzinga'. NULL for GDELT.
+  source_tier INTEGER,           -- 1 wire/top-tier, 2 fast republisher, NULL not credible
   seen_utc INTEGER, api TEXT     -- 'finnhub' | 'gdelt'
 );
 CREATE INDEX IF NOT EXISTS idx_news_ticker ON news (ticker, seen_utc);
@@ -96,6 +97,7 @@ CREATE TABLE IF NOT EXISTS meta (
 #: explicitly or every dev keeps an old schema without noticing.
 MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("news", "source_name", "TEXT"),
+    ("news", "source_tier", "INTEGER"),
 )
 
 
@@ -285,7 +287,8 @@ def latest_bar_ts(conn: sqlite3.Connection, ticker: str, interval: str) -> int |
 # --------------------------------------------------------------------------
 
 def upsert_news(conn: sqlite3.Connection, rows: list[tuple]) -> int:
-    """rows: (url, ticker, title, source_domain, source_name, seen_utc, api).
+    """rows: (url, ticker, title, source_domain, source_name, source_tier,
+    seen_utc, api).
 
     `source_domain` and `source_name` are deliberately separate: GDELT gives a
     domain, Finnhub gives a display name, and collapsing them into one column
@@ -297,8 +300,9 @@ def upsert_news(conn: sqlite3.Connection, rows: list[tuple]) -> int:
     conn.executemany(
         """
         INSERT OR IGNORE INTO news
-          (url, ticker, title, source_domain, source_name, seen_utc, api)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+          (url, ticker, title, source_domain, source_name, source_tier,
+           seen_utc, api)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -309,21 +313,61 @@ def upsert_news(conn: sqlite3.Connection, rows: list[tuple]) -> int:
 
 def earliest_news_ts(
     conn: sqlite3.Connection, ticker: str, lo_utc: int, hi_utc: int,
-    domains: set[str] | None = None,
+    max_tier: int | None = 2,
 ) -> int | None:
-    """Earliest article timestamp for a ticker in [lo, hi]. This is the second
-    half of the t0 correction: companies wire a press release before filing the
-    8-K, so acceptance time alone overstates the warning window."""
-    rows = conn.execute(
-        """SELECT seen_utc, source_domain FROM news
-           WHERE ticker = ? AND seen_utc BETWEEN ? AND ?
-           ORDER BY seen_utc ASC""",
-        (ticker, lo_utc, hi_utc),
-    ).fetchall()
-    for row in rows:
-        if domains is None or row["source_domain"] in domains:
-            return row["seen_utc"]
-    return None
+    """Earliest credible article timestamp for a ticker in [lo, hi].
+
+    The second half of the t0 correction: companies wire a press release before
+    filing the 8-K, so acceptance time alone overstates the warning window.
+
+    `max_tier` says how far down the credibility tiers to look:
+
+      1     wires and top-tier outlets only — the release itself
+      2     also fast republishers of wire copy (default)
+      None  anything at all, including untiered publishers
+
+    Phase 4 calls this with 1 and with 2 and reports both. That comparison IS
+    the sensitivity analysis: Finnhub's free tier carries no wire services, so
+    a tier-1-only t0 falls back to filing time for nearly every event.
+    """
+    if max_tier is None:
+        sql = """SELECT seen_utc FROM news
+                 WHERE ticker = ? AND seen_utc BETWEEN ? AND ?
+                 ORDER BY seen_utc ASC LIMIT 1"""
+        args: tuple = (ticker, lo_utc, hi_utc)
+    else:
+        sql = """SELECT seen_utc FROM news
+                 WHERE ticker = ? AND seen_utc BETWEEN ? AND ?
+                   AND source_tier IS NOT NULL AND source_tier <= ?
+                 ORDER BY seen_utc ASC LIMIT 1"""
+        args = (ticker, lo_utc, hi_utc, max_tier)
+    row = conn.execute(sql, args).fetchone()
+    return row["seen_utc"] if row else None
+
+
+def retier_news(conn: sqlite3.Connection, cfg: dict) -> int:
+    """Recompute `source_tier` for every row from the CURRENT config.
+
+    Stored tiers go stale the moment the whitelist is tuned — the same silent
+    drift as an unpinned dependency. This is the escape hatch, and a test
+    asserts it actually moves rows after a whitelist change rather than leaving
+    it an untested promise.
+
+    Returns the number of rows whose tier changed.
+    """
+    from src.collectors.news import tier_of  # local: db must not import collectors at module level
+
+    changed = 0
+    for row in conn.execute(
+        "SELECT url, source_domain, source_name, source_tier FROM news"
+    ).fetchall():
+        tier = tier_of(cfg, row["source_domain"], row["source_name"])
+        if tier != row["source_tier"]:
+            conn.execute("UPDATE news SET source_tier = ? WHERE url = ?",
+                         (tier, row["url"]))
+            changed += 1
+    conn.commit()
+    return changed
 
 
 # --------------------------------------------------------------------------
