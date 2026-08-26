@@ -28,10 +28,14 @@ def test_gdelt_rows(cfg):
     ]
     rows = gdelt_articles_to_rows(cfg, articles, "TSLA")
     assert len(rows) == 1
-    url, ticker, title, domain, name, tier, seen, api = rows[0]
-    assert (ticker, domain, api) == ("TSLA", "reuters.com", "gdelt")
-    assert name is None, "GDELT identifies publishers by domain, not by name"
-    assert seen == 1749643200  # 2025-06-11 12:00:00 UTC
+    row = rows[0]
+    assert (row["ticker"], row["source_domain"], row["api"]) == (
+        "TSLA", "reuters.com", "gdelt")
+    assert row["source_name"] is None, "GDELT identifies publishers by domain"
+    assert row["seen_utc"] == 1749643200      # crawl time, 2025-06-11 12:00 UTC
+    assert row["published_utc"] is None, (
+        "GDELT reports when its crawler SAW the article, not when it was "
+        "published — recording a crawl time as publication would corrupt t0")
 
 
 def test_finnhub_rows(cfg):
@@ -42,10 +46,12 @@ def test_finnhub_rows(cfg):
     ]
     rows = finnhub_items_to_rows(cfg, items, "TSLA")
     assert len(rows) == 1
-    url, ticker, title, domain, name, tier, seen, api = rows[0]
-    assert (seen, api) == (1749643200, "finnhub")
-    assert name == "SomeWire", "the publisher comes from `source`"
-    assert domain is None, "Finnhub gives a name, not a domain — do not guess one"
+    row = rows[0]
+    assert row["api"] == "finnhub"
+    assert row["published_utc"] == 1749643200, "`datetime` IS publication time"
+    assert row["seen_utc"] is None, "this API reports no crawl time"
+    assert row["source_name"] == "SomeWire", "the publisher comes from `source`"
+    assert row["source_domain"] is None, "a name is not a domain — do not guess"
 
 
 def test_finnhub_publisher_is_not_taken_from_the_url(cfg):
@@ -58,13 +64,13 @@ def test_finnhub_publisher_is_not_taken_from_the_url(cfg):
     items = [{"url": "https://finnhub.io/api/news?id=abc123",
               "headline": "x", "datetime": 1749643200, "source": "Benzinga"}]
     row = finnhub_items_to_rows(cfg, items, "TSLA")[0]
-    assert row[4] == "Benzinga"
-    assert "finnhub.io" not in str(row[3])
+    assert row["source_name"] == "Benzinga"
+    assert "finnhub.io" not in str(row["source_domain"])
 
 
 def test_finnhub_missing_source_is_none_not_empty(cfg):
     items = [{"url": "https://x/a", "headline": "x", "datetime": 1, "source": "  "}]
-    assert finnhub_items_to_rows(cfg, items, "TSLA")[0][4] is None
+    assert finnhub_items_to_rows(cfg, items, "TSLA")[0]["source_name"] is None
 
 
 def test_default_gdelt_query_uses_the_sec_company_name(tmp_path):
@@ -129,7 +135,7 @@ def test_rows_carry_their_tier(cfg):
     gdelt = gdelt_articles_to_rows(cfg, [{
         "url": "https://reuters.com/a", "title": "t",
         "domain": "reuters.com", "seendate": "20250611T120000Z"}], "TSLA")
-    assert gdelt[0][5] == 1
+    assert gdelt[0]["source_tier"] == 1
 
     finn = finnhub_items_to_rows(cfg, [
         {"url": "https://finnhub.io/api/news?id=1", "headline": "a",
@@ -137,4 +143,50 @@ def test_rows_carry_their_tier(cfg):
         {"url": "https://finnhub.io/api/news?id=2", "headline": "b",
          "datetime": 2, "source": "ChartMill"},
     ], "TSLA")
-    assert [r[5] for r in finn] == [2, None]
+    assert [r["source_tier"] for r in finn] == [2, None]
+
+
+# --------------------------------------------------------------------------
+# P1-14 — publication time is not crawl time
+# --------------------------------------------------------------------------
+
+
+def test_gdelt_never_populates_published_utc(cfg):
+    """The task's Done-when, stated literally.
+
+    GDELT's `seendate` is when its crawler found the article. Treating that as
+    publication would push t0 later by an unknown amount for every GDELT-sourced
+    event, and nothing downstream would flag it.
+    """
+    rows = gdelt_articles_to_rows(cfg, [
+        {"url": "https://reuters.com/a", "title": "a", "domain": "reuters.com",
+         "seendate": "20250611T120000Z"},
+        {"url": "https://apnews.com/b", "title": "b", "domain": "apnews.com",
+         "seendate": "20250611T130000Z"},
+    ], "TSLA")
+    assert len(rows) == 2
+    assert all(r["published_utc"] is None for r in rows)
+    assert all(r["seen_utc"] is not None for r in rows)
+
+
+def test_finnhub_never_populates_seen_utc(cfg):
+    """The mirror image: Finnhub reports publication, not a crawl time."""
+    rows = finnhub_items_to_rows(cfg, [
+        {"url": "https://x/1", "headline": "a", "datetime": 100, "source": "CNBC"},
+    ], "TSLA")
+    assert rows[0]["published_utc"] == 100
+    assert rows[0]["seen_utc"] is None
+
+
+def test_fetched_utc_is_always_recorded(cfg):
+    """Provenance: when WE pulled the row, distinct from both other times."""
+    from src.utils.timeutils import utc_now_ts
+
+    now = utc_now_ts()
+    finn = finnhub_items_to_rows(cfg, [
+        {"url": "https://x/1", "headline": "a", "datetime": 100, "source": "CNBC"}], "T")
+    gdelt = gdelt_articles_to_rows(cfg, [
+        {"url": "https://y/1", "title": "b", "domain": "reuters.com",
+         "seendate": "20250611T120000Z"}], "T")
+    for row in finn + gdelt:
+        assert abs(row["fetched_utc"] - now) < 5

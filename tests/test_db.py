@@ -101,8 +101,11 @@ def test_bars_upsert_and_latest(conn):
 
 
 def test_news_dedupe_by_url(conn):
-    row = ("https://reuters.com/a", "TSLA", "Tesla acquires X", "reuters.com",
-           None, 1, 1_750_000_000, "finnhub")
+    row = {"url": "https://reuters.com/a", "ticker": "TSLA",
+           "title": "Tesla acquires X", "source_domain": "reuters.com",
+           "source_name": None, "source_tier": 1,
+           "published_utc": 1_750_000_000, "seen_utc": None,
+           "fetched_utc": 1_750_000_100, "api": "finnhub"}
     assert db.upsert_news(conn, [row]) == 1
     assert db.upsert_news(conn, [row]) == 0
 
@@ -114,13 +117,18 @@ def test_earliest_news_ts_drives_the_t0_correction(conn):
     itself. Which timestamp becomes t0 depends entirely on how far down the
     tiers you are willing to look — which is why Phase 4 reports both.
     """
+    def row(url, tier, published, **kw):
+        base = {"url": url, "ticker": "AAPL", "title": "t",
+                "source_domain": None, "source_name": None, "source_tier": tier,
+                "published_utc": published, "seen_utc": None,
+                "fetched_utc": 0, "api": "finnhub"}
+        base.update(kw)
+        return base
+
     db.upsert_news(conn, [
-        ("https://smallblog.example/a", "AAPL", "chatter", "smallblog.example",
-         None, None, 1_750_000_000, "gdelt"),            # untiered
-        ("https://finnhub.io/api/news?id=b", "AAPL", "pickup", None,
-         "Benzinga", 2, 1_750_000_500, "finnhub"),        # tier 2
-        ("https://businesswire.com/c", "AAPL", "press release", "businesswire.com",
-         None, 1, 1_750_001_000, "gdelt"),                # tier 1
+        row("https://smallblog.example/a", None, 1_750_000_000),   # untiered
+        row("https://finnhub.io/api/news?id=b", 2, 1_750_000_500),  # tier 2
+        row("https://businesswire.com/c", 1, 1_750_001_000),        # tier 1
     ])
     lo, hi = 1_749_900_000, 1_750_010_000
 
@@ -143,9 +151,11 @@ def test_retier_after_a_whitelist_change(conn):
     from src.utils.config import load_config
 
     cfg = load_config()
-    db.upsert_news(conn, [
-        ("https://x/1", "MSFT", "t", None, "ChartMill", None, 1_750_000_000, "finnhub"),
-    ])
+    db.upsert_news(conn, [{
+        "url": "https://x/1", "ticker": "MSFT", "title": "t",
+        "source_domain": None, "source_name": "ChartMill", "source_tier": None,
+        "published_utc": 1_750_000_000, "seen_utc": None, "fetched_utc": 0,
+        "api": "finnhub"}])
     assert conn.execute(
         "SELECT source_tier FROM news WHERE url='https://x/1'").fetchone()[0] is None
 
@@ -165,9 +175,11 @@ def test_retier_after_a_whitelist_change(conn):
 def test_retier_is_a_noop_when_nothing_changed(conn):
     from src.utils.config import load_config
 
-    db.upsert_news(conn, [
-        ("https://y/1", "MSFT", "t", "reuters.com", None, 1, 1_750_000_000, "gdelt"),
-    ])
+    db.upsert_news(conn, [{
+        "url": "https://y/1", "ticker": "MSFT", "title": "t",
+        "source_domain": "reuters.com", "source_name": None, "source_tier": 1,
+        "published_utc": None, "seen_utc": 1_750_000_000, "fetched_utc": 0,
+        "api": "gdelt"}])
     cfg = load_config()
     db.retier_news(conn, cfg)
     assert db.retier_news(conn, cfg) == 0
@@ -216,3 +228,138 @@ def test_migration_is_idempotent(tmp_path):
         cols = [r[1] for r in conn.execute("PRAGMA table_info(news)")]
         assert cols.count("source_name") == 1
         conn.close()
+
+
+def _news(url, **kw):
+    base = {"url": url, "ticker": "AAPL", "title": "t", "source_domain": None,
+            "source_name": None, "source_tier": 1, "published_utc": None,
+            "seen_utc": None, "fetched_utc": 0, "api": "finnhub"}
+    base.update(kw)
+    return base
+
+
+def test_t0_uses_publication_time_not_crawl_time(conn):
+    """The point of P1-14.
+
+    A GDELT row crawled at 12:00 and a Finnhub row published at 13:00. The crawl
+    happened earlier on the clock, but it says nothing about when its article was
+    published — so by default t0 must come from the publication time it can
+    actually trust.
+    """
+    db.upsert_news(conn, [
+        _news("https://g/1", api="gdelt", seen_utc=1_750_000_000,
+              source_domain="reuters.com"),
+        _news("https://f/1", published_utc=1_750_003_600, source_name="CNBC",
+              source_tier=2),
+    ])
+    lo, hi = 1_749_000_000, 1_751_000_000
+
+    # default: only rows whose publication time is known
+    assert db.earliest_news_ts(conn, "AAPL", lo, hi, max_tier=2) == 1_750_003_600
+
+    # opting in to crawl time reaches the earlier GDELT row
+    assert db.earliest_news_ts(conn, "AAPL", lo, hi, max_tier=2,
+                               allow_crawl_time=True) == 1_750_000_000
+
+
+def test_crawl_time_fallback_can_only_push_t0_later_or_equal(conn):
+    """Using crawl time is conservative: it understates lead time rather than
+    overstating it. Safe direction for a claim, but a different measurement."""
+    db.upsert_news(conn, [
+        _news("https://f/2", published_utc=1_750_005_000, source_tier=1),
+        _news("https://g/2", api="gdelt", seen_utc=1_750_009_000,
+              source_domain="reuters.com"),
+    ])
+    lo, hi = 1_749_000_000, 1_751_000_000
+    strict = db.earliest_news_ts(conn, "AAPL", lo, hi)
+    loose = db.earliest_news_ts(conn, "AAPL", lo, hi, allow_crawl_time=True)
+    assert loose <= strict
+
+
+def test_rows_with_no_publication_time_are_invisible_by_default(conn):
+    db.upsert_news(conn, [
+        _news("https://g/3", api="gdelt", seen_utc=1_750_000_000,
+              source_domain="reuters.com"),
+    ])
+    lo, hi = 1_749_000_000, 1_751_000_000
+    assert db.earliest_news_ts(conn, "AAPL", lo, hi) is None
+    assert db.earliest_news_ts(conn, "AAPL", lo, hi, allow_crawl_time=True) is not None
+
+
+def test_refetch_backfills_missing_fields(conn):
+    """Fixes issue #14.
+
+    upsert_news used INSERT OR IGNORE, so a row collected before a collector fix
+    could never be repaired by re-running — the re-fetch simply skipped it. It
+    now fills NULLs while leaving existing values alone.
+    """
+    db.upsert_news(conn, [_news("https://x/9", source_name=None,
+                                source_tier=None, published_utc=None)])
+    assert db.upsert_news(conn, [_news("https://x/9", source_name="CNBC",
+                                       source_tier=2, published_utc=123)]) == 0
+    row = conn.execute(
+        "SELECT source_name, source_tier, published_utc FROM news "
+        "WHERE url='https://x/9'").fetchone()
+    assert (row["source_name"], row["source_tier"], row["published_utc"]) == (
+        "CNBC", 2, 123)
+
+
+def test_refetch_does_not_overwrite_existing_values(conn):
+    db.upsert_news(conn, [_news("https://x/10", title="original",
+                                published_utc=100)])
+    db.upsert_news(conn, [_news("https://x/10", title="rewritten",
+                                published_utc=999)])
+    row = conn.execute(
+        "SELECT title, published_utc FROM news WHERE url='https://x/10'").fetchone()
+    assert row["published_utc"] == 100, "an existing timestamp must not move"
+
+
+def test_data_migration_moves_legacy_publication_times(tmp_path):
+    """Before P1-14 the news table had one timestamp column and the Finnhub
+    collector wrote PUBLICATION time into it. `seen_utc` now means crawl time,
+    so those values sit in a column that means something else — worse than
+    missing, because they read as an upper bound rather than an exact time.
+    Their old meaning is known exactly, so they are moved, not discarded.
+    """
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    raw = sqlite3.connect(path)
+    raw.executescript("""
+        CREATE TABLE news (
+          url TEXT PRIMARY KEY, ticker TEXT, title TEXT, source_domain TEXT,
+          seen_utc INTEGER, api TEXT
+        );
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT, updated_utc INTEGER);
+        INSERT INTO news VALUES ('f1','TSLA','a','finnhub.io',1700000000,'finnhub');
+        INSERT INTO news VALUES ('g1','TSLA','b','reuters.com',1700000500,'gdelt');
+    """)
+    raw.commit(); raw.close()
+
+    conn = db.get_conn(path)
+    finn = conn.execute("SELECT * FROM news WHERE url='f1'").fetchone()
+    gdelt = conn.execute("SELECT * FROM news WHERE url='g1'").fetchone()
+
+    assert finn["published_utc"] == 1700000000, "moved to the column that means it"
+    assert finn["seen_utc"] is None, "Finnhub reports no crawl time"
+    # GDELT's value really was a crawl time — it stays where it is
+    assert gdelt["seen_utc"] == 1700000500
+    assert gdelt["published_utc"] is None
+    conn.close()
+
+
+def test_data_migrations_run_once(tmp_path):
+    """Guarded by a key in `meta`, so reconnecting does not re-run them."""
+    path = tmp_path / "once.db"
+    conn = db.get_conn(path)
+    db.upsert_news(conn, [_news("https://z/1", api="finnhub",
+                                published_utc=500, seen_utc=None)])
+    conn.close()
+
+    conn = db.get_conn(path)          # reconnect: migrations must be no-ops
+    row = conn.execute("SELECT published_utc, seen_utc FROM news").fetchone()
+    assert (row["published_utc"], row["seen_utc"]) == (500, None)
+    keys = [r[0] for r in conn.execute(
+        "SELECT key FROM meta WHERE key LIKE 'migration:%'")]
+    assert len(keys) == len(set(keys)) == len(db.DATA_MIGRATIONS)
+    conn.close()

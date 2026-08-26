@@ -19,6 +19,7 @@ re-running any collector never duplicates rows. Plain sqlite3, no ORM.
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 
 SCHEMA = """
@@ -82,7 +83,16 @@ CREATE TABLE IF NOT EXISTS news (
   source_domain TEXT,            -- GDELT: 'reuters.com'. NULL for Finnhub.
   source_name TEXT,              -- Finnhub: 'Benzinga'. NULL for GDELT.
   source_tier INTEGER,           -- 1 wire/top-tier, 2 fast republisher, NULL not credible
-  seen_utc INTEGER, api TEXT     -- 'finnhub' | 'gdelt'
+  -- THREE distinct times. They were one column until P1-14, which meant t0
+  -- silently mixed publication time with crawl time depending on the source:
+  published_utc INTEGER,         -- when the PUBLISHER published it. What t0 needs.
+                                 -- Finnhub gives this; NULL for GDELT.
+  seen_utc INTEGER,              -- when the AGGREGATOR's crawler found it.
+                                 -- GDELT gives this; NULL for Finnhub.
+                                 -- Later than publication by an unknown amount,
+                                 -- so it is an UPPER BOUND on publication.
+  fetched_utc INTEGER,           -- when WE pulled the row. Provenance only.
+  api TEXT                       -- 'finnhub' | 'gdelt'
 );
 CREATE INDEX IF NOT EXISTS idx_news_ticker ON news (ticker, seen_utc);
 
@@ -98,15 +108,60 @@ CREATE TABLE IF NOT EXISTS meta (
 MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("news", "source_name", "TEXT"),
     ("news", "source_tier", "INTEGER"),
+    ("news", "published_utc", "INTEGER"),
+    ("news", "fetched_utc", "INTEGER"),
+)
+
+
+#: One-shot data repairs, guarded by a key in `meta` so each runs exactly once.
+#: Distinct from MIGRATIONS, which only add columns.
+DATA_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    (
+        "p1_14_move_finnhub_publication_time",
+        # Before P1-14 the news table had ONE timestamp column, `seen_utc`, and
+        # the Finnhub collector wrote the article's PUBLICATION time into it.
+        # `seen_utc` now means crawl time, so those legacy values are sitting in
+        # a column that means something else — worse than missing, because they
+        # would be read as an upper bound rather than the exact time they are.
+        # Their old meaning is known exactly, so move them rather than discard.
+        """UPDATE news SET published_utc = seen_utc, seen_utc = NULL
+           WHERE api = 'finnhub'
+             AND published_utc IS NULL AND seen_utc IS NOT NULL""",
+    ),
+    (
+        "p1_14_clear_finnhub_crawl_time",
+        # Finnhub reports no crawl time at all, so ANY value in seen_utc on a
+        # finnhub row is a legacy publication time. The migration above misses
+        # rows that were re-fetched first (the re-fetch filled published_utc, so
+        # the WHERE clause skipped them) and left the stale copy behind.
+        "UPDATE news SET seen_utc = NULL WHERE api = 'finnhub' AND seen_utc IS NOT NULL",
+    ),
 )
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
-    """Add any missing columns. Idempotent — safe on every connect."""
+    """Add missing columns, then run any pending data repairs.
+
+    Idempotent — safe on every connect. Column adds check `PRAGMA table_info`;
+    data repairs are guarded by a key in `meta`.
+    """
     for table, column, decl in MIGRATIONS:
         existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    conn.commit()
+
+    for key, sql in DATA_MIGRATIONS:
+        done = conn.execute(
+            "SELECT 1 FROM meta WHERE key = ?", (f"migration:{key}",)
+        ).fetchone()
+        if done:
+            continue
+        cursor = conn.execute(sql)
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value, updated_utc) VALUES (?, ?, ?)",
+            (f"migration:{key}", str(cursor.rowcount), int(time.time())),
+        )
     conn.commit()
 
 
@@ -286,25 +341,45 @@ def latest_bar_ts(conn: sqlite3.Connection, ticker: str, interval: str) -> int |
 # news
 # --------------------------------------------------------------------------
 
-def upsert_news(conn: sqlite3.Connection, rows: list[tuple]) -> int:
-    """rows: (url, ticker, title, source_domain, source_name, source_tier,
-    seen_utc, api).
+NEWS_COLUMNS = (
+    "url", "ticker", "title", "source_domain", "source_name", "source_tier",
+    "published_utc", "seen_utc", "fetched_utc", "api",
+)
 
-    `source_domain` and `source_name` are deliberately separate: GDELT gives a
-    domain, Finnhub gives a display name, and collapsing them into one column
-    would mean every reader had to check `api` to know which kind it had.
+
+def upsert_news(conn: sqlite3.Connection, rows: list[dict]) -> int:
+    """Insert/refresh news rows. Returns the number of genuinely new ones.
+
+    Takes **dicts**, not tuples. The row reached ten fields in P1-14 and
+    positional tuples had already caused two rounds of silent test breakage
+    when a column was inserted; `companies` uses the same named-column pattern.
+
+    `ON CONFLICT DO UPDATE` with COALESCE rather than `INSERT OR IGNORE`: a
+    re-fetch now **fills in** fields that were NULL, instead of skipping the row
+    entirely. That was issue #14 — rows collected before a collector fix could
+    not be repaired by re-running.
     """
     if not rows:
         return 0
     before = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
     conn.executemany(
-        """
-        INSERT OR IGNORE INTO news
-          (url, ticker, title, source_domain, source_name, source_tier,
-           seen_utc, api)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        f"""
+        INSERT INTO news ({", ".join(NEWS_COLUMNS)})
+        VALUES ({", ".join(":" + c for c in NEWS_COLUMNS)})
+        -- COALESCE(existing, new): fill gaps, never overwrite. A timestamp
+        -- already recorded must not silently move on a re-fetch — that is the
+        -- kind of drift that makes a result impossible to reproduce. Deliberate
+        -- re-tiering goes through retier_news(), which UPDATEs directly.
+        ON CONFLICT(url) DO UPDATE SET
+          title = COALESCE(news.title, excluded.title),
+          source_domain = COALESCE(news.source_domain, excluded.source_domain),
+          source_name = COALESCE(news.source_name, excluded.source_name),
+          source_tier = COALESCE(news.source_tier, excluded.source_tier),
+          published_utc = COALESCE(news.published_utc, excluded.published_utc),
+          seen_utc = COALESCE(news.seen_utc, excluded.seen_utc),
+          fetched_utc = COALESCE(news.fetched_utc, excluded.fetched_utc)
         """,
-        rows,
+        [{c: r.get(c) for c in NEWS_COLUMNS} for r in rows],
     )
     conn.commit()
     after = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
@@ -313,7 +388,7 @@ def upsert_news(conn: sqlite3.Connection, rows: list[tuple]) -> int:
 
 def earliest_news_ts(
     conn: sqlite3.Connection, ticker: str, lo_utc: int, hi_utc: int,
-    max_tier: int | None = 2,
+    max_tier: int | None = 2, allow_crawl_time: bool = False,
 ) -> int | None:
     """Earliest credible article timestamp for a ticker in [lo, hi].
 
@@ -326,23 +401,34 @@ def earliest_news_ts(
       2     also fast republishers of wire copy (default)
       None  anything at all, including untiered publishers
 
+    `allow_crawl_time` falls back to the aggregator's crawl time when the
+    publisher's own timestamp is unknown (GDELT rows). Off by default: crawl
+    time lags publication, so it pushes t0 later and understates lead time.
+    Conservative, but not the same measurement.
+
     Phase 4 calls this with 1 and with 2 and reports both. That comparison IS
     the sensitivity analysis: Finnhub's free tier carries no wire services, so
     a tier-1-only t0 falls back to filing time for nearly every event.
     """
-    if max_tier is None:
-        sql = """SELECT seen_utc FROM news
-                 WHERE ticker = ? AND seen_utc BETWEEN ? AND ?
-                 ORDER BY seen_utc ASC LIMIT 1"""
-        args: tuple = (ticker, lo_utc, hi_utc)
-    else:
-        sql = """SELECT seen_utc FROM news
-                 WHERE ticker = ? AND seen_utc BETWEEN ? AND ?
-                   AND source_tier IS NOT NULL AND source_tier <= ?
-                 ORDER BY seen_utc ASC LIMIT 1"""
-        args = (ticker, lo_utc, hi_utc, max_tier)
-    row = conn.execute(sql, args).fetchone()
-    return row["seen_utc"] if row else None
+    # published_utc is the only column that means one thing. seen_utc is the
+    # aggregator's CRAWL time, which lags publication by an unknown amount.
+    # Falling back to it can only push t0 LATER, which UNDERSTATES lead time —
+    # the safe direction for a claim, but not the default.
+    time_expr = ("COALESCE(published_utc, seen_utc)" if allow_crawl_time
+                 else "published_utc")
+    tier_clause = "" if max_tier is None else \
+        " AND source_tier IS NOT NULL AND source_tier <= ?"
+    args: list = [ticker, lo_utc, hi_utc]
+    if max_tier is not None:
+        args.append(max_tier)
+
+    row = conn.execute(
+        f"""SELECT {time_expr} AS ts FROM news
+            WHERE ticker = ? AND {time_expr} BETWEEN ? AND ?{tier_clause}
+            ORDER BY ts ASC LIMIT 1""",
+        args,
+    ).fetchone()
+    return row["ts"] if row else None
 
 
 def retier_news(conn: sqlite3.Connection, cfg: dict) -> int:

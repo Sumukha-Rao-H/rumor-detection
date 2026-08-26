@@ -90,12 +90,16 @@ def tier_of(cfg: dict, source_domain: str | None,
     return None
 
 
-def gdelt_articles_to_rows(cfg: dict, articles: list[dict], ticker: str) -> list[tuple]:
+def gdelt_articles_to_rows(cfg: dict, articles: list[dict],
+                           ticker: str) -> list[dict]:
     """GDELT artlist entries -> news rows.
 
-    GDELT identifies a publisher by DOMAIN, so `source_domain` is filled and
-    `source_name` left NULL. See `finnhub_items_to_rows` for the other half.
+    GDELT gives a publisher DOMAIN and a CRAWL time (`seendate`) — when its
+    crawler found the article, not when the publisher published it. So
+    `seen_utc` is filled and `published_utc` left NULL rather than pretending
+    the two are the same. See `finnhub_items_to_rows` for the other half.
     """
+    fetched = utc_now_ts()
     rows = []
     for art in articles:
         url, seendate = art.get("url"), art.get("seendate")
@@ -106,8 +110,14 @@ def gdelt_articles_to_rows(cfg: dict, articles: list[dict], ticker: str) -> list
         except ValueError:
             continue
         domain = art.get("domain") or domain_of(url)
-        rows.append((url, ticker, art.get("title") or "",
-                     domain, None, tier_of(cfg, domain, None), seen_utc, "gdelt"))
+        rows.append({
+            "url": url, "ticker": ticker, "title": art.get("title") or "",
+            "source_domain": domain, "source_name": None,
+            "source_tier": tier_of(cfg, domain, None),
+            "published_utc": None,          # GDELT does not report it
+            "seen_utc": seen_utc,           # crawl time — an upper bound
+            "fetched_utc": fetched, "api": "gdelt",
+        })
     return rows
 
 
@@ -121,15 +131,26 @@ def finnhub_items_to_rows(cfg: dict, items: list[dict], ticker: str) -> list[tup
 
     Finnhub gives a display NAME, not a domain, so `source_name` is filled and
     `source_domain` left NULL rather than guessing a domain from the name.
+
+    Its `datetime` field is the PUBLICATION time, which is exactly what t0
+    needs, so it goes in `published_utc`. `seen_utc` (crawl time) is left NULL:
+    this API does not report one.
     """
+    fetched = utc_now_ts()
     rows = []
     for item in items:
         url, ts = item.get("url"), item.get("datetime")
         if not url or not ts:
             continue
         name = (item.get("source") or "").strip() or None
-        rows.append((url, ticker, item.get("headline") or "",
-                     None, name, tier_of(cfg, None, name), int(ts), "finnhub"))
+        rows.append({
+            "url": url, "ticker": ticker, "title": item.get("headline") or "",
+            "source_domain": None, "source_name": name,
+            "source_tier": tier_of(cfg, None, name),
+            "published_utc": int(ts),       # Finnhub's `datetime` IS publication
+            "seen_utc": None,               # no crawl time from this API
+            "fetched_utc": fetched, "api": "finnhub",
+        })
     return rows
 
 
