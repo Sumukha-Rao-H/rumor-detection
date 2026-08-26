@@ -10,7 +10,11 @@ joblib
 
 # Market / calendar / news
 yfinance
-exchange-calendars          # market-hours helper — lead time is measured in
+# Pinned exactly, unlike everything else here. This package ships holiday
+# tables and early-close rules as DATA: an upgrade can move a session boundary,
+# which silently changes every lead-time number in the report with no error and
+# no test failure. `>=` does not help — it is the upgrade that breaks it.
+exchange-calendars==4.13.2  # market-hours helper — lead time is measured in
                             # trading hours, not wall-clock hours
 finnhub-python
 

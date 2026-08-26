@@ -9,6 +9,25 @@ Background reading, in order: `implementation_plan.md`, then
 `docs/project-ideas-review.pdf` (Idea 1) and `docs/context.md`. Where the PDF
 and `context.md` disagree, **`context.md` wins**.
 
+## Local context folder (`context/`, gitignored)
+
+A working memory for agent sessions lives in `context/`. It is **local only** —
+it is gitignored and will not be in a fresh clone. It summarises and points
+into this file and `implementation_plan.md`; **it never overrides them.**
+
+| File | Read it when |
+|---|---|
+| `workflow-rules.md` | first — it says when to read the others |
+| `project-overview.md` | every session start: goal, scope, out-of-scope |
+| `progress-tracker.md` | every session start and end: live state |
+| `task-breakdown.md` | when picking up work — 75 ordered tasks, and the file the user's **"next"** command reads |
+| `architecture-context.md` | before writing, moving, or naming a file |
+| `code-standards.md` | before writing code |
+| `UI-context.md` | before touching `app/` or any output a human reads |
+
+If `context/` is missing, this file plus `implementation_plan.md` are enough to
+work from. To recreate it, ask.
+
 ## Non-negotiable rules
 
 1. **Do not change the architecture** without explicit user approval. Frozen
@@ -63,40 +82,25 @@ and `context.md` disagree, **`context.md` wins**.
   feature each, conventional-commit prefixes (`feat:`, `chore:`, `fix:`,
   `test:`, `docs:`).
 - **Never add an AI co-author line** or any other AI attribution to commits or PRs.
-- Never commit anything under `data/` or `.env`.
+- Never commit anything under `data/`, `.env`, or `context/`.
 
-## Project status (update this section as phases complete)
+## Project status
 
-| Phase | Status |
-|---|---|
-| 0 — Repointing from Reddit to EDGAR | ✅ Reddit code archived; schema, config, collectors, docs, tests rebuilt. 20 tests pass. |
-| 1 — Week 1 foundations (market-hours helpers, headline metric, eval skeleton, news collection running) | ⏳ not started |
-| 2 — Week 2 EDGAR collector + universe + leakage test | ⏳ not started |
-| 3 — Week 3 price snapshot, frozen and stamped | ⏳ not started |
-| 4 — Week 4 t₀ correction, event filtering, features, sampling | ⏳ not started |
-| 5 — Week 5 baselines (always-quiet, z-score, CUSUM, GBM) | ⏳ not started |
-| 6 — Weeks 6–8 learned stopping policy | ⏳ not started |
-| 7 — Week 8+ live monitor running continuously | ⏳ not started |
-| 8 — Weeks 9–11 news channel ablation | ⏳ not started |
-| 9 — Weeks 12–13 dashboard with per-alert reasons | ⏳ not started |
-| 10 — Week 14 final evaluation, run once | ⏳ not started |
-| 11 — Weeks 15–16 report and viva | ⏳ not started |
+**Live status is not kept in this file.** It lives in
+`context/progress-tracker.md` — phases, per-file code status, decision log,
+open questions, risks — so there is exactly one place to update and nothing can
+drift out of sync.
 
-### Current state of the code
-
-| File | Status |
-|---|---|
-| `src/db.py` | Rewritten: `companies`, `filings`, `events`, `bars`, `news`, `meta` |
-| `src/utils/*` | Unchanged and reusable. **Missing: market-hours helpers (phase 1).** |
-| `src/collectors/market.py` | Reusable; now universe-driven, with a snapshot stamp and a zero-record guard |
-| `src/collectors/news.py` | Reusable; Finnhub is now primary, company names come from `companies` |
-| `src/collectors/edgar.py` | **Does not exist yet — phase 2, the next file to write** |
-| `src/pipeline/*` | Empty — `universe.py`, `t0.py`, `events.py`, `features.py`, `sampling.py` to come |
-| `src/baselines/*`, `src/rl/*`, `src/eval/*` | Empty |
+> **Summary for anyone without `context/`:** Phase 0 (repointing to EDGAR) is
+> done; Phase 1 (week-1 foundations) is the active phase. Phases and their
+> acceptance criteria are in `implementation_plan.md` §9. `git log --oneline`
+> is the other reliable record.
 
 ## Handoff checklist for a new agent session
 
 1. Read `implementation_plan.md` in full, then this file.
-2. Check the status table above and `git log --oneline` for current progress.
+2. If `context/` exists, read `context/workflow-rules.md` and
+   `context/progress-tracker.md`. Otherwise use `git log --oneline` and
+   `implementation_plan.md` §9 for current progress.
 3. Verify the environment: `pytest` must pass before you build on top.
 4. Confirm the current phase's acceptance criteria before declaring it done.
