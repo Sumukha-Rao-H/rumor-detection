@@ -75,8 +75,13 @@ CREATE TABLE IF NOT EXISTS bars (
 );
 
 CREATE TABLE IF NOT EXISTS news (
-  url TEXT PRIMARY KEY, ticker TEXT, title TEXT, source_domain TEXT,
-  seen_utc INTEGER, api TEXT  -- 'finnhub' | 'gdelt'
+  url TEXT PRIMARY KEY, ticker TEXT, title TEXT,
+  -- Publisher identity. The two APIs give DIFFERENT kinds of identifier and
+  -- they get different columns, so nothing downstream has to consult `api` to
+  -- know what it is holding:
+  source_domain TEXT,            -- GDELT: 'reuters.com'. NULL for Finnhub.
+  source_name TEXT,              -- Finnhub: 'Benzinga'. NULL for GDELT.
+  seen_utc INTEGER, api TEXT     -- 'finnhub' | 'gdelt'
 );
 CREATE INDEX IF NOT EXISTS idx_news_ticker ON news (ticker, seen_utc);
 
@@ -84,6 +89,23 @@ CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY, value TEXT, updated_utc INTEGER
 );
 """
+
+
+#: Columns added after a table first shipped. `CREATE TABLE IF NOT EXISTS`
+#: leaves an existing database untouched, so a new column has to be added
+#: explicitly or every dev keeps an old schema without noticing.
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("news", "source_name", "TEXT"),
+)
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Add any missing columns. Idempotent — safe on every connect."""
+    for table, column, decl in MIGRATIONS:
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    conn.commit()
 
 
 def get_conn(db_path: str | Path) -> sqlite3.Connection:
@@ -94,6 +116,7 @@ def get_conn(db_path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    _apply_migrations(conn)
     return conn
 
 
@@ -262,14 +285,20 @@ def latest_bar_ts(conn: sqlite3.Connection, ticker: str, interval: str) -> int |
 # --------------------------------------------------------------------------
 
 def upsert_news(conn: sqlite3.Connection, rows: list[tuple]) -> int:
-    """rows: (url, ticker, title, source_domain, seen_utc, api)."""
+    """rows: (url, ticker, title, source_domain, source_name, seen_utc, api).
+
+    `source_domain` and `source_name` are deliberately separate: GDELT gives a
+    domain, Finnhub gives a display name, and collapsing them into one column
+    would mean every reader had to check `api` to know which kind it had.
+    """
     if not rows:
         return 0
     before = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
     conn.executemany(
         """
-        INSERT OR IGNORE INTO news (url, ticker, title, source_domain, seen_utc, api)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO news
+          (url, ticker, title, source_domain, source_name, seen_utc, api)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )

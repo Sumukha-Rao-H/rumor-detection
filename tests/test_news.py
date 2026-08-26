@@ -19,8 +19,9 @@ def test_gdelt_rows():
     ]
     rows = gdelt_articles_to_rows(articles, "TSLA")
     assert len(rows) == 1
-    url, ticker, title, domain, seen, api = rows[0]
+    url, ticker, title, domain, name, seen, api = rows[0]
     assert (ticker, domain, api) == ("TSLA", "reuters.com", "gdelt")
+    assert name is None, "GDELT identifies publishers by domain, not by name"
     assert seen == 1749643200  # 2025-06-11 12:00:00 UTC
 
 
@@ -32,7 +33,29 @@ def test_finnhub_rows():
     ]
     rows = finnhub_items_to_rows(items, "TSLA")
     assert len(rows) == 1
-    assert rows[0][4] == 1749643200 and rows[0][5] == "finnhub"
+    url, ticker, title, domain, name, seen, api = rows[0]
+    assert (seen, api) == (1749643200, "finnhub")
+    assert name == "SomeWire", "the publisher comes from `source`"
+    assert domain is None, "Finnhub gives a name, not a domain — do not guess one"
+
+
+def test_finnhub_publisher_is_not_taken_from_the_url():
+    """Regression guard for issue 1 in the register.
+
+    Every Finnhub `url` is a redirect wrapper on finnhub.io. Deriving the
+    publisher from it labelled all 107 rows of the first real pull `finnhub.io`
+    and made the t0 whitelist match nothing.
+    """
+    items = [{"url": "https://finnhub.io/api/news?id=abc123",
+              "headline": "x", "datetime": 1749643200, "source": "Benzinga"}]
+    row = finnhub_items_to_rows(items, "TSLA")[0]
+    assert row[4] == "Benzinga"
+    assert "finnhub.io" not in str(row[3])
+
+
+def test_finnhub_missing_source_is_none_not_empty():
+    items = [{"url": "https://x/a", "headline": "x", "datetime": 1, "source": "  "}]
+    assert finnhub_items_to_rows(items, "TSLA")[0][4] is None
 
 
 def test_default_gdelt_query_uses_the_sec_company_name(tmp_path):

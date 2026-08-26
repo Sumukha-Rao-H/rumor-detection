@@ -102,7 +102,7 @@ def test_bars_upsert_and_latest(conn):
 
 def test_news_dedupe_by_url(conn):
     row = ("https://reuters.com/a", "TSLA", "Tesla acquires X", "reuters.com",
-           1_750_000_000, "finnhub")
+           None, 1_750_000_000, "finnhub")
     assert db.upsert_news(conn, [row]) == 1
     assert db.upsert_news(conn, [row]) == 0
 
@@ -111,9 +111,9 @@ def test_earliest_news_ts_drives_the_t0_correction(conn):
     db.upsert_news(conn, [
         # A blog picks it up first, then the wire, then the 8-K is accepted.
         ("https://smallblog.example/a", "AAPL", "chatter", "smallblog.example",
-         1_750_000_000, "gdelt"),
+         None, 1_750_000_000, "gdelt"),
         ("https://businesswire.com/b", "AAPL", "press release", "businesswire.com",
-         1_750_001_000, "finnhub"),
+         None, 1_750_001_000, "finnhub"),
     ])
     lo, hi = 1_749_900_000, 1_750_010_000
     assert db.earliest_news_ts(conn, "AAPL", lo, hi) == 1_750_000_000
@@ -129,3 +129,41 @@ def test_meta_records_snapshot_provenance(conn):
     db.set_meta(conn, "snapshot_frozen_60m", "2026-09-01", 1_756_684_800)
     db.set_meta(conn, "snapshot_frozen_60m", "2026-09-02", 1_756_771_200)
     assert db.get_meta(conn, "snapshot_frozen_60m") == "2026-09-02"
+
+
+def test_migration_adds_source_name_to_an_old_database(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` leaves an existing database alone, so a new
+    column has to be added explicitly or every dev silently keeps an old
+    schema. Simulates a pre-P1-13 database and checks the upgrade path.
+    """
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    raw = sqlite3.connect(path)
+    raw.executescript("""
+        CREATE TABLE news (
+          url TEXT PRIMARY KEY, ticker TEXT, title TEXT, source_domain TEXT,
+          seen_utc INTEGER, api TEXT
+        );
+        INSERT INTO news VALUES ('u1','TSLA','old row','finnhub.io',1,'finnhub');
+    """)
+    raw.commit()
+    raw.close()
+
+    conn = db.get_conn(path)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(news)")}
+    assert "source_name" in cols
+    assert conn.execute("SELECT COUNT(*) FROM news").fetchone()[0] == 1, \
+        "the migration must not lose existing rows"
+    assert conn.execute("SELECT source_name FROM news").fetchone()[0] is None
+    conn.close()
+
+
+def test_migration_is_idempotent(tmp_path):
+    """get_conn runs it on every connect."""
+    path = tmp_path / "m.db"
+    for _ in range(3):
+        conn = db.get_conn(path)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(news)")]
+        assert cols.count("source_name") == 1
+        conn.close()

@@ -89,6 +89,7 @@ news:
   # Companies wire a press release first and file the 8-K minutes-to-hours
   # later; using acceptance time alone inflates every lead-time number.
   t0_lookback_hours: 24            # how far before acceptance to search for the release
+  finnhub_base: "https://finnhub.io/api/v1"
   finnhub_min_interval_s: 1.1      # free tier ~60 calls/min
   gdelt_base: "https://api.gdeltproject.org/api/v2/doc/doc"
   gdelt_min_interval_s: 5.0        # unreliable under load — breadth only, never a dependency

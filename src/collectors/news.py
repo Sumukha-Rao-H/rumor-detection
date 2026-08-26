@@ -39,7 +39,7 @@ from src.utils.timeutils import (
 
 log = logging.getLogger(__name__)
 
-FINNHUB_BASE = "https://finnhub.io/api/v1"
+
 
 
 def domain_of(url: str) -> str:
@@ -48,7 +48,11 @@ def domain_of(url: str) -> str:
 
 
 def gdelt_articles_to_rows(articles: list[dict], ticker: str) -> list[tuple]:
-    """GDELT artlist entries -> news rows (url, ticker, title, domain, ts, api)."""
+    """GDELT artlist entries -> news rows.
+
+    GDELT identifies a publisher by DOMAIN, so `source_domain` is filled and
+    `source_name` left NULL. See `finnhub_items_to_rows` for the other half.
+    """
     rows = []
     for art in articles:
         url, seendate = art.get("url"), art.get("seendate")
@@ -59,19 +63,29 @@ def gdelt_articles_to_rows(articles: list[dict], ticker: str) -> list[tuple]:
         except ValueError:
             continue
         rows.append((url, ticker, art.get("title") or "",
-                     art.get("domain") or domain_of(url), seen_utc, "gdelt"))
+                     art.get("domain") or domain_of(url), None, seen_utc, "gdelt"))
     return rows
 
 
 def finnhub_items_to_rows(items: list[dict], ticker: str) -> list[tuple]:
-    """Finnhub /company-news entries -> news rows."""
+    """Finnhub /company-news entries -> news rows.
+
+    The publisher comes from the `source` field ("Benzinga", "CNBC"), NOT from
+    the URL. Every Finnhub `url` is a redirect wrapper on finnhub.io, so
+    deriving a domain from it labelled every article `finnhub.io` and made the
+    t0 whitelist unusable.
+
+    Finnhub gives a display NAME, not a domain, so `source_name` is filled and
+    `source_domain` left NULL rather than guessing a domain from the name.
+    """
     rows = []
     for item in items:
         url, ts = item.get("url"), item.get("datetime")
         if not url or not ts:
             continue
         rows.append((url, ticker, item.get("headline") or "",
-                     domain_of(url), int(ts), "finnhub"))
+                     None, (item.get("source") or "").strip() or None,
+                     int(ts), "finnhub"))
     return rows
 
 
@@ -105,9 +119,10 @@ def fetch_gdelt(cfg: dict, session: requests.Session, query: str,
     return []
 
 
-def fetch_finnhub(session: requests.Session, api_key: str, ticker: str,
-                  start_ts: int, end_ts: int) -> list[dict]:
-    resp = session.get(f"{FINNHUB_BASE}/company-news", params={
+def fetch_finnhub(cfg: dict, session: requests.Session, api_key: str,
+                  ticker: str, start_ts: int, end_ts: int) -> list[dict]:
+    base = cfg["news"]["finnhub_base"]
+    resp = session.get(f"{base}/company-news", params={
         "symbol": ticker,
         "from": ts_to_dt(start_ts).strftime("%Y-%m-%d"),
         "to": ts_to_dt(end_ts).strftime("%Y-%m-%d"),
@@ -144,7 +159,7 @@ def collect(cfg: dict, conn, ticker: str, query: str | None,
     if "finnhub" in apis:
         api_key = require_env("FINNHUB_API_KEY")
         (finnhub_limiter or RateLimiter(ncfg["finnhub_min_interval_s"])).wait()
-        items = fetch_finnhub(session, api_key, ticker, start_ts, end_ts)
+        items = fetch_finnhub(cfg, session, api_key, ticker, start_ts, end_ts)
         rows = finnhub_items_to_rows(items, ticker)
         parsed += len(rows)
         n = db.upsert_news(conn, rows)
