@@ -1,18 +1,25 @@
-"""Market data collector — yfinance OHLCV into the `bars` table (plan §5.3).
+"""Market data collector — yfinance OHLCV into the `bars` table.
 
 Backtest granularity is hourly ('60m') bars: yfinance serves ~730 days of
 those, matching the hourly decision step. Daily bars are supplementary
 context. 1m/5m/15m/30m bars are NOT used (30–60 day history is useless
 for backtests).
 
+The hourly window is ROLLING — bars available today silently disappear later —
+so coverage must be downloaded broadly and early, then frozen. Broad coverage
+(not just event windows) is required because negative sampling and trailing
+z-scores both need continuous history. Budget days of wall-clock time for a
+full 1,500-ticker pull, and record the download date with --stamp-snapshot.
+
 Fetches are incremental: each run resumes from the latest cached bar per
 (ticker, interval), so historical bars are fetched once and re-runs are cheap.
 All bar timestamps are stored as UTC epoch seconds of the bar's open.
 
 Usage:
-  python -m src.collectors.market --tickers TSLA,AAPL --start 2025-01-01 --end 2025-06-01
-  python -m src.collectors.market --from-db            # all tickers seen in posts + SPY
-  python -m src.collectors.market --from-db --interval 1d
+  python -m src.collectors.market --tickers TSLA,AAPL --start 2024-09-01 --end 2026-08-01
+  python -m src.collectors.market --universe              # every liquid ticker + benchmark
+  python -m src.collectors.market --universe --interval 1d
+  python -m src.collectors.market --universe --stamp-snapshot
 """
 
 from __future__ import annotations
@@ -26,7 +33,9 @@ import yfinance as yf
 from src import db
 from src.utils.config import load_config
 from src.utils.ratelimit import RateLimiter
-from src.utils.timeutils import date_str_to_ts, ts_to_dt, ts_to_iso, utc_now_ts
+from src.utils.timeutils import (
+    date_str_to_ts, ts_to_dt, ts_to_iso, utc_now_ts,
+)
 
 log = logging.getLogger(__name__)
 
@@ -96,11 +105,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--tickers", help="comma-separated, e.g. TSLA,AAPL")
-    group.add_argument("--from-db", action="store_true",
-                       help="every ticker in post_tickers, plus the benchmark")
-    parser.add_argument("--start", help="YYYY-MM-DD (default: backtest_window.start)")
+    group.add_argument("--universe", action="store_true",
+                       help="every ticker in the liquid universe, plus the benchmark")
+    parser.add_argument("--start", help="YYYY-MM-DD (default: study_window.start)")
     parser.add_argument("--end", help="YYYY-MM-DD (default: now)")
     parser.add_argument("--interval", help="60m (default) or 1d")
+    parser.add_argument("--stamp-snapshot", action="store_true",
+                        help="record this run's date as the frozen snapshot date")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -108,28 +119,49 @@ def main() -> None:
     cfg = load_config()
     mcfg = cfg["market"]
     interval = args.interval or mcfg["interval"]
-    start_ts = date_str_to_ts(args.start or cfg["backtest_window"]["start"])
+    start_ts = date_str_to_ts(args.start or cfg["study_window"]["start"])
     end_ts = date_str_to_ts(args.end) if args.end else utc_now_ts()
 
     conn = db.get_conn(cfg["paths"]["db"])
-    if args.from_db:
-        tickers = db.distinct_post_tickers(conn)
+    if args.universe:
+        tickers = db.universe_tickers(conn)
+        if not tickers:
+            raise SystemExit(
+                "companies table is empty — run `python -m src.collectors.edgar "
+                "--build-universe` first."
+            )
         if mcfg["benchmark"] not in tickers:
-            tickers.append(mcfg["benchmark"])  # SPY market control (plan §7.3)
+            tickers.append(mcfg["benchmark"])  # SPY market control
     else:
         tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
 
     limiter = RateLimiter(mcfg["min_interval_s"])
     total = 0
+    failed = 0
     for ticker in tickers:
         limiter.wait()
         try:
             total += collect_ticker(conn, ticker, start_ts, end_ts, interval)
         except Exception:
+            failed += 1
             log.exception("failed to collect %s — continuing", ticker)
+
     n_bars = conn.execute("SELECT COUNT(*) FROM bars").fetchone()[0]
-    log.info("Done. %d tickers processed; bars table now has %d rows.",
-             len(tickers), n_bars)
+    log.info("Done. %d tickers processed (%d failed); bars table now has %d rows.",
+             len(tickers), failed, n_bars)
+
+    # Silent-failure guard: an empty pull must never pass quietly.
+    if cfg["logging"]["fail_on_zero_records"] and total == 0 and n_bars == 0:
+        raise SystemExit(
+            f"ZERO bars written for {len(tickers)} tickers — yfinance is "
+            f"returning nothing. Do not treat this run as successful."
+        )
+
+    if args.stamp_snapshot:
+        stamp = ts_to_iso(utc_now_ts())
+        db.set_meta(conn, f"snapshot_frozen_{interval}", stamp, utc_now_ts())
+        log.info("Snapshot date for %s bars recorded as %s. Do not re-download.",
+                 interval, stamp)
 
 
 if __name__ == "__main__":

@@ -33,7 +33,12 @@ def test_rate_limiter_enforces_interval():
 
 def test_config_loads_and_resolves_paths():
     cfg = load_config()
-    assert cfg["reward"]["T_max"] == 48
-    assert cfg["paths"]["db"].endswith("data/db/rumor.db")
-    assert "wallstreetbets" in cfg["subreddits"]
-    assert cfg["reddit"]["live_min_interval_s"] >= 7
+    assert cfg["paths"]["db"].endswith("data/db/footprints.db")
+    assert cfg["decision"]["horizon_hours"] > 0
+    # SEC caps traffic at 10 req/s; staying under it is a terms-of-service rule.
+    assert cfg["edgar"]["max_requests_per_s"] <= 10
+    # 9.01 is an attachment marker, not an event type — it must be excluded or
+    # it dominates the label distribution.
+    assert "9.01" in cfg["items"]["exclude"]
+    # The headline metric is precision at a fixed alert budget, never accuracy.
+    assert cfg["eval"]["alert_budget_per_stock_per_month"] > 0

@@ -1,18 +1,25 @@
-"""Ground-truth news collector — GDELT 2.0 DOC API + Finnhub (plan §5.4).
+"""News collector — Finnhub (primary) + GDELT (breadth).
 
-Never scrape Reuters/Bloomberg directly: aggregator headline + timestamp is
-sufficient for labeling. GDELT is free with no key (15-min update latency);
-its `seendate` is the t_official candidate. Finnhub free tier provides clean
-per-ticker headlines with UNIX timestamps (FINNHUB_API_KEY in .env).
+This is LABEL infrastructure, not a feature source, and it runs from week 1.
+Companies wire a press release first and file the 8-K with that release
+attached minutes-to-hours later, so `acceptanceDateTime` alone overstates the
+warning window. The corrected clock is
 
-The source-credibility whitelist (config news.whitelist) is applied at
-labeling time (§6.4), not here — the collector stores everything it sees,
-deduped by URL.
+    t0 = min(8-K acceptanceDateTime, earliest article for that ticker/event)
+
+Finnhub is the workhorse: clean per-ticker headlines with exact UNIX
+timestamps, ~60 calls/min free. GDELT adds breadth from smaller outlets but is
+rate-limited and unreliable under load — treat it as optional, never as a
+blocking dependency. Never scrape Reuters/Bloomberg directly; an aggregator's
+headline plus timestamp is all the t0 correction needs.
+
+The credibility whitelist (config `news.whitelist`) is applied at t0-resolution
+time, not here — the collector stores everything it sees, deduped by URL.
 
 Usage:
   python -m src.collectors.news --ticker TSLA --start 2025-01-01 --end 2025-01-08
-  python -m src.collectors.news --ticker TSLA --query '"Tesla" (merger OR acquisition)' \
-      --start 2025-01-01 --end 2025-01-08 --apis gdelt
+  python -m src.collectors.news --ticker TSLA --apis finnhub \
+      --start 2025-01-01 --end 2025-01-08
 """
 
 from __future__ import annotations
@@ -24,7 +31,6 @@ from urllib.parse import urlparse
 import requests
 
 from src import db
-from src.pipeline.tickers import load_universe
 from src.utils.config import load_config, require_env
 from src.utils.ratelimit import Backoff, RateLimiter
 from src.utils.timeutils import (
@@ -111,43 +117,66 @@ def fetch_finnhub(session: requests.Session, api_key: str, ticker: str,
     return resp.json()
 
 
-def default_gdelt_query(cfg: dict, ticker: str) -> str:
-    """'"Company Name"' if the universe knows it, else the bare ticker."""
-    universe = load_universe(cfg["tickers"]["universe_csv"])
-    name = universe.get(ticker)
+def default_gdelt_query(conn, ticker: str) -> str:
+    """'"Company Name"' if the companies table knows it, else the bare ticker.
+    The name comes from SEC company_tickers_exchange.json via edgar.py."""
+    name = db.company_name(conn, ticker)
     return f'"{name}"' if name else ticker
 
 
 def collect(cfg: dict, conn, ticker: str, query: str | None,
-            start_ts: int, end_ts: int, apis: list[str]) -> None:
+            start_ts: int, end_ts: int, apis: list[str],
+            gdelt_limiter: RateLimiter | None = None,
+            finnhub_limiter: RateLimiter | None = None) -> int:
+    """Fetch and store headlines for one ticker over [start_ts, end_ts].
+    Returns the number of records parsed.
+
+    gdelt_limiter/finnhub_limiter: pass limiters that persist across calls when
+    collecting for many tickers in one process — a fresh RateLimiter() only
+    enforces spacing *within* a single call, so back-to-back calls with no
+    shared limiter don't actually throttle against each other. The CLI (one
+    ticker per process) doesn't need this, hence the defaults."""
     ncfg = cfg["news"]
     session = requests.Session()
-    session.headers["User-Agent"] = cfg["reddit"]["user_agent"]
-
-    if "gdelt" in apis:
-        RateLimiter(ncfg["gdelt_min_interval_s"]).wait()
-        q = query or default_gdelt_query(cfg, ticker)
-        articles = fetch_gdelt(cfg, session, q, start_ts, end_ts)
-        n = db.upsert_news(conn, gdelt_articles_to_rows(articles, ticker))
-        log.info("GDELT %r: %d articles, %d new", q, len(articles), n)
+    session.headers["User-Agent"] = cfg["http"]["user_agent"]
+    parsed = 0
 
     if "finnhub" in apis:
         api_key = require_env("FINNHUB_API_KEY")
-        RateLimiter(ncfg["finnhub_min_interval_s"]).wait()
+        (finnhub_limiter or RateLimiter(ncfg["finnhub_min_interval_s"])).wait()
         items = fetch_finnhub(session, api_key, ticker, start_ts, end_ts)
-        n = db.upsert_news(conn, finnhub_items_to_rows(items, ticker))
+        rows = finnhub_items_to_rows(items, ticker)
+        parsed += len(rows)
+        n = db.upsert_news(conn, rows)
         log.info("Finnhub %s: %d items, %d new", ticker, len(items), n)
+
+    if "gdelt" in apis:
+        (gdelt_limiter or RateLimiter(ncfg["gdelt_min_interval_s"])).wait()
+        q = query or default_gdelt_query(conn, ticker)
+        articles = fetch_gdelt(cfg, session, q, start_ts, end_ts)
+        rows = gdelt_articles_to_rows(articles, ticker)
+        parsed += len(rows)
+        n = db.upsert_news(conn, rows)
+        log.info("GDELT %r: %d articles, %d new", q, len(articles), n)
+
+    # Silent-failure guard: the 2026 failure mode was HTTP 200 responses
+    # carrying redirect HTML or empty JSON, so a broken collector looked
+    # healthy while writing nothing for days. Zero parsed records is loud.
+    if parsed == 0:
+        log.error("ZERO records parsed for %s over %s -> %s via %s — "
+                  "verify the endpoint before trusting this run",
+                  ticker, ts_to_dt(start_ts).date(), ts_to_dt(end_ts).date(), apis)
+    return parsed
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ticker", required=True)
-    parser.add_argument("--query", help="GDELT query override, e.g. "
-                        "'\"Tesla\" (merger OR acquisition)'")
+    parser.add_argument("--query", help="GDELT query override, e.g. '\"Tesla\"'")
     parser.add_argument("--start", required=True, help="YYYY-MM-DD")
     parser.add_argument("--end", help="YYYY-MM-DD (default: now)")
-    parser.add_argument("--apis", default="gdelt,finnhub",
-                        help="comma-separated subset of gdelt,finnhub")
+    parser.add_argument("--apis", default="finnhub,gdelt",
+                        help="comma-separated subset of finnhub,gdelt")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,

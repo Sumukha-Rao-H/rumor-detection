@@ -1,7 +1,5 @@
 # Core data
 requests
-zstandard
-duckdb
 pandas
 pyarrow
 numpy
@@ -10,28 +8,23 @@ python-dotenv
 tqdm
 joblib
 
-# Market / news
+# Market / calendar / news
 yfinance
-pandas-market-calendars
+exchange-calendars          # market-hours helper — lead time is measured in
+                            # trading hours, not wall-clock hours
 finnhub-python
 
-# NLP feature extraction (frozen, offline)
-sentence-transformers
-transformers
-# torch: install separately with the CUDA index-url for the RTX 3050, e.g.
-#   pip install torch --index-url https://download.pytorch.org/whl/cu121
-
-# RL
+# RL / sequential decision
 gymnasium
 stable-baselines3
 
-# Baselines / eval
+# Baselines + evaluation (CUSUM is hand-written, no dependency)
 scikit-learn
 xgboost
+scipy
 
-# LLM triage + policy baseline (free tiers)
-google-generativeai
-groq
+# torch: install separately with the CUDA index-url for the RTX 3050, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
 
 # Demo + tracking
 streamlit

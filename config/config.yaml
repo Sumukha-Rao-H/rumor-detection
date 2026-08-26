@@ -1,93 +1,179 @@
 # ============================================================
-# Central configuration — ALL knobs live here (plan Appendix B).
-# No hardcoded tickers, dates, or paths anywhere in src/.
+# Central configuration — ALL knobs live here.
+# No hardcoded tickers, dates, paths, or thresholds anywhere in src/.
 # All timestamps are UTC everywhere; convert at display time only.
 # ============================================================
 
 paths:
-  db: "data/db/rumor.db"
-  arctic_dumps: "data/raw/arctic_dumps"
-  live_json: "data/raw/live_json"
-  events: "data/processed/events.parquet"
-  states: "data/processed/states"
-  llm_cache: "data/llm_cache"
+  db: "data/db/footprints.db"
+  edgar_raw: "data/raw/edgar"        # every EDGAR JSON response, cached forever
+  processed: "data/processed"        # events.parquet + feature matrices
 
-subreddits: [wallstreetbets, stocks, StockMarket, investing, pennystocks]
+http:
+  # SEC requires a descriptive User-Agent with a contact address, and caps
+  # traffic at 10 requests/second. That is the entire terms of service.
+  user_agent: "NMAMIT ISE Project 31 (18881ujwal@gmail.com)"
 
-backtest_window:
-  start: "2025-01-01"
-  end: "2026-05-31"
+# The study window. Bounded at the start by yfinance's ~2-year hourly history.
+study_window:
+  start: "2024-09-01"
+  end: "2026-08-01"
 
-reddit:
-  user_agent: "nmamit-major-project-31:v1.0 (academic research)"
-  # rotated automatically when one host keeps returning 403 (plan §5.2 fallback a)
-  base_urls: ["https://www.reddit.com", "https://old.reddit.com"]
-  live_poll_seconds: 300          # poll cycle for reddit_live.py
-  live_min_interval_s: 8          # >= 7s between unauthenticated requests
-  refetch_hours: [6, 24]          # re-fetch posts at t0+6h / t0+24h for score growth
-  listing_limit: 100
+# ------------------------------------------------------------
+# Universe (review §7.1, §7.5)
+# ------------------------------------------------------------
+universe:
+  company_tickers_url: "https://www.sec.gov/files/company_tickers_exchange.json"
+  exchanges: [Nasdaq, NYSE]
+  min_price_usd: 5.0
+  min_adv_usd: 5000000             # average daily traded value
+  min_history_days: 365
+  max_tickers: 1500
+  # The liquidity filter is applied using data as of study_window.start, never
+  # today's — a universe built from today silently drops every company that was
+  # acquired or delisted, which is exactly the dramatic events we care about.
+  as_of: "start"
 
-arctic_shift:
-  api_base: "https://arctic-shift.photon-reddit.com/api"
-  min_interval_s: 1.0             # free community service — throttle to <=1 req/sec
-  page_limit: 100
+# ------------------------------------------------------------
+# EDGAR (review §1)
+# ------------------------------------------------------------
+edgar:
+  submissions_base: "https://data.sec.gov/submissions"
+  archives_base: "https://www.sec.gov/Archives/edgar"
+  forms: ["8-K"]
+  max_requests_per_s: 8            # SEC allows 10; stay under it
+  min_interval_s: 0.125
 
+# ------------------------------------------------------------
+# Event filtering (context.md §5)
+# ------------------------------------------------------------
+items:
+  # 9.01 is an attachment marker, not an event type — it rides along with other
+  # items and would dominate the label distribution if kept.
+  exclude: ["9.01", "5.07"]
+  # Known in advance (dates published weeks ahead). Kept, but every headline
+  # number is reported split scheduled vs unscheduled, never pooled.
+  scheduled: ["2.02", "5.07"]
+  # Genuinely unscheduled and market-moving — the real target.
+  unscheduled_focus: ["1.01", "5.02", "8.01", "2.03", "7.01", "1.03", "2.01",
+                      "4.01", "4.02", "5.01"]
+
+materiality:
+  # An 8-K only counts as a positive if the market actually reacted. Without
+  # this, routine dividend declarations and credit-facility amendments become
+  # "positives" and the target is mostly noise.
+  window_hours: 24                 # measured from t0 forward
+  min_abs_return: 0.03             # |return| vs the last pre-t0 close
+  benchmark_relative: true         # subtract the benchmark's move over the same span
+
+# ------------------------------------------------------------
+# Market data (review §7.7, context.md §6)
+# ------------------------------------------------------------
 market:
-  interval: "60m"                 # hourly bars = backtest granularity (~730d of history)
+  interval: "60m"                  # hourly bars = the decision granularity
   daily_interval: "1d"
-  pad_days_before: 7              # bars must cover [t0 - 7d, t0 + 5d] per event
-  pad_days_after: 5
   benchmark: "SPY"
   min_interval_s: 1.0
+  pad_days_before: 30              # bars must cover [t0 - 30d, t0 + 5d] per event
+  pad_days_after: 5
+  # Hourly history is a ROLLING ~2-year window: bars available today disappear
+  # later. Download broad coverage early, freeze it, and never re-download.
+  snapshot_frozen: false           # flipped to true once the snapshot is taken
+  calendar: "XNYS"                 # exchange_calendars code for NYSE/Nasdaq hours
 
+# ------------------------------------------------------------
+# News — LABEL infrastructure, not a feature source (context.md §2)
+# ------------------------------------------------------------
 news:
+  # t0 = min(8-K acceptanceDateTime, earliest article for that ticker/event).
+  # Companies wire a press release first and file the 8-K minutes-to-hours
+  # later; using acceptance time alone inflates every lead-time number.
+  t0_lookback_hours: 24            # how far before acceptance to search for the release
+  finnhub_min_interval_s: 1.1      # free tier ~60 calls/min
   gdelt_base: "https://api.gdeltproject.org/api/v2/doc/doc"
-  gdelt_min_interval_s: 5.0
-  finnhub_min_interval_s: 1.1     # free tier ~60 calls/min
+  gdelt_min_interval_s: 5.0        # unreliable under load — breadth only, never a dependency
   max_records: 75
+  # Wire services and top-tier outlets. An appearance here is what "the news
+  # is public" means for the t0 correction.
   whitelist: [reuters.com, bloomberg.com, apnews.com, cnbc.com, wsj.com, ft.com,
-              prnewswire.com, businesswire.com, sec.gov]
+              prnewswire.com, businesswire.com, globenewswire.com,
+              accesswire.com, sec.gov]
 
-tickers:
-  universe_csv: "config/tickers.csv"
-  # quoted: bare ON/OFF/NO/YES are YAML 1.1 booleans
-  blacklist: ["A", "ALL", "AI", "ARE", "BE", "BIG", "BUY", "CAN", "CEO", "DD",
-              "EDIT", "EV", "FOR", "GO", "IPO", "IT", "LOL", "LOVE", "NOW", "ON",
-              "ONE", "OR", "OUT", "PUMP", "RH", "SO", "TV", "U", "UK", "USA",
-              "WSB", "YOLO", "IMO", "ATH", "FOMO", "FD", "PT", "EPS", "ER"]
-  max_tickers_per_post: 3         # posts with more distinct tickers are portfolio-spam
+# ------------------------------------------------------------
+# Features (review §7.2 — every statistic backward-looking only)
+# ------------------------------------------------------------
+features:
+  return_horizons_h: [1, 4, 24, 120]
+  volume_zscore_window_h: 480      # ~20 trading days of hourly bars
+  volatility_window_h: 120
+  min_baseline_bars: 120           # below this the z-score is undefined; skip the hour
+  include_benchmark_relative: true
+  include_days_since_last_8k: true
+  include_earnings_proximity: true
 
-rumor_keywords: [merger, acquisition, acquire, buyout, takeover, bankrupt, "chapter 11",
-                 delist, halt, FDA, approval, recall, partnership, contract,
-                 "earnings leak", insider, SEC, investigation, lawsuit, guidance,
-                 "short squeeze", offering, dilution, split]
+# ------------------------------------------------------------
+# Sampling (review "Day 9" — fix this now, report two ratios)
+# ------------------------------------------------------------
+sampling:
+  negatives_per_positive: 20       # training only
+  keep_true_base_rate_in_eval: true
+  robustness_ratios: [10, 40]      # re-report at these so nobody can call it tuned
+  quiet_gap_hours: 168             # a negative window must be this far from any filing
 
-event:
-  gap_hours: 12
-  min_posts: 2
-  min_solo_score: 50
-  label_horizon_hours: 72
-
-state:
-  embed_model: "sentence-transformers/all-MiniLM-L6-v2"
-  sent_model: "ProsusAI/finbert"
-  dim: 418
+# ------------------------------------------------------------
+# Decision problem — sequential change detection / optimal stopping
+# ------------------------------------------------------------
+decision:
+  horizon_hours: 48                # T_max: hours before t0 the agent may act in
+  actions: [WAIT, FLAG]
+  lead_time_unit: trading_hours    # never wall-clock — most 8-Ks land after the close
 
 reward:
-  r_correct: 1.0
-  r_early_bonus: 0.5
-  r_wrong: -2.0
+  r_correct_flag: 1.0
+  r_early_bonus: 0.5               # scaled by remaining trading hours to t0
+  r_false_alarm: -2.0
   r_wait: -0.02
-  r_timeout: -0.5
-  T_max: 48
+  r_missed: -0.5
+
+# ------------------------------------------------------------
+# Baselines — all four must be genuinely tuned (context.md §4)
+# ------------------------------------------------------------
+baselines:
+  always_quiet: {}
+  volume_zscore:
+    threshold: 2.5
+    min_wait_hours: 1
+  cusum:
+    # Classical quickest-change-detection. Built BEFORE the learned agent so
+    # there is a real number to beat, and so a null result means something.
+    drift: 0.5                     # k — the slack parameter
+    threshold: 5.0                 # h — decision boundary
+    reset_after_alarm: true
+  gradient_boosting:
+    n_estimators: 400
+    max_depth: 4
+    learning_rate: 0.05
+
+# ------------------------------------------------------------
+# Evaluation — decide the headline metric FIRST (review §7.4)
+# ------------------------------------------------------------
+eval:
+  # Precision at a fixed alert budget is the headline number. Plain accuracy is
+  # meaningless here: the base rate is ~0.3% and "nothing coming" scores 99.7%.
+  alert_budget_per_stock_per_month: 2
+  report_action_distribution: true # guards against a degenerate always-wait policy
+  split_by: [scheduled, unscheduled, item_code]
+  calibration: [brier, ece]
+  t0_variants: [filing, news_adjusted]   # report both, and the gap between them
 
 split:
   train: 0.70
   val: 0.15
   test: 0.15
-  method: temporal
+  method: temporal                 # the last 15% by date, sealed until week 14
 
-llm:
-  provider: gemini
-  fallback: groq
-  min_interval_s: 6
+logging:
+  # A collector cycle that parses zero records must fail loudly. The 2026
+  # failure mode was HTTP 200 responses carrying redirect HTML — pipelines
+  # looked healthy while writing nothing for days.
+  fail_on_zero_records: true

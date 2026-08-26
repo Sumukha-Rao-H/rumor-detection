@@ -33,3 +33,20 @@ def test_finnhub_rows():
     rows = finnhub_items_to_rows(items, "TSLA")
     assert len(rows) == 1
     assert rows[0][4] == 1749643200 and rows[0][5] == "finnhub"
+
+
+def test_default_gdelt_query_uses_the_sec_company_name(tmp_path):
+    """Company names come from SEC company_tickers_exchange.json, stored in
+    `companies` — not from a hand-maintained CSV."""
+    from src import db
+    from src.collectors.news import default_gdelt_query
+
+    conn = db.get_conn(tmp_path / "t.db")
+    db.upsert_companies(conn, [{
+        "cik": "0000320193", "ticker": "AAPL", "name": "Apple Inc.",
+        "exchange": "Nasdaq", "sic": "3571", "in_universe": 1,
+        "adv_usd": 1e10, "last_price": 200.0, "universe_as_of": 0,
+    }])
+    assert default_gdelt_query(conn, "AAPL") == '"Apple Inc."'
+    assert default_gdelt_query(conn, "ZZZZ") == "ZZZZ"  # bare-ticker fallback
+    conn.close()
