@@ -149,3 +149,43 @@ def next_market_open(ts: int | float,
         return int(cal.next_open(minute).timestamp())
     except ValueError as exc:
         raise _out_of_range(cal, minute) from exc
+
+
+def trading_hours_between(start_ts: int | float, end_ts: int | float,
+                          calendar: xc.ExchangeCalendar | None = None) -> float:
+    """Hours the market was OPEN between two UTC epoch seconds.
+
+    The function every lead-time number in the report is computed with. Wall
+    clock is not a substitute: a flag at 20:00 UTC Friday and an 8-K accepted
+    14:00 UTC Monday is 66 wall-clock hours but **1.0 trading hours**, because
+    everything between the Friday close and the Monday open is time nobody
+    could trade in.
+
+    Half-open `[start, end)`, matching the session convention in this module —
+    the closing bell is not counted, so consecutive spans tile without
+    double-counting the minute they share.
+
+    Raises if `end` precedes `start`: that means the flag came after the news,
+    which is an argument-order mistake or a meaningless lead time, and either
+    should stop rather than land silently in a results table.
+    """
+    cal = calendar or get_market_calendar()
+    a = pd.Timestamp(start_ts, unit="s", tz="UTC")
+    b = pd.Timestamp(end_ts, unit="s", tz="UTC")
+
+    if b < a:
+        raise ValueError(
+            f"end precedes start: {b:%Y-%m-%d %H:%M:%S}Z < {a:%Y-%m-%d %H:%M:%S}Z. "
+            f"Lead time is measured forward — check the argument order."
+        )
+    if b == a:
+        return 0.0
+
+    for t in (a, b):
+        if not (cal.first_minute <= t <= cal.last_minute):
+            raise _out_of_range(cal, t)
+
+    # minutes_in_range is inclusive at BOTH ends, so querying to `b - 1 minute`
+    # is what makes the span half-open.
+    minutes = len(cal.minutes_in_range(a, b - pd.Timedelta(minutes=1)))
+    return minutes / 60.0

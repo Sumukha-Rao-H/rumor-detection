@@ -1,4 +1,4 @@
-"""Market-hours helpers — is_market_open, next_market_close, next_market_open.
+"""Market-hours helpers — is_market_open, next_market_*, trading_hours_between.
 
 The dates here are chosen deliberately, not at random:
 
@@ -26,6 +26,7 @@ from src.utils.timeutils import (
     is_market_open,
     next_market_close,
     next_market_open,
+    trading_hours_between,
 )
 from datetime import datetime, timezone
 
@@ -185,3 +186,90 @@ def test_next_helpers_raise_out_of_range(cal) -> None:
         next_market_close(ts("2099-01-04 15:00"), cal)
     with pytest.raises(ValueError, match=r"outside the XNYS calendar"):
         next_market_open(ts("1990-01-03 15:00"), cal)
+
+
+# --------------------------------------------------------------------------
+# P1-05 — trading_hours_between
+#
+# The function every lead-time number in the report is computed with. Wall
+# clock is not a substitute, and the weekend test below is the proof: the same
+# two moments are 66 hours apart on a clock and 1.0 hours apart in the market.
+# --------------------------------------------------------------------------
+
+
+def test_within_one_session(cal) -> None:
+    assert trading_hours_between(ts("2024-11-22 14:30"), ts("2024-11-22 15:30"), cal) == 1.0
+
+
+def test_full_session_is_six_and_a_half_hours(cal) -> None:
+    """09:30-16:00 ET. The closing bell is excluded, so this is 6.5 exactly."""
+    assert trading_hours_between(ts("2024-11-22 14:30"), ts("2024-11-22 21:00"), cal) == 6.5
+
+
+def test_half_day_session_is_three_and_a_half(cal) -> None:
+    """2024-11-29 closes at 13:00 ET. Counting it as a normal session would
+    inflate any lead time crossing that Friday by three hours."""
+    assert trading_hours_between(ts("2024-11-29 14:30"), ts("2024-11-29 18:00"), cal) == 3.5
+
+
+def test_overnight_weekend_gap_is_the_whole_point(cal) -> None:
+    """The task's Done-when, and the reason this function exists.
+
+    Friday 20:00 UTC (15:00 ET, market open) to Monday 14:00 UTC (09:00 ET,
+    market not yet open). Sixty-six hours pass on a clock. Only the last hour
+    of Friday's session was tradeable.
+    """
+    a, b = ts("2024-11-22 20:00"), ts("2024-11-25 14:00")
+    wall_clock = (b - a) / 3600
+    assert wall_clock == 66.0
+    assert trading_hours_between(a, b, cal) == 1.0
+
+
+def test_skips_a_weekday_holiday(cal) -> None:
+    """Wednesday close to Friday open spans Thanksgiving, which contributes
+    nothing. Only Friday's half session before 15:30 ET counts."""
+    hours = trading_hours_between(ts("2024-11-27 21:00"), ts("2024-11-29 15:30"), cal)
+    assert hours == 1.0  # 14:30-15:30 UTC on the Friday
+
+
+def test_span_entirely_outside_market_hours_is_zero(cal) -> None:
+    assert trading_hours_between(ts("2024-11-27 02:00"), ts("2024-11-27 03:00"), cal) == 0.0
+    assert trading_hours_between(ts("2024-11-30 10:00"), ts("2024-12-01 10:00"), cal) == 0.0
+
+
+def test_end_is_exclusive(cal) -> None:
+    """[start, end) — one minute apart is one minute, not two.
+
+    Matches the [open, close) convention pinned in P1-03. Without this,
+    consecutive spans would each claim the minute they share and a sum of
+    hourly steps would drift upward.
+    """
+    one_minute = trading_hours_between(ts("2024-11-22 14:30"), ts("2024-11-22 14:31"), cal)
+    assert one_minute == pytest.approx(1 / 60)
+
+
+def test_consecutive_spans_sum_to_the_whole(cal) -> None:
+    """Tiling property: splitting a session anywhere must not change the total."""
+    whole = trading_hours_between(ts("2024-11-22 14:30"), ts("2024-11-22 21:00"), cal)
+    first = trading_hours_between(ts("2024-11-22 14:30"), ts("2024-11-22 17:00"), cal)
+    second = trading_hours_between(ts("2024-11-22 17:00"), ts("2024-11-22 21:00"), cal)
+    assert first + second == whole
+
+
+def test_same_timestamp_is_zero(cal) -> None:
+    assert trading_hours_between(ts("2024-11-22 15:00"), ts("2024-11-22 15:00"), cal) == 0.0
+
+
+def test_reversed_arguments_raise(cal) -> None:
+    """A flag after the news is a bug, not a negative lead time. Argument order
+    is easy to get wrong and this is the function where that corrupts the
+    headline number."""
+    with pytest.raises(ValueError, match="end precedes start"):
+        trading_hours_between(ts("2024-11-22 15:00"), ts("2024-11-22 14:00"), cal)
+
+
+def test_out_of_range_raises_naming_the_endpoint(cal) -> None:
+    with pytest.raises(ValueError, match=r"outside the XNYS calendar"):
+        trading_hours_between(ts("1990-01-03 15:00"), ts("2024-11-22 15:00"), cal)
+    with pytest.raises(ValueError, match=r"outside the XNYS calendar"):
+        trading_hours_between(ts("2024-11-22 15:00"), ts("2099-01-04 15:00"), cal)
