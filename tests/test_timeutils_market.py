@@ -1,4 +1,4 @@
-"""Market-hours helpers — is_market_open.
+"""Market-hours helpers — is_market_open, next_market_close, next_market_open.
 
 The dates here are chosen deliberately, not at random:
 
@@ -24,6 +24,8 @@ from src.utils.timeutils import (
     dt_to_ts,
     get_market_calendar,
     is_market_open,
+    next_market_close,
+    next_market_open,
 )
 from datetime import datetime, timezone
 
@@ -113,3 +115,73 @@ def test_study_window_start_is_a_trading_moment() -> None:
 
     start = date_str_to_ts(load_config()["study_window"]["start"])
     assert is_market_open(start) is False
+
+
+# --------------------------------------------------------------------------
+# P1-04 — next_market_close / next_market_open
+#
+# Thanksgiving week is the whole test in miniature: Wednesday is normal,
+# Thursday is shut, Friday closes early. Anything that walks forward naively
+# gets at least one of those wrong.
+# --------------------------------------------------------------------------
+
+
+def test_next_close_mid_session_is_the_current_session(cal) -> None:
+    """From inside a session, the next close is that session's own.
+
+    This is what the 'trading hours to close' feature needs — from 10:00 ET the
+    relevant close is 16:00 ET the same day, not tomorrow's.
+    """
+    assert next_market_close(ts("2024-11-27 15:00"), cal) == ts("2024-11-27 21:00")
+
+
+def test_next_close_after_close_skips_to_the_next_session(cal) -> None:
+    """The task's Done-when, stated literally.
+
+    16:30 ET Wednesday. The next close is NOT that day's (already passed) and
+    NOT Thursday's (Thanksgiving) — it is Friday's.
+    """
+    assert next_market_close(ts("2024-11-27 21:30"), cal) == ts("2024-11-29 18:00")
+
+
+def test_next_close_respects_the_half_day(cal) -> None:
+    """Friday 2024-11-29 closes 13:00 ET = 18:00 UTC, not 16:00 ET = 21:00 UTC.
+
+    A hand-rolled 'next weekday at 21:00 UTC' would be three hours late here,
+    and every lead time measured across that Friday would inherit the error.
+    """
+    close = next_market_close(ts("2024-11-29 15:00"), cal)
+    assert close == ts("2024-11-29 18:00")
+    assert close != ts("2024-11-29 21:00")
+
+
+def test_next_open_from_weekend_is_monday(cal) -> None:
+    assert next_market_open(ts("2024-11-30 12:00"), cal) == ts("2024-12-02 14:30")
+
+
+def test_next_open_from_holiday_is_the_next_session(cal) -> None:
+    assert next_market_open(ts("2024-11-28 15:00"), cal) == ts("2024-11-29 14:30")
+
+
+def test_next_open_lands_on_an_open_minute(cal) -> None:
+    """Whatever comes back must itself be a trading moment.
+
+    Ties the two halves of this module together: if next_market_open ever
+    returned a holiday or an out-of-hours instant, is_market_open would say so.
+    """
+    for start in ["2024-11-28 15:00", "2024-11-30 12:00", "2024-11-27 21:30"]:
+        assert is_market_open(next_market_open(ts(start), cal), cal) is True
+
+
+def test_returns_epoch_seconds_as_int(cal) -> None:
+    """Not a pandas Timestamp — everything in this project is an epoch int."""
+    assert isinstance(next_market_close(ts("2024-11-27 15:00"), cal), int)
+    assert isinstance(next_market_open(ts("2024-11-27 15:00"), cal), int)
+
+
+def test_next_helpers_raise_out_of_range(cal) -> None:
+    """Same rule as is_market_open: never invent a plausible answer."""
+    with pytest.raises(ValueError, match=r"outside the XNYS calendar"):
+        next_market_close(ts("2099-01-04 15:00"), cal)
+    with pytest.raises(ValueError, match=r"outside the XNYS calendar"):
+        next_market_open(ts("1990-01-03 15:00"), cal)

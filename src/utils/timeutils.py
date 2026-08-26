@@ -86,6 +86,18 @@ def get_market_calendar(code: str | None = None) -> xc.ExchangeCalendar:
     return xc.get_calendar(code)
 
 
+def _out_of_range(cal: xc.ExchangeCalendar, minute: pd.Timestamp) -> ValueError:
+    """The error every market-hours helper raises when asked about a date the
+    calendar does not cover. The library's own message omits the bounds, which
+    is the one thing the reader needs."""
+    return ValueError(
+        f"{minute:%Y-%m-%d %H:%M:%S}Z is outside the {cal.name} calendar, "
+        f"which covers {cal.first_session.date()} to {cal.last_session.date()}. "
+        f"Upgrade exchange-calendars (currently pinned) if the study window "
+        f"has moved past it."
+    )
+
+
 def is_market_open(ts: int | float,
                    calendar: xc.ExchangeCalendar | None = None) -> bool:
     """Was the exchange open at this exact UTC epoch second?
@@ -103,9 +115,37 @@ def is_market_open(ts: int | float,
     try:
         return bool(cal.is_open_on_minute(minute))
     except ValueError as exc:  # MinuteOutOfBounds subclasses ValueError
-        raise ValueError(
-            f"{minute:%Y-%m-%d %H:%M:%S}Z is outside the {cal.name} calendar, "
-            f"which covers {cal.first_session.date()} to {cal.last_session.date()}. "
-            f"Upgrade exchange-calendars (currently pinned) if the study window "
-            f"has moved past it."
-        ) from exc
+        raise _out_of_range(cal, minute) from exc
+
+
+def next_market_close(ts: int | float,
+                      calendar: xc.ExchangeCalendar | None = None) -> int:
+    """Epoch second of the next market close at or after `ts`.
+
+    From inside a session this is that session's own close — which is what the
+    "trading hours to close" feature wants. From after the close it is the next
+    trading session's, skipping weekends and holidays, and it respects early
+    closes: after Wednesday's close in Thanksgiving week this returns Friday
+    18:00 UTC (13:00 ET), not 21:00 UTC.
+    """
+    cal = calendar or get_market_calendar()
+    minute = pd.Timestamp(ts, unit="s", tz="UTC")
+    try:
+        return int(cal.next_close(minute).timestamp())
+    except ValueError as exc:
+        raise _out_of_range(cal, minute) from exc
+
+
+def next_market_open(ts: int | float,
+                     calendar: xc.ExchangeCalendar | None = None) -> int:
+    """Epoch second of the next market open strictly after `ts`.
+
+    Used by the live monitor to decide when to next wake up rather than polling
+    through a closed market.
+    """
+    cal = calendar or get_market_calendar()
+    minute = pd.Timestamp(ts, unit="s", tz="UTC")
+    try:
+        return int(cal.next_open(minute).timestamp())
+    except ValueError as exc:
+        raise _out_of_range(cal, minute) from exc
