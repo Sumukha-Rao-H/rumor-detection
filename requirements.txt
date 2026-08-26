@@ -6,7 +6,6 @@ numpy
 pyyaml
 python-dotenv
 tqdm
-joblib
 
 # Market / calendar / news
 yfinance
@@ -16,7 +15,9 @@ yfinance
 # no test failure. `>=` does not help — it is the upgrade that breaks it.
 exchange-calendars==4.13.2  # market-hours helper — lead time is measured in
                             # trading hours, not wall-clock hours
-finnhub-python
+# NOTE: no finnhub-python. src/collectors/news.py calls the REST endpoint with
+# `requests` so pacing stays under our own RateLimiter (news.finnhub_min_interval_s).
+# The SDK would duplicate that and hide the rate limit. Do not re-add it.
 
 # RL / sequential decision
 gymnasium
