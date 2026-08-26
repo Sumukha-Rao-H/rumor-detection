@@ -59,40 +59,51 @@ def make_synthetic_predictions(
 
     base = date_str_to_ts(cfg["study_window"]["start"])
     n_tickers = n_tickers or max(1, (n_positive + n_quiet) // 8)
-    tickers = [f"TKR{i:03d}" for i in range(n_tickers)]
-    items = cfg["items"]["unscheduled_focus"] + cfg["items"]["scheduled"]
+    tickers = np.array([f"TKR{i:03d}" for i in range(n_tickers)])
+    items = np.array(cfg["items"]["unscheduled_focus"] + cfg["items"]["scheduled"])
     scheduled_set = set(cfg["items"]["scheduled"])
 
-    rows: list[pd.DataFrame] = []
+    # Every column is built once across all windows and flattened row-major, so
+    # each window's hours stay contiguous and ascending. Building one small
+    # frame per window and concatenating them cost ~0.8 s at 1,500 windows.
+    hours_to_t0 = np.arange(horizon, 0, -1)          # [horizon .. 1]
+    ramp = signal_strength * (1.0 - hours_to_t0 / horizon)
 
-    for i in range(n_positive):
-        t0 = base + int(rng.integers(horizon, 24 * span_days)) * HOUR
-        hours = np.arange(horizon, 0, -1)          # hours remaining until t0
-        ts = t0 - hours * HOUR
-        ramp = signal_strength * (1.0 - hours / horizon)   # 0 far out, ->1 at t0
-        item = str(rng.choice(items))
-        rows.append(pd.DataFrame({
-            "window_id": f"pos-{i:04d}",
-            "ticker": str(rng.choice(tickers)),
-            "ts_utc": ts,
-            "t0_utc": t0,
-            "score": rng.normal(0.0, 1.0, horizon) + ramp,
-            "action": WAIT,
-            "is_scheduled": item in scheduled_set,
-            "item_code": item,
-        }))
+    blocks: list[dict] = []
 
-    for i in range(n_quiet):
-        start = base + int(rng.integers(0, 24 * span_days)) * HOUR
-        rows.append(pd.DataFrame({
-            "window_id": f"quiet-{i:04d}",
-            "ticker": str(rng.choice(tickers)),
-            "ts_utc": start + np.arange(horizon) * HOUR,
-            "t0_utc": pd.NA,
-            "score": rng.normal(0.0, 1.0, horizon),
-            "action": WAIT,
-            "is_scheduled": pd.NA,
-            "item_code": pd.NA,
-        }))
+    if n_positive:
+        t0s = base + rng.integers(horizon, 24 * span_days, size=n_positive) * HOUR
+        item_per_window = rng.choice(items, size=n_positive)
+        blocks.append({
+            "window_id": np.repeat([f"pos-{i:04d}" for i in range(n_positive)], horizon),
+            "ticker": np.repeat(rng.choice(tickers, size=n_positive), horizon),
+            "ts_utc": (t0s[:, None] - hours_to_t0[None, :] * HOUR).ravel(),
+            "t0_utc": np.repeat(t0s, horizon),
+            "score": (rng.normal(0.0, 1.0, (n_positive, horizon)) + ramp).ravel(),
+            "is_scheduled": np.repeat(
+                np.isin(item_per_window, list(scheduled_set)), horizon),
+            "item_code": np.repeat(item_per_window, horizon),
+        })
 
-    return conform(pd.concat(rows, ignore_index=True))
+    if n_quiet:
+        starts = base + rng.integers(0, 24 * span_days, size=n_quiet) * HOUR
+        blocks.append({
+            "window_id": np.repeat([f"quiet-{i:04d}" for i in range(n_quiet)], horizon),
+            "ticker": np.repeat(rng.choice(tickers, size=n_quiet), horizon),
+            "ts_utc": (starts[:, None] + np.arange(horizon)[None, :] * HOUR).ravel(),
+            "t0_utc": np.full(n_quiet * horizon, pd.NA, dtype=object),
+            "score": rng.normal(0.0, 1.0, (n_quiet, horizon)).ravel(),
+            "is_scheduled": np.full(n_quiet * horizon, pd.NA, dtype=object),
+            "item_code": np.full(n_quiet * horizon, pd.NA, dtype=object),
+        })
+
+    if not blocks:
+        from src.eval.contract import empty_frame
+        return empty_frame()
+
+    data = {
+        key: np.concatenate([b[key] for b in blocks])
+        for key in blocks[0]
+    }
+    data["action"] = np.full(len(data["window_id"]), WAIT)
+    return conform(pd.DataFrame(data))
