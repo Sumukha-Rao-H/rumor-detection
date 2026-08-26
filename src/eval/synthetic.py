@@ -29,6 +29,8 @@ def make_synthetic_predictions(
     n_quiet: int = 200,
     horizon_hours: int | None = None,
     signal_strength: float = 1.0,
+    n_tickers: int | None = None,
+    span_days: int = 300,
     seed: int = 0,
 ) -> pd.DataFrame:
     """A prediction frame shaped exactly like a real one.
@@ -41,6 +43,13 @@ def make_synthetic_predictions(
     which is the useful case for checking that a metric reports chance-level
     performance rather than something flattering.
 
+    `n_tickers` and `span_days` control DENSITY — how many windows fall in one
+    ticker-month. That matters because the alert budget is defined per stock
+    per month: spread a few windows over many tickers and months and the budget
+    exceeds the number of windows, making any budgeted metric vacuous. Defaults
+    are deliberately sparse; pass a small `n_tickers` for a realistic monitoring
+    load.
+
     Actions are all WAIT. Callers that need decisions derive them with
     `contract.actions_from_scores`, the same way a threshold baseline will.
     """
@@ -49,14 +58,15 @@ def make_synthetic_predictions(
     rng = np.random.default_rng(seed)
 
     base = date_str_to_ts(cfg["study_window"]["start"])
-    tickers = [f"TKR{i:03d}" for i in range(max(1, (n_positive + n_quiet) // 8))]
+    n_tickers = n_tickers or max(1, (n_positive + n_quiet) // 8)
+    tickers = [f"TKR{i:03d}" for i in range(n_tickers)]
     items = cfg["items"]["unscheduled_focus"] + cfg["items"]["scheduled"]
     scheduled_set = set(cfg["items"]["scheduled"])
 
     rows: list[pd.DataFrame] = []
 
     for i in range(n_positive):
-        t0 = base + int(rng.integers(horizon, 24 * 300)) * HOUR
+        t0 = base + int(rng.integers(horizon, 24 * span_days)) * HOUR
         hours = np.arange(horizon, 0, -1)          # hours remaining until t0
         ts = t0 - hours * HOUR
         ramp = signal_strength * (1.0 - hours / horizon)   # 0 far out, ->1 at t0
@@ -73,7 +83,7 @@ def make_synthetic_predictions(
         }))
 
     for i in range(n_quiet):
-        start = base + int(rng.integers(0, 24 * 300)) * HOUR
+        start = base + int(rng.integers(0, 24 * span_days)) * HOUR
         rows.append(pd.DataFrame({
             "window_id": f"quiet-{i:04d}",
             "ticker": str(rng.choice(tickers)),
