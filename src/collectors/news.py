@@ -239,19 +239,63 @@ def collect(cfg: dict, conn, ticker: str, query: str | None,
         n = db.upsert_news(conn, rows)
         log.info("GDELT %r: %d articles, %d new", q, len(articles), n)
 
-    # Silent-failure guard: the 2026 failure mode was HTTP 200 responses
-    # carrying redirect HTML or empty JSON, so a broken collector looked
-    # healthy while writing nothing for days. Zero parsed records is loud.
+    # Zero for ONE ticker is ordinary — a small company can genuinely have no
+    # news in a quiet week. Zero across an ENTIRE run is the broken-endpoint
+    # signal, and `collect_many` raises on that. Aborting here instead would
+    # kill a watchlist run on its first quiet company.
     if parsed == 0:
-        log.error("ZERO records parsed for %s over %s -> %s via %s — "
-                  "verify the endpoint before trusting this run",
-                  ticker, ts_to_dt(start_ts).date(), ts_to_dt(end_ts).date(), apis)
+        log.warning("no records for %s over %s -> %s via %s",
+                    ticker, ts_to_dt(start_ts).date(), ts_to_dt(end_ts).date(), apis)
     return parsed
+
+
+def collect_many(cfg: dict, conn, tickers: list[str], start_ts: int, end_ts: int,
+                 apis: list[str], query: str | None = None) -> int:
+    """Collect for several tickers in one process, then apply the zero guard.
+
+    One RateLimiter is shared across the whole run: a fresh limiter per call
+    only spaces requests *within* that call, so back-to-back calls would not
+    throttle against each other and the free tier's ~60/min would be breached.
+
+    Raises if the whole run parsed nothing and `logging.fail_on_zero_records`
+    is set. That is the guard AGENTS.md rule 8 requires — an HTTP 200 carrying
+    redirect HTML or empty JSON makes a broken collector look healthy while it
+    writes nothing for days, and a process that exits 0 lets a scheduler report
+    success.
+    """
+    ncfg = cfg["news"]
+    gdelt_limiter = RateLimiter(ncfg["gdelt_min_interval_s"])
+    finnhub_limiter = RateLimiter(ncfg["finnhub_min_interval_s"])
+
+    total, failed = 0, 0
+    for ticker in tickers:
+        try:
+            total += collect(cfg, conn, ticker, query, start_ts, end_ts, apis,
+                             gdelt_limiter=gdelt_limiter,
+                             finnhub_limiter=finnhub_limiter)
+        except Exception:
+            failed += 1
+            log.exception("failed to collect %s — continuing", ticker)
+
+    log.info("Done. %d ticker(s) processed (%d failed); %d record(s) parsed.",
+             len(tickers), failed, total)
+
+    if cfg["logging"]["fail_on_zero_records"] and total == 0:
+        raise SystemExit(
+            f"ZERO records parsed across all {len(tickers)} ticker(s) via "
+            f"{apis} for {ts_to_dt(start_ts).date()} -> {ts_to_dt(end_ts).date()}. "
+            f"One quiet ticker is normal; all of them means the endpoint is "
+            f"broken. Do not treat this run as successful."
+        )
+    return total
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ticker")
+    parser.add_argument("--ticker", help="a single ticker")
+    parser.add_argument("--tickers", help="comma-separated tickers")
+    parser.add_argument("--watchlist", action="store_true",
+                        help="use news.seed_watchlist from config")
     parser.add_argument("--retier", action="store_true",
                         help="recompute source_tier for every stored row from "
                              "the current whitelist, then exit. Use after "
@@ -273,16 +317,25 @@ def main() -> None:
         log.info("Re-tiered from current config: %d row(s) changed.", changed)
         return
 
-    if not args.ticker or not args.start:
-        parser.error("--ticker and --start are required unless --retier is given")
+    if args.watchlist:
+        tickers = list(cfg["news"]["seed_watchlist"])
+    elif args.tickers:
+        tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+    elif args.ticker:
+        tickers = [args.ticker.upper()]
+    else:
+        parser.error("give one of --ticker, --tickers or --watchlist "
+                     "(or --retier)")
 
-    collect(
-        cfg, conn,
-        ticker=args.ticker.upper(),
-        query=args.query,
+    if not args.start:
+        parser.error("--start is required")
+
+    collect_many(
+        cfg, conn, tickers,
         start_ts=date_str_to_ts(args.start),
         end_ts=date_str_to_ts(args.end) if args.end else utc_now_ts(),
         apis=[a.strip() for a in args.apis.split(",")],
+        query=args.query,
     )
     total = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
     log.info("Done. news table now has %d rows.", total)

@@ -190,3 +190,85 @@ def test_fetched_utc_is_always_recorded(cfg):
          "seendate": "20250611T120000Z"}], "T")
     for row in finn + gdelt:
         assert abs(row["fetched_utc"] - now) < 5
+
+
+# --------------------------------------------------------------------------
+# P1-15 — the zero-record guard
+#
+# AGENTS.md rule 8: a collector cycle that parses zero records must fail
+# loudly. Before P1-15 news.py only called log.error and returned normally, so
+# the process exited 0 and any scheduler reported success while nothing was
+# being written — the exact failure the rule exists to prevent.
+#
+# But zero is not equally suspicious for every collector. A small company can
+# genuinely have no news in a quiet week. Zero across an ENTIRE run is the
+# broken-endpoint signal, so that is what raises.
+# --------------------------------------------------------------------------
+
+
+def _quiet_conn(tmp_path):
+    from src import db
+    return db.get_conn(tmp_path / "n.db")
+
+
+def test_zero_for_one_ticker_does_not_abort_the_run(cfg, tmp_path, monkeypatch):
+    """A quiet company is normal. Aborting here would kill a watchlist run on
+    its first small-cap."""
+    from src.collectors import news
+
+    calls = []
+
+    def fake_collect(cfg, conn, ticker, query, start_ts, end_ts, apis, **kw):
+        calls.append(ticker)
+        return 0 if ticker == "QUIET" else 5
+
+    monkeypatch.setattr(news, "collect", fake_collect)
+    total = news.collect_many(cfg, _quiet_conn(tmp_path),
+                              ["QUIET", "BUSY"], 0, 1, ["finnhub"])
+    assert calls == ["QUIET", "BUSY"], "the run continued past the quiet ticker"
+    assert total == 5
+
+
+def test_zero_across_the_whole_run_raises(cfg, tmp_path, monkeypatch):
+    """The Done-when, observed on a deliberate bad input.
+
+    Every ticker returning nothing means the endpoint is broken, not that the
+    world went quiet. The process must not exit 0.
+    """
+    from src.collectors import news
+
+    monkeypatch.setattr(news, "collect", lambda *a, **k: 0)
+    with pytest.raises(SystemExit, match="ZERO records parsed"):
+        news.collect_many(cfg, _quiet_conn(tmp_path),
+                          ["AAA", "BBB", "CCC"], 0, 1, ["finnhub"])
+
+
+def test_guard_respects_the_config_flag(cfg, tmp_path, monkeypatch):
+    from src.collectors import news
+
+    monkeypatch.setattr(news, "collect", lambda *a, **k: 0)
+    relaxed = {**cfg, "logging": {**cfg["logging"], "fail_on_zero_records": False}}
+    assert news.collect_many(relaxed, _quiet_conn(tmp_path),
+                             ["AAA"], 0, 1, ["finnhub"]) == 0
+
+
+def test_one_ticker_failing_does_not_kill_the_run(cfg, tmp_path, monkeypatch):
+    """A single bad ticker is logged and skipped; the rest still collect."""
+    from src.collectors import news
+
+    def flaky(cfg, conn, ticker, query, start_ts, end_ts, apis, **kw):
+        if ticker == "BAD":
+            raise RuntimeError("boom")
+        return 3
+
+    monkeypatch.setattr(news, "collect", flaky)
+    assert news.collect_many(cfg, _quiet_conn(tmp_path),
+                             ["BAD", "GOOD"], 0, 1, ["finnhub"]) == 3
+
+
+def test_seed_watchlist_comes_from_config(cfg):
+    """A seed for phase 1 only — P2-09 swaps in the real universe once the
+    companies table exists."""
+    watchlist = cfg["news"]["seed_watchlist"]
+    assert len(watchlist) >= 5
+    assert all(t.isupper() for t in watchlist)

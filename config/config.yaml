@@ -89,6 +89,13 @@ news:
   # Companies wire a press release first and file the 8-K minutes-to-hours
   # later; using acceptance time alone inflates every lead-time number.
   t0_lookback_hours: 24            # how far before acceptance to search for the release
+  # Seed watchlist for phase 1. news.py needs company names from `companies`
+  # for its GDELT query, and that table is not populated until P2-02 — so
+  # collection starts against a hand-picked list and P2-09 swaps in the real
+  # universe. Liquid, well-covered names across several sectors, chosen so the
+  # collector is exercised rather than to be representative.
+  seed_watchlist: [AAPL, MSFT, TSLA, JPM, PFE, XOM, WMT, NVDA]
+
   finnhub_base: "https://finnhub.io/api/v1"
   finnhub_min_interval_s: 1.1      # free tier ~60 calls/min
   gdelt_base: "https://api.gdeltproject.org/api/v2/doc/doc"
