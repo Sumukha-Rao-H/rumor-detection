@@ -20,7 +20,8 @@ into this file and `implementation_plan.md`; **it never overrides them.**
 | `workflow-rules.md` | first — it says when to read the others |
 | `project-overview.md` | every session start: goal, scope, out-of-scope |
 | `progress-tracker.md` | every session start and end: live state |
-| `task-breakdown.md` | when picking up work — 75 ordered tasks, and the file the user's **"next"** command reads |
+| `task-breakdown.md` | when picking up work — the ordered task backlog, and the file the user's **"next"** command reads |
+| `work-log.md` | to find out what a past run did and why — written after every task |
 | `architecture-context.md` | before writing, moving, or naming a file |
 | `code-standards.md` | before writing code |
 | `UI-context.md` | before touching `app/` or any output a human reads |
