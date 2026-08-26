@@ -164,6 +164,9 @@ eval:
   report_action_distribution: true # guards against a degenerate always-wait policy
   split_by: [scheduled, unscheduled, item_code]
   calibration: [brier, ece]
+  # Bins for the reliability curve and ECE. Ten is the common default: enough
+  # resolution to see miscalibration, few enough that each bin holds sample.
+  calibration_bins: 10
   t0_variants: [filing, news_adjusted]   # report both, and the gap between them
 
 split:

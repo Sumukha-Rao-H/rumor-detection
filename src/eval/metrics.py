@@ -256,3 +256,140 @@ def detection_delay_summary(df: pd.DataFrame) -> DelayResult:
             float(delays["lead_wall_hours"].median()) if len(delays) else float("nan")
         ),
     )
+
+
+# --------------------------------------------------------------------------
+# Calibration
+#
+# "When the model says 30%, does news come 30% of the time?" A model can rank
+# windows perfectly and still be badly calibrated, and the dashboard puts a
+# confidence next to every alert — an uncalibrated one there is worse than none.
+#
+# The unit is (window, hour): the model emits one score per hour, so that is
+# what gets calibrated. The label is constant within a window — every hour of a
+# positive window is labelled 1, because news is coming for each of them.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CalibrationResult:
+    """Brier, ECE, and the skill score that makes Brier readable.
+
+    A raw Brier is never reported without `brier_skill_score`. See
+    `brier_score` for why.
+    """
+
+    brier: float
+    brier_baseline: float        # always forecasting the base rate
+    brier_skill_score: float     # >0 better than that, 0 no better, <0 worse
+    ece: float
+    n_bins: int
+    n_rows: int
+    base_rate: float
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+def _probabilities_and_labels(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """Extract (p, y), refusing scores that are not probabilities.
+
+    The contract deliberately permits unbounded scores because the volume
+    z-score baseline emits them. Calibration is simply not defined for those,
+    so this raises rather than silently squashing them into a range.
+    """
+    frame = validate_predictions(df)
+    p = frame["score"].to_numpy(dtype=float)
+
+    if p.size and (p.min() < 0.0 or p.max() > 1.0):
+        raise ValueError(
+            f"calibration needs probabilities, but scores range "
+            f"[{p.min():.3f}, {p.max():.3f}]. A z-score baseline has no "
+            f"calibration — that is a statement about its output, not a "
+            f"failing. Convert to probabilities first, or skip calibration "
+            f"for this model."
+        )
+
+    y = frame["t0_utc"].notna().to_numpy(dtype=float)
+    return p, y
+
+
+def brier_score(df: pd.DataFrame) -> float:
+    """Mean squared error of the probabilities. Lower is better, 0 is perfect.
+
+    **Never report this alone.** The base rate is ~0.3%, so a model that
+    outputs 0.003 constantly and detects nothing scores about 0.003 and looks
+    superb — the accuracy trap wearing a different hat. Use
+    `calibration_summary`, which pairs it with a skill score.
+    """
+    p, y = _probabilities_and_labels(df)
+    return float(np.mean((p - y) ** 2))
+
+
+def reliability_curve(df: pd.DataFrame, n_bins: int | None = None) -> pd.DataFrame:
+    """Per-bin predicted-vs-actual, for the dashboard's calibration chart.
+
+    Bins are [0, 0.1), [0.1, 0.2), … [0.9, 1.0] — the last closed on the right
+    so p = 1.0 has a home. Empty bins are dropped: a bin nobody landed in says
+    nothing about calibration, and counting it as a zero gap would flatter ECE.
+    """
+    p, y = _probabilities_and_labels(df)
+    bins = n_bins or load_config()["eval"]["calibration_bins"]
+
+    idx = np.minimum((p * bins).astype(int), bins - 1)
+    rows = []
+    for b in range(bins):
+        mask = idx == b
+        if not mask.any():
+            continue
+        rows.append({
+            "bin": b,
+            "bin_lower": b / bins,
+            "bin_upper": (b + 1) / bins,
+            "count": int(mask.sum()),
+            "mean_predicted": float(p[mask].mean()),
+            "mean_actual": float(y[mask].mean()),
+        })
+    return pd.DataFrame(rows, columns=[
+        "bin", "bin_lower", "bin_upper", "count", "mean_predicted", "mean_actual",
+    ])
+
+
+def expected_calibration_error(df: pd.DataFrame, n_bins: int | None = None) -> float:
+    """Weighted average gap between predicted probability and actual rate.
+
+    0 is perfect. Each bin contributes in proportion to how many rows it holds,
+    so a bin with three rows cannot dominate one with three thousand.
+    """
+    curve = reliability_curve(df, n_bins)
+    if curve.empty:
+        return float("nan")
+    gaps = (curve["mean_actual"] - curve["mean_predicted"]).abs()
+    return float((gaps * curve["count"]).sum() / curve["count"].sum())
+
+
+def calibration_summary(df: pd.DataFrame, n_bins: int | None = None) -> CalibrationResult:
+    """Brier and ECE together, with the skill score that makes Brier readable.
+
+    `brier_skill_score = 1 - brier_model / brier_base_rate_forecast`. Above 0
+    beats the trivial "always predict the base rate" forecast; 0 matches it;
+    below 0 is worse than it. When every label is the same class the baseline
+    is degenerate and the skill score is `nan` rather than a misleading number.
+    """
+    p, y = _probabilities_and_labels(df)
+    bins = n_bins or load_config()["eval"]["calibration_bins"]
+
+    base = float(y.mean()) if y.size else float("nan")
+    brier = float(np.mean((p - y) ** 2)) if p.size else float("nan")
+    baseline = float(np.mean((base - y) ** 2)) if y.size else float("nan")
+    skill = (1.0 - brier / baseline) if baseline > 0 else float("nan")
+
+    return CalibrationResult(
+        brier=brier,
+        brier_baseline=baseline,
+        brier_skill_score=skill,
+        ece=expected_calibration_error(df, bins),
+        n_bins=int(bins),
+        n_rows=int(p.size),
+        base_rate=base,
+    )
