@@ -207,3 +207,57 @@ def test_split_by_is_read_from_config(frame) -> None:
             assert any(n.startswith("item ") for n in names)
         else:
             assert s in names
+
+
+def test_each_slice_is_validated_exactly_once(frame, monkeypatch) -> None:
+    """Regression guard for P1-Xb.
+
+    Validation used to run three times per slice — `evaluate`,
+    `detection_delays` and `calibration_summary` each did their own. That was
+    0.9 s of report_table's 1.1 s. The fix was a public/private split, and this
+    test stops it drifting back: one validation per slice, plus a couple for
+    the variant-level threshold.
+
+    Deliberately NOT solved with a `validated` marker on `DataFrame.attrs`.
+    Those attrs survive `sample()` too, which shuffles rows and breaks the
+    "ts_utc ascends within a window" invariant — a guard that can silently lie
+    is worse than a slow one.
+    """
+    import src.eval.contract as contract
+    import src.eval.metrics as metrics
+    import src.eval.report as report
+
+    calls = []
+    original = contract.validate_predictions
+
+    def counted(df):
+        calls.append(1)
+        return original(df)
+
+    for module in (contract, metrics, report):
+        monkeypatch.setattr(module, "validate_predictions", counted, raising=False)
+
+    table = report_table(frame)
+    assert len(calls) <= len(table) + 3, (
+        f"{len(calls)} validations for {len(table)} slices — "
+        f"redundant validation has crept back"
+    )
+
+
+def test_public_metric_entry_points_still_validate(frame) -> None:
+    """The private fast paths must not have loosened the public guards."""
+    from src.eval.metrics import (
+        brier_score,
+        calibration_summary,
+        detection_delay_summary,
+        detection_delays,
+        expected_calibration_error,
+        reliability_curve,
+    )
+
+    bad = frame.copy()
+    bad.loc[bad.index[0], "action"] = "HOLD"
+    for fn in (detection_delays, detection_delay_summary, brier_score,
+               reliability_curve, expected_calibration_error, calibration_summary):
+        with pytest.raises(ValueError, match="unknown action"):
+            fn(bad)

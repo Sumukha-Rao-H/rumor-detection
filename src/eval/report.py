@@ -26,8 +26,8 @@ import pandas as pd
 
 from src.eval.contract import FLAG, WAIT, actions_from_scores, validate_predictions
 from src.eval.metrics import (
-    calibration_summary,
-    detection_delay_summary,
+    _calibration_summary,
+    _delay_summary,
     precision_at_alert_budget,
     window_summary,
 )
@@ -101,6 +101,11 @@ def evaluate(df: pd.DataFrame, threshold: float | None = None,
     if threshold is None:
         budget = precision_at_alert_budget(frame, max_alerts=max_alerts)
         threshold = budget.threshold
+
+    # actions_from_scores only rewrites `action`, and by construction sets at
+    # most one FLAG per window, so the result is still contract-valid. From
+    # here the private metric paths are used: validating once per slice rather
+    # than three times (P1-Xb).
     decided = actions_from_scores(frame, threshold)
 
     windows = window_summary(decided)
@@ -109,11 +114,11 @@ def evaluate(df: pd.DataFrame, threshold: float | None = None,
     alerted = windows[windows["peak_score"] >= threshold]
     tp = int(alerted["is_positive"].sum())
 
-    delay = detection_delay_summary(decided)
+    delay = _delay_summary(decided)
     actions = action_distribution(decided)
 
     try:
-        cal = calibration_summary(decided)
+        cal = _calibration_summary(decided)
         brier, skill, ece = cal.brier, cal.brier_skill_score, cal.ece
     except ValueError:
         # Scores are not probabilities — a threshold baseline. nan means "not

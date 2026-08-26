@@ -200,7 +200,12 @@ def detection_delays(df: pd.DataFrame) -> pd.DataFrame:
     Columns: lead_trading_hours, lead_wall_hours, ticker, is_scheduled,
     item_code, flag_ts_utc, t0_utc.
     """
-    frame = validate_predictions(df)
+    return _detection_delays(validate_predictions(df))
+
+
+def _detection_delays(frame: pd.DataFrame) -> pd.DataFrame:
+    """`detection_delays` on an already-validated frame. See P1-Xb: validating
+    once per slice rather than three times per slice."""
     hits = frame[(frame["action"] == FLAG) & frame["t0_utc"].notna()]
 
     if hits.empty:
@@ -233,11 +238,12 @@ def detection_delay_summary(df: pd.DataFrame) -> DelayResult:
     "detected everything with no warning"; nan says there is nothing to
     measure. The always-quiet baseline lands here and must not error.
     """
-    # detection_delays validates; re-validating here would double the cost on
-    # every slice of the report table.
-    delays = detection_delays(df)
-    frame = validate_predictions(df) if delays.empty else df
+    return _delay_summary(validate_predictions(df))
 
+
+def _delay_summary(frame: pd.DataFrame) -> DelayResult:
+    """`detection_delay_summary` on an already-validated frame (P1-Xb)."""
+    delays = _detection_delays(frame)
     windows = window_summary(frame)
     n_positive = int(windows["is_positive"].sum())
     lead = delays["lead_trading_hours"]
@@ -293,14 +299,14 @@ class CalibrationResult:
         return asdict(self)
 
 
-def _probabilities_and_labels(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-    """Extract (p, y), refusing scores that are not probabilities.
+def _probabilities_and_labels(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """Extract (p, y) from an **already-validated** frame, refusing scores that
+    are not probabilities.
 
     The contract deliberately permits unbounded scores because the volume
     z-score baseline emits them. Calibration is simply not defined for those,
     so this raises rather than silently squashing them into a range.
     """
-    frame = validate_predictions(df)
     p = frame["score"].to_numpy(dtype=float)
 
     if p.size and (p.min() < 0.0 or p.max() > 1.0):
@@ -324,7 +330,7 @@ def brier_score(df: pd.DataFrame) -> float:
     superb — the accuracy trap wearing a different hat. Use
     `calibration_summary`, which pairs it with a skill score.
     """
-    p, y = _probabilities_and_labels(df)
+    p, y = _probabilities_and_labels(validate_predictions(df))
     return float(np.mean((p - y) ** 2))
 
 
@@ -335,7 +341,12 @@ def reliability_curve(df: pd.DataFrame, n_bins: int | None = None) -> pd.DataFra
     so p = 1.0 has a home. Empty bins are dropped: a bin nobody landed in says
     nothing about calibration, and counting it as a zero gap would flatter ECE.
     """
-    p, y = _probabilities_and_labels(df)
+    return _reliability_curve(validate_predictions(df), n_bins)
+
+
+def _reliability_curve(frame: pd.DataFrame, n_bins: int | None = None) -> pd.DataFrame:
+    """`reliability_curve` on an already-validated frame."""
+    p, y = _probabilities_and_labels(frame)
     bins = n_bins or load_config()["eval"]["calibration_bins"]
 
     idx = np.minimum((p * bins).astype(int), bins - 1)
@@ -363,7 +374,12 @@ def expected_calibration_error(df: pd.DataFrame, n_bins: int | None = None) -> f
     0 is perfect. Each bin contributes in proportion to how many rows it holds,
     so a bin with three rows cannot dominate one with three thousand.
     """
-    curve = reliability_curve(df, n_bins)
+    return _ece(validate_predictions(df), n_bins)
+
+
+def _ece(frame: pd.DataFrame, n_bins: int | None = None) -> float:
+    """`expected_calibration_error` on an already-validated frame."""
+    curve = _reliability_curve(frame, n_bins)
     if curve.empty:
         return float("nan")
     gaps = (curve["mean_actual"] - curve["mean_predicted"]).abs()
@@ -378,7 +394,13 @@ def calibration_summary(df: pd.DataFrame, n_bins: int | None = None) -> Calibrat
     below 0 is worse than it. When every label is the same class the baseline
     is degenerate and the skill score is `nan` rather than a misleading number.
     """
-    p, y = _probabilities_and_labels(df)
+    return _calibration_summary(validate_predictions(df), n_bins)
+
+
+def _calibration_summary(frame: pd.DataFrame,
+                         n_bins: int | None = None) -> CalibrationResult:
+    """`calibration_summary` on an already-validated frame."""
+    p, y = _probabilities_and_labels(frame)
     bins = n_bins or load_config()["eval"]["calibration_bins"]
 
     base = float(y.mean()) if y.size else float("nan")
@@ -390,7 +412,7 @@ def calibration_summary(df: pd.DataFrame, n_bins: int | None = None) -> Calibrat
         brier=brier,
         brier_baseline=baseline,
         brier_skill_score=skill,
-        ece=expected_calibration_error(df, bins),
+        ece=_ece(frame, bins),
         n_bins=int(bins),
         n_rows=int(p.size),
         base_rate=base,
