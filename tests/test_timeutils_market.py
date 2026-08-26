@@ -12,7 +12,9 @@ Between them they cover every way a timestamp can fail to be a trading moment.
 The half-day is the important one: a naive "weekday minus holidays" check gets
 it wrong and overstates any lead time crossing it by three hours.
 
-P1-06 extends this file to the helpers built on top of this one.
+All of those are WINTER dates. The P1-06 section at the bottom covers summer,
+because the session moves an hour in UTC across a daylight-saving change and a
+suite that only ever tests November would never notice.
 """
 
 from __future__ import annotations
@@ -273,3 +275,93 @@ def test_out_of_range_raises_naming_the_endpoint(cal) -> None:
         trading_hours_between(ts("1990-01-03 15:00"), ts("2024-11-22 15:00"), cal)
     with pytest.raises(ValueError, match=r"outside the XNYS calendar"):
         trading_hours_between(ts("2024-11-22 15:00"), ts("2099-01-04 15:00"), cal)
+
+
+# --------------------------------------------------------------------------
+# P1-06 — daylight saving, and invariants
+#
+# Everything above uses November/December dates. The exchange runs on New York
+# local time, so the session moves an hour in UTC across the year:
+#
+#   2025-01-15   14:30-21:00 UTC   (09:30 ET, EST = UTC-5)
+#   2025-07-15   13:30-20:00 UTC   (09:30 ET, EDT = UTC-4)
+#
+# If anything in the stack assumed a fixed 14:30 UTC open, every test above
+# would still pass and two-thirds of the study window would be silently wrong.
+# --------------------------------------------------------------------------
+
+
+def test_summer_session_opens_an_hour_earlier_in_utc(cal) -> None:
+    """13:30 UTC in July is 09:30 ET — open. The same clock time in winter is
+    pre-market."""
+    assert is_market_open(ts("2025-07-15 13:30"), cal) is True
+    assert is_market_open(ts("2025-01-15 13:30"), cal) is False
+
+
+def test_winter_close_time_is_already_shut_in_summer(cal) -> None:
+    """The same UTC clock time falls in different places in the session.
+
+    20:00 UTC is 15:00 EST in winter — mid-session, open.
+    20:00 UTC is 16:00 EDT in summer — exactly the close, so shut under the
+    [open, close) convention.
+    """
+    assert is_market_open(ts("2025-01-15 20:00"), cal) is True   # 15:00 ET
+    assert is_market_open(ts("2025-07-15 20:00"), cal) is False  # 16:00 EDT
+
+
+def test_summer_session_is_still_six_and_a_half_hours(cal) -> None:
+    """The session's LENGTH does not change with DST, only its UTC placement."""
+    assert trading_hours_between(ts("2025-07-15 13:30"), ts("2025-07-15 20:00"), cal) == 6.5
+    assert trading_hours_between(ts("2025-01-15 14:30"), ts("2025-01-15 21:00"), cal) == 6.5
+
+
+def test_span_across_the_dst_transition(cal) -> None:
+    """US clocks moved forward on Sunday 2025-03-09.
+
+    Friday's session opened 14:30 UTC; Monday's opened 13:30 UTC. A span from
+    an hour before Friday's close to an hour after Monday's open is 2.0 trading
+    hours, and naive arithmetic on UTC offsets would get it wrong.
+    """
+    a, b = ts("2025-03-07 20:00"), ts("2025-03-10 14:30")
+    assert (b - a) / 3600 == 66.5                              # wall clock
+    assert trading_hours_between(a, b, cal) == 2.0             # 1h Fri + 1h Mon
+
+
+def test_trading_hours_never_exceed_wall_clock(cal) -> None:
+    """An invariant, not an example: the market cannot be open for longer than
+    the time that actually passed. Holds for every span, so it catches whole
+    classes of arithmetic error rather than the cases someone thought of."""
+    spans = [
+        ("2024-11-27 15:00", "2024-11-27 16:00"),
+        ("2024-11-22 20:00", "2024-11-25 14:00"),
+        ("2025-03-07 20:00", "2025-03-10 14:30"),
+        ("2025-07-15 13:30", "2025-07-15 20:00"),
+        ("2024-12-24 18:00", "2024-12-26 15:00"),
+    ]
+    for a, b in spans:
+        wall = (ts(b) - ts(a)) / 3600
+        assert trading_hours_between(ts(a), ts(b), cal) <= wall, f"{a} -> {b}"
+
+
+def test_hours_to_close_agrees_with_next_market_close(cal) -> None:
+    """Cross-check between P1-04 and P1-05.
+
+    Measuring from mid-session to that session's close must give the hours
+    remaining. If either helper drifts, the two stop agreeing.
+    """
+    for moment, expected in [("2025-01-15 15:00", 6.0), ("2025-07-15 14:30", 5.5)]:
+        t0 = ts(moment)
+        assert trading_hours_between(t0, next_market_close(t0, cal), cal) == expected
+
+
+def test_study_window_edges_are_usable(cal) -> None:
+    """Every other test uses dates I picked. This one uses the dates the
+    project actually runs on, so a window moved past the calendar's coverage
+    fails here rather than mid-collection."""
+    from src.utils.config import load_config
+
+    window = load_config()["study_window"]
+    start, end = date_str_to_ts(window["start"]), date_str_to_ts(window["end"])
+    assert trading_hours_between(start, end, cal) > 0
+    is_market_open(start, cal)  # must not raise
+    is_market_open(end, cal)
