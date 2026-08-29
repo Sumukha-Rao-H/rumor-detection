@@ -31,13 +31,17 @@ import logging
 import os
 from pathlib import Path
 from urllib.parse import urlparse
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
 from src import db
 from src.utils.config import load_config
 from src.utils.ratelimit import Backoff, RateLimiter
-from src.utils.timeutils import date_str_to_ts, iso_utc_to_ts, utc_now_ts
+from src.utils.timeutils import (
+    date_str_to_ts, iso_utc_to_ts, ts_to_dt, utc_now_ts,
+)
 
 log = logging.getLogger(__name__)
 
@@ -270,6 +274,8 @@ def main() -> None:
                         help="comma-separated subset, e.g. TSLA,AAPL")
     parser.add_argument("--resume", action="store_true",
                         help="skip companies that already have filings stored")
+    parser.add_argument("--report", action="store_true",
+                        help="print the sanity report on what has been collected")
     parser.add_argument("--force", action="store_true",
                         help="re-fetch instead of serving from the raw cache")
     args = parser.parse_args()
@@ -277,10 +283,14 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
     cfg = load_config()
-    if not (args.build_universe or args.universe or args.tickers):
-        parser.error("nothing to do — pass --build-universe, --universe or --tickers")
+    if not (args.build_universe or args.universe or args.tickers or args.report):
+        parser.error("nothing to do — pass --build-universe, --universe, "
+                     "--tickers or --report")
 
     conn = db.get_conn(cfg["paths"]["db"])
+    if args.report:
+        print_filings_report(filings_report(cfg, conn))
+        return
     if args.build_universe:
         build_universe(cfg, conn, force=args.force)
     if args.universe or args.tickers:
@@ -553,6 +563,204 @@ def collect_many(cfg: dict, conn, client: EdgarClient | None = None,
         log.error("ZERO records parsed across %d companies "
                   "(logging.fail_on_zero_records is off)", attempted)
     return total_new
+
+
+# --------------------------------------------------------------------------
+# P2-10 — the sanity report
+# --------------------------------------------------------------------------
+
+def acceptance_hour_histogram(conn, start_ts: int, end_ts: int) -> list[dict]:
+    """Filings per hour-of-day of acceptance, UTC, with the New York equivalent.
+
+    This is the evidence the whole t0 correction rests on. The plan asserts
+    8-Ks cluster after the US close while the press release that moved the
+    market went out earlier; if this table is flat, the project's headline
+    contribution has no basis.
+
+    New York is computed from a real timestamp in each hour rather than a fixed
+    -4 offset, or half the year is wrong by an hour (UI-context rule 7: every
+    timestamp displays with its timezone).
+    """
+    rows = conn.execute(
+        """SELECT CAST(strftime('%H', acceptance_utc, 'unixepoch') AS INTEGER) AS hour,
+                  COUNT(*) AS n,
+                  MIN(acceptance_utc) AS sample_ts
+           FROM filings
+           WHERE acceptance_utc IS NOT NULL
+             AND acceptance_utc BETWEEN ? AND ?
+           GROUP BY hour ORDER BY hour""",
+        (start_ts, end_ts),
+    ).fetchall()
+    total = sum(r["n"] for r in rows) or 1
+    return [{
+        "hour_utc": r["hour"],
+        "n": r["n"],
+        "pct": 100.0 * r["n"] / total,
+        "new_york": new_york_label(r["hour"]),
+    } for r in rows]
+
+
+def new_york_label(hour_utc: int) -> str:
+    """'16:00 EDT / 15:00 EST' for a UTC hour.
+
+    Both are shown because the US moves its clocks and the study window spans
+    the change: the same UTC hour is 16:00 in July and 15:00 in January.
+    Printing one would be wrong for half the data — and UI-context rule 7 makes
+    a bare hour a bug.
+    """
+    ny = ZoneInfo("America/New_York")
+    labels = []
+    for month in (7, 1):                      # a summer and a winter reference
+        ref = datetime(2026, month, 15, hour_utc, 0, tzinfo=timezone.utc)
+        local = ref.astimezone(ny)
+        labels.append(f"{local:%H:%M %Z}")
+    return " / ".join(labels)
+
+
+def item_code_counts(cfg: dict, conn, start_ts: int, end_ts: int) -> list[dict]:
+    """One row per ITEM CODE, not per combination.
+
+    `items` holds '2.02,9.01', so a naive GROUP BY counts combinations and
+    hides how often each event type actually occurs. Scheduled codes are
+    marked: UI-context rule 4 forbids pooling scheduled with unscheduled, and
+    an unmarked table invites exactly that.
+    """
+    scheduled = set(cfg["items"]["scheduled"])
+    excluded = set(cfg["items"]["exclude"])
+    counts: dict[str, int] = {}
+    for (items,) in conn.execute(
+        """SELECT items FROM filings
+           WHERE acceptance_utc BETWEEN ? AND ? AND items IS NOT NULL""",
+        (start_ts, end_ts),
+    ):
+        for code in items.split(","):
+            code = code.strip()
+            if code:
+                counts[code] = counts.get(code, 0) + 1
+    return [
+        {"item": code, "n": n,
+         "scheduled": code in scheduled,
+         "excluded": code in excluded}
+        for code, n in sorted(counts.items(), key=lambda kv: -kv[1])
+    ]
+
+
+def filings_per_company(conn, start_ts: int, end_ts: int) -> dict:
+    counts = [r[0] for r in conn.execute(
+        """SELECT COUNT(*) FROM filings
+           WHERE acceptance_utc BETWEEN ? AND ?
+           GROUP BY cik""", (start_ts, end_ts))]
+    if not counts:
+        return {"companies": 0}
+    counts.sort()
+    return {
+        "companies": len(counts),
+        "min": counts[0],
+        "median": counts[len(counts) // 2],
+        "max": counts[-1],
+        "mean": round(sum(counts) / len(counts), 1),
+    }
+
+
+def ciks_with_no_history_before_the_window(conn, start_ts: int) -> list[dict]:
+    """Companies whose EARLIEST filing of any date is after the window opened.
+
+    The detector for issue 18. SEC's ticker map points a ticker at the CIK that
+    holds it TODAY, so a company that reorganised mid-window has its earlier
+    filings under a predecessor CIK that carries no ticker and is never
+    fetched. ExxonMobil is the known case: `0002115436` (ExxonMobil Holdings
+    Corp) has nothing before 2026-07-07, while `0000034088` holds the history.
+
+    A first draft flagged companies merely quiet for 90 days, which caught 502
+    companies — mostly ordinary firms that file a few times a year. Asking
+    instead whether the CIK existed AT ALL before the window is far sharper:
+    it cannot miss a reorganisation, and its false positives are genuine new
+    registrants (IPOs, SPACs) rather than every quiet company.
+
+    Still a pointer, not a verdict. P2-11 decides the rule.
+    """
+    return [
+        {"cik": r["cik"], "ticker": r["ticker"],
+         "first_filing": ts_to_dt(r["first_ts"]).date().isoformat(),
+         "n": r["n"]}
+        for r in conn.execute(
+            """SELECT cik, ticker, MIN(acceptance_utc) AS first_ts, COUNT(*) AS n
+               FROM filings
+               GROUP BY cik
+               HAVING first_ts > ?
+               ORDER BY n DESC""", (start_ts,))
+    ]
+
+
+def filings_report(cfg: dict, conn) -> dict:
+    """Every figure in the sanity report, as data. Printing is separate."""
+    start_ts = date_str_to_ts(cfg["study_window"]["start"])
+    end_ts = date_str_to_ts(cfg["study_window"]["end"])
+    total = conn.execute("SELECT COUNT(*) FROM filings").fetchone()[0]
+    in_window = conn.execute(
+        "SELECT COUNT(*) FROM filings WHERE acceptance_utc BETWEEN ? AND ?",
+        (start_ts, end_ts)).fetchone()[0]
+    return {
+        "window": (cfg["study_window"]["start"], cfg["study_window"]["end"]),
+        "total_rows": total,
+        "in_window": in_window,
+        # `filings` deliberately keeps 8-Ks from outside the window (P2-04),
+        # so showing only one of these two figures would mislead either way.
+        "outside_window": total - in_window,
+        "no_acceptance_time": conn.execute(
+            "SELECT COUNT(*) FROM filings WHERE acceptance_utc IS NULL"
+        ).fetchone()[0],
+        "hours": acceptance_hour_histogram(conn, start_ts, end_ts),
+        "items": item_code_counts(cfg, conn, start_ts, end_ts),
+        "per_company": filings_per_company(conn, start_ts, end_ts),
+        "no_prior_history": ciks_with_no_history_before_the_window(
+            conn, start_ts),
+    }
+
+
+def print_filings_report(report: dict) -> None:
+    """Human-readable rendering. Wording follows UI-context: no implication of
+    intent, scheduled never pooled with unscheduled, timezones always named."""
+    if report["total_rows"] == 0:
+        print("filings table is EMPTY — run "
+              "`python -m src.collectors.edgar --universe` first.")
+        return
+
+    w0, w1 = report["window"]
+    print(f"\nFILINGS SANITY REPORT   study window {w0} .. {w1}")
+    print(f"  rows in table {report['total_rows']:>9,}")
+    print(f"  in window     {report['in_window']:>9,}")
+    print(f"  outside       {report['outside_window']:>9,}   (kept on purpose; "
+          f"Phase 4 filters)")
+    print(f"  no acceptance {report['no_acceptance_time']:>9,}")
+
+    print("\n  ACCEPTANCE HOUR (UTC)  -- the evidence t0 is not the filing time")
+    for row in sorted(report["hours"], key=lambda r: -r["n"])[:8]:
+        bar = "#" * int(row["pct"] / 2)
+        print(f"    {row['hour_utc']:02d}:00 UTC = {row['new_york']:>9}  "
+              f"{row['n']:>7,}  {row['pct']:5.1f}%  {bar}")
+
+    print("\n  ITEM CODES  (scheduled marked -- never pooled with unscheduled)")
+    for row in report["items"][:10]:
+        tag = "scheduled" if row["scheduled"] else ""
+        tag = "excluded" if row["excluded"] else tag
+        print(f"    {row['item']:>6}  {row['n']:>7,}   {tag}")
+
+    p = report["per_company"]
+    print(f"\n  FILINGS PER COMPANY  companies {p['companies']:,}  "
+          f"min {p.get('min')}  median {p.get('median')}  "
+          f"mean {p.get('mean')}  max {p.get('max')}")
+
+    new_ciks = report["no_prior_history"]
+    print(f"\n  CIKs WITH NO FILING HISTORY BEFORE THE WINDOW: "
+          f"{len(new_ciks):,} companies")
+    print("    a pointer for P2-11: a company that reorganised mid-window has")
+    print("    its earlier filings under a predecessor CIK that carries no")
+    print("    ticker and is never fetched. New registrants look the same.")
+    for row in new_ciks[:5]:
+        print(f"    {row['ticker'] or '?':<8} {row['cik']}  "
+              f"first {row['first_filing']}  ({row['n']} filings)")
+    print()
 
 
 if __name__ == "__main__":
