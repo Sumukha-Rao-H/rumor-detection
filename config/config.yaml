@@ -40,7 +40,10 @@ universe:
 edgar:
   submissions_base: "https://data.sec.gov/submissions"
   archives_base: "https://www.sec.gov/Archives/edgar"
-  forms: ["8-K"]
+  # 8-K/A is an amendment to an 8-K — a real filing with its own acceptance
+  # time, so it is an event in its own right. Matched exactly, never by prefix:
+  # startswith("8-K") would also swallow forms like 8-K12B.
+  forms: ["8-K", "8-K/A"]
   max_requests_per_s: 8            # SEC allows 10; stay under it
   min_interval_s: 0.125
   max_retries: 5                   # then give up and name the URL — a permanent

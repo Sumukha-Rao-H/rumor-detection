@@ -45,6 +45,26 @@ def date_str_to_ts(s: str) -> int:
     return dt_to_ts(datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc))
 
 
+def iso_utc_to_ts(s: str) -> int:
+    """ISO-8601 UTC (EDGAR's `acceptanceDateTime`) -> epoch seconds.
+
+    EDGAR sends `2026-07-30T20:30:28.000Z`. The trailing `Z` means UTC and is
+    the whole point: read as local time, every acceptance time in the study
+    shifts by four or five hours, and by a *different* amount either side of a
+    daylight-saving change. `fromisoformat` accepts the offset form, so `Z` is
+    normalised first.
+    """
+    text = s.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    dt = datetime.fromisoformat(text)
+    if dt.tzinfo is None:
+        raise ValueError(
+            f"Timestamp without a timezone: {s!r} — refusing to guess UTC"
+        )
+    return int(dt.timestamp())
+
+
 def ts_to_gdelt(ts: int | float) -> str:
     return ts_to_dt(ts).strftime(GDELT_FMT)
 

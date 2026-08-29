@@ -16,8 +16,8 @@ than cached forever.
 On top of that sits the universe build (P2-02): SEC's ticker->CIK map,
 filtered to the configured exchanges and collapsed to one row per company; and
 the per-company submissions fetch (P2-03), which follows SEC's older-filings
-pages so a heavy filer's window is not silently truncated. The 8-K parse and
-the upsert into `filings` are P2-04.
+pages so a heavy filer's window is not silently truncated; and the 8-K parse
+(P2-04), which is where item codes stay strings and acceptance times stay UTC.
 
 Usage:
   python -m src.collectors.edgar --build-universe
@@ -37,7 +37,7 @@ import requests
 from src import db
 from src.utils.config import load_config
 from src.utils.ratelimit import Backoff, RateLimiter
-from src.utils.timeutils import date_str_to_ts
+from src.utils.timeutils import date_str_to_ts, iso_utc_to_ts, utc_now_ts
 
 log = logging.getLogger(__name__)
 
@@ -376,3 +376,81 @@ def fetch_company_filings(cfg: dict, client: EdgarClient, cik: str,
         if acc and acc not in seen:
             seen[acc] = record
     return list(seen.values())
+
+
+# --------------------------------------------------------------------------
+# P2-04 — 8-K rows into `filings`
+# --------------------------------------------------------------------------
+
+def normalise_items(raw) -> str:
+    """SEC's `items` field -> a clean comma-separated string of codes.
+
+    Item codes are STRINGS and must stay strings. Through a float, `"1.01"`
+    becomes `1.01` and still looks right — but `"1.10"` becomes `1.1`, and so
+    does `"1.1"`, merging two different item codes into one with no error.
+    The codes are the event taxonomy the whole study splits on, so a numeric
+    one is raised on rather than quietly coerced.
+
+    Whitespace is stripped because `"2.02, 9.01"` and `"2.02,9.01"` must not be
+    two different values to the Phase 4 item filter.
+    """
+    if raw is None or raw == "":
+        return ""                      # normal for some 8-Ks; "" not NULL so
+                                       # a LIKE filter still behaves
+    if not isinstance(raw, str):
+        raise EdgarRequestError(
+            f"item codes must be strings, got {type(raw).__name__} {raw!r} — "
+            f"as a number 1.10 and 1.1 are the same value and two distinct "
+            f"item codes would silently merge"
+        )
+    return ",".join(part.strip() for part in raw.split(",") if part.strip())
+
+
+def filing_rows(cfg: dict, records: list[dict], cik: str,
+                ticker: str | None) -> list[dict]:
+    """Raw submission records -> `filings` rows, for the configured forms only.
+
+    Forms are matched exactly against `edgar.forms`, never by prefix:
+    `startswith("8-K")` would also swallow `8-K12B`, a different form.
+
+    Blank dates become NULL rather than 0. A zero would read as 1 January 1970
+    and become the oldest "event" in the study, which nothing downstream would
+    flag as odd.
+    """
+    keep = set(cfg["edgar"]["forms"])
+    fetched = utc_now_ts()
+    rows = []
+    for record in records:
+        if record.get("form") not in keep:
+            continue
+        acceptance = record.get("acceptanceDateTime") or None
+        filing_date = record.get("filingDate") or None
+        report_date = record.get("reportDate") or None
+        rows.append({
+            "accession_no": record["accessionNumber"],
+            "cik": cik,
+            "ticker": ticker,
+            "form": record["form"],
+            "items": normalise_items(record.get("items")),
+            # The `Z` on acceptanceDateTime means UTC. Misread as local time,
+            # every t0 in the study moves by four or five hours — and by a
+            # different amount either side of a daylight-saving change.
+            "acceptance_utc": iso_utc_to_ts(acceptance) if acceptance else None,
+            "filing_date_utc": date_str_to_ts(filing_date) if filing_date else None,
+            "report_date_utc": date_str_to_ts(report_date) if report_date else None,
+            "primary_doc": record.get("primaryDocument") or None,
+            "fetched_utc": fetched,
+        })
+    return rows
+
+
+def collect_company(cfg: dict, conn, client: EdgarClient, cik: str,
+                    ticker: str | None) -> int:
+    """Fetch one company's submissions and store its 8-K rows. Returns new rows."""
+    records = fetch_company_filings(cfg, client, cik)
+    rows = filing_rows(cfg, records, cik, ticker)
+    new = db.upsert_filings(conn, rows)
+    log.info("%s (%s): %d records fetched, %d %s rows, %d new",
+             ticker or "?", cik, len(records), len(rows),
+             "/".join(cfg["edgar"]["forms"]), new)
+    return new

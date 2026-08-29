@@ -365,3 +365,25 @@ def test_study_window_edges_are_usable(cal) -> None:
     assert trading_hours_between(start, end, cal) > 0
     is_market_open(start, cal)  # must not raise
     is_market_open(end, cal)
+
+
+# --------------------------------------------------------------------------
+# iso_utc_to_ts — EDGAR's acceptanceDateTime (P2-04)
+# --------------------------------------------------------------------------
+
+def test_iso_utc_to_ts_reads_the_z_as_utc():
+    """Apple's Q3 FY26 earnings 8-K, accession 0000320193-26-000018."""
+    from src.utils.timeutils import iso_utc_to_ts
+    assert iso_utc_to_ts("2026-07-30T20:30:28.000Z") == 1785443428
+
+
+def test_iso_utc_to_ts_accepts_an_explicit_offset():
+    from src.utils.timeutils import iso_utc_to_ts
+    assert iso_utc_to_ts("2026-07-30T16:30:28-04:00") == 1785443428
+
+
+def test_iso_utc_to_ts_refuses_a_naive_timestamp():
+    """Guessing UTC would move every t0 by four or five hours, silently."""
+    from src.utils.timeutils import iso_utc_to_ts
+    with pytest.raises(ValueError, match="without a timezone"):
+        iso_utc_to_ts("2026-07-30T20:30:28")
