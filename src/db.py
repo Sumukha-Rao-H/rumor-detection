@@ -128,6 +128,10 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("news", "source_tier", "INTEGER"),
     ("news", "published_utc", "INTEGER"),
     ("news", "fetched_utc", "INTEGER"),
+    # P2-11: on a PREDECESSOR row, the CIK it feeds. NULL on every ordinary
+    # company. Without it a predecessor is indistinguishable from a real
+    # company and every per-company count double-counts the pair.
+    ("companies", "successor_cik", "TEXT"),
 )
 
 
@@ -201,7 +205,7 @@ def get_conn(db_path: str | Path) -> sqlite3.Connection:
 
 COMPANY_COLUMNS = (
     "cik", "ticker", "name", "exchange", "sic", "in_universe", "adv_usd",
-    "last_price", "universe_as_of",
+    "last_price", "universe_as_of", "successor_cik",
 )
 
 
@@ -227,7 +231,8 @@ def upsert_companies(conn: sqlite3.Connection, rows: list[dict]) -> int:
           in_universe = COALESCE(excluded.in_universe, companies.in_universe),
           adv_usd = COALESCE(excluded.adv_usd, companies.adv_usd),
           last_price = COALESCE(excluded.last_price, companies.last_price),
-          universe_as_of = COALESCE(excluded.universe_as_of, companies.universe_as_of)
+          universe_as_of = COALESCE(excluded.universe_as_of, companies.universe_as_of),
+          successor_cik = COALESCE(excluded.successor_cik, companies.successor_cik)
         """,
         [{c: r.get(c) for c in COMPANY_COLUMNS} for r in rows],
     )
@@ -276,6 +281,17 @@ def upsert_filings(conn: sqlite3.Connection, rows: list[dict]) -> int:
     conn.commit()
     after = conn.execute("SELECT COUNT(*) FROM filings").fetchone()[0]
     return after - before
+
+
+def real_company_count(conn: sqlite3.Connection) -> int:
+    """Companies, excluding predecessor rows added by P2-11.
+
+    A predecessor carries its successor's ticker, so counting rows without
+    this filter double-counts every reorganised company.
+    """
+    return conn.execute(
+        "SELECT COUNT(*) FROM companies WHERE successor_cik IS NULL"
+    ).fetchone()[0]
 
 
 def companies_for_collection(conn: sqlite3.Connection,

@@ -29,6 +29,7 @@ import argparse
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 from datetime import datetime, timezone
@@ -274,6 +275,11 @@ def main() -> None:
                         help="comma-separated subset, e.g. TSLA,AAPL")
     parser.add_argument("--resume", action="store_true",
                         help="skip companies that already have filings stored")
+    parser.add_argument("--link-predecessors", action="store_true",
+                        help="find reorganised companies and add their "
+                             "predecessor CIKs to `companies`")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="with --link-predecessors: report, write nothing")
     parser.add_argument("--report", action="store_true",
                         help="print the sanity report on what has been collected")
     parser.add_argument("--force", action="store_true",
@@ -283,13 +289,28 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
     cfg = load_config()
-    if not (args.build_universe or args.universe or args.tickers or args.report):
+    if not (args.build_universe or args.universe or args.tickers
+            or args.report or args.link_predecessors):
         parser.error("nothing to do — pass --build-universe, --universe, "
-                     "--tickers or --report")
+                     "--tickers, --link-predecessors or --report")
 
     conn = db.get_conn(cfg["paths"]["db"])
     if args.report:
         print_filings_report(filings_report(cfg, conn))
+        return
+    if args.link_predecessors:
+        result = link_predecessors(cfg, conn, dry_run=args.dry_run)
+        print(f"\ncandidates {result['candidates']}  successors "
+              f"{result['successors']}  linked {len(result['linked'])}  "
+              f"unresolved {len(result['unresolved'])}")
+        for row in result["linked"]:
+            print(f"  linked   {row['ticker']:<8} {row['successor']} <- "
+                  f"{row['predecessor']}  {row['name']}")
+        for row in result["unresolved"]:
+            print(f"  UNRESOLVED {row['ticker']:<6} {row['successor']} "
+                  f"{row['name']}")
+            for reason in row["reasons"][:3]:
+                print(f"      {reason}")
         return
     if args.build_universe:
         build_universe(cfg, conn, force=args.force)
@@ -761,6 +782,185 @@ def print_filings_report(report: dict) -> None:
         print(f"    {row['ticker'] or '?':<8} {row['cik']}  "
               f"first {row['first_filing']}  ({row['n']} filings)")
     print()
+
+
+# --------------------------------------------------------------------------
+# P2-11 — predecessor CIKs for companies that reorganised
+# --------------------------------------------------------------------------
+
+#: Words that say nothing about which company this is. Dropped before matching,
+#: so `ExxonMobil Holdings Corp` and `EXXON MOBIL CORP` reduce to the same stem.
+_LEGAL_SUFFIX = re.compile(
+    r"\b(corp|corporation|inc|incorporated|llc|ltd|limited|co|company|plc|"
+    r"holdings?|group|the|new|sa|nv|ag|lp|trust)\b", re.I)
+
+#: Below this length a stem matches half the register ("bp", "ge"), so a prefix
+#: match on it would be worse than no match at all.
+MIN_STEM_PREFIX = 5
+
+
+def name_stem(name: str) -> str:
+    """A company name reduced to the part that identifies it."""
+    return re.sub(r"[^a-z0-9]", "", _LEGAL_SUFFIX.sub("", (name or "").lower()))
+
+
+def is_successor(cfg: dict, submissions: dict) -> bool:
+    """Did this CIK file a form declaring it continues another company?
+
+    Form 8-K12B is "registration of securities of successor issuers". It is the
+    only unambiguous marker available without reading filing text: of the 423
+    CIKs with no history before the window, exactly 11 filed one.
+    """
+    forms = set(submissions.get("filings", {}).get("recent", {}).get("form", []))
+    return bool(forms & set(cfg["edgar"]["successor_forms"]))
+
+
+def load_cik_lookup(cfg: dict, client: EdgarClient) -> dict[str, list[tuple[str, str]]]:
+    """SEC's full name->CIK register, keyed by name stem.
+
+    40 MB, fetched once and cached like every other response. It is the only
+    place a predecessor can be found by name, because a CIK with no ticker is
+    absent from `company_tickers_exchange.json` by construction — which is the
+    whole reason it was never collected.
+    """
+    raw = client.get_bytes(cfg["edgar"]["cik_lookup_url"])
+    lookup: dict[str, list[tuple[str, str]]] = {}
+    for line in raw.decode("latin-1").splitlines():
+        line = line.strip().rstrip(":")
+        if not line or ":" not in line:
+            continue
+        name, _, cik = line.rpartition(":")
+        if not cik.isdigit():
+            continue
+        lookup.setdefault(name_stem(name), []).append((name, cik.zfill(10)))
+    return lookup
+
+
+def propose_predecessors(name: str, lookup: dict, exclude_cik: str
+                         ) -> list[tuple[str, str]]:
+    """Candidate (name, cik) pairs for a successor's predecessor.
+
+    Proposes only. An exact stem match first; failing that, the longest stem in
+    the register that this name starts with. Names are weak evidence — five of
+    eleven real cases match exactly and two of those return two candidates — so
+    everything here is checked by `verify_predecessor` before it is believed.
+    """
+    stem = name_stem(name)
+    if not stem:
+        return []
+    exact = [(n, c) for n, c in lookup.get(stem, []) if c != exclude_cik]
+    if exact:
+        return exact
+    best: list[tuple[str, str]] = []
+    best_len = 0
+    for other, entries in lookup.items():
+        if (len(other) >= MIN_STEM_PREFIX and other != stem
+                and stem.startswith(other) and len(other) > best_len):
+            candidates = [(n, c) for n, c in entries if c != exclude_cik]
+            if candidates:
+                best, best_len = candidates, len(other)
+    return best
+
+
+def verify_predecessor(cfg: dict, conn, client: EdgarClient, candidate_cik: str,
+                       successor_sic: str | None, window_start: int
+                       ) -> tuple[bool, str]:
+    """Is this candidate really the predecessor? Returns (ok, reason).
+
+    A wrong link silently attributes another company's 8-Ks to this ticker,
+    which is worse than the gap it is meant to close. So every condition has to
+    hold, and a candidate that cannot be confirmed is reported rather than
+    guessed at.
+    """
+    if conn.execute("SELECT 1 FROM companies WHERE cik = ? AND successor_cik IS NULL",
+                    (candidate_cik,)).fetchone():
+        return False, "already has a ticker of its own"
+    try:
+        submissions = client.get_json(client.submissions_url(candidate_cik))
+    except EdgarRequestError as exc:
+        return False, f"submissions unavailable ({exc})"
+    # NOT checked: `submissions["tickers"]`. A predecessor's own record keeps
+    # listing the ticker after a reorganisation — both Columbia Financial CIKs
+    # claim CLBK, and both Uranium Royalty CIKs claim UROY. The authority on
+    # who holds a ticker TODAY is `company_tickers_exchange.json`, which is
+    # what `companies` was built from and what the check above uses. Trusting
+    # the submissions field here rejected two real predecessors.
+    if successor_sic and submissions.get("sic") != successor_sic:
+        return False, (f"SIC {submissions.get('sic')} != successor's "
+                       f"{successor_sic}")
+    records = records_from_block(submissions.get("filings", {}).get("recent", {}))
+    keep = set(cfg["edgar"]["forms"])
+    prior = [r for r in records
+             if r.get("form") in keep and r.get("acceptanceDateTime")
+             and iso_utc_to_ts(r["acceptanceDateTime"]) < window_start]
+    if not prior:
+        return False, "no 8-K filings before the window — a stub, not a predecessor"
+    return True, f"{len(prior)} 8-K(s) before the window"
+
+
+def link_predecessors(cfg: dict, conn, client: EdgarClient | None = None,
+                      dry_run: bool = False) -> dict:
+    """Find reorganised companies and add their predecessor CIKs to `companies`.
+
+    A resolved predecessor is stored carrying the SUCCESSOR'S TICKER, with
+    `successor_cik` naming what it feeds, so the existing collector picks it up
+    unchanged and its filings land under the right ticker.
+    """
+    client = client or EdgarClient(cfg)
+    window_start = date_str_to_ts(cfg["study_window"]["start"])
+
+    candidates = ciks_with_no_history_before_the_window(conn, window_start)
+    successors, unresolved, linked = [], [], []
+    for row in candidates:
+        try:
+            submissions = client.get_json(client.submissions_url(row["cik"]))
+        except EdgarRequestError:
+            continue
+        if is_successor(cfg, submissions):
+            successors.append((row, submissions))
+
+    log.info("%d candidate CIK(s) with no prior history; %d filed %s",
+             len(candidates), len(successors),
+             "/".join(cfg["edgar"]["successor_forms"]))
+    if not successors:
+        return {"candidates": len(candidates), "successors": 0,
+                "linked": [], "unresolved": []}
+
+    lookup = load_cik_lookup(cfg, client)
+    for row, submissions in successors:
+        name = submissions.get("name", "")
+        proposals = propose_predecessors(name, lookup, row["cik"])
+        accepted = []
+        reasons = []
+        for cand_name, cand_cik in proposals[:20]:
+            ok, why = verify_predecessor(cfg, conn, client, cand_cik,
+                                         submissions.get("sic"), window_start)
+            reasons.append(f"{cand_name} ({cand_cik}): {why}")
+            if ok:
+                accepted.append((cand_name, cand_cik))
+        if len(accepted) == 1:
+            cand_name, cand_cik = accepted[0]
+            linked.append({"ticker": row["ticker"], "successor": row["cik"],
+                           "predecessor": cand_cik, "name": cand_name})
+            if not dry_run:
+                db.upsert_companies(conn, [{
+                    "cik": cand_cik, "ticker": row["ticker"], "name": cand_name,
+                    "exchange": None, "sic": submissions.get("sic"),
+                    "in_universe": None, "adv_usd": None, "last_price": None,
+                    "universe_as_of": window_start,
+                    "successor_cik": row["cik"],
+                }])
+            log.info("linked %s: %s <- %s (%s)", row["ticker"], row["cik"],
+                     cand_cik, cand_name)
+        else:
+            unresolved.append({"ticker": row["ticker"], "successor": row["cik"],
+                               "name": name, "accepted": len(accepted),
+                               "reasons": reasons})
+            log.warning("UNRESOLVED %s (%s) %r: %d candidate(s) survived "
+                        "verification — reported, not guessed",
+                        row["ticker"], row["cik"], name, len(accepted))
+    return {"candidates": len(candidates), "successors": len(successors),
+            "linked": linked, "unresolved": unresolved}
 
 
 if __name__ == "__main__":

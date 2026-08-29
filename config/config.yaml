@@ -56,6 +56,12 @@ edgar:
   forms: ["8-K", "8-K/A"]
   max_requests_per_s: 8            # SEC allows 10; stay under it
   min_interval_s: 0.125
+  # P2-11. Form 8-K12B is "registration of securities of successor issuers" —
+  # a company declaring in a filing that it continues another. It is the only
+  # unambiguous marker we have: of 423 CIKs with no history before the window,
+  # exactly 11 filed one, and the other 412 are ordinary new listings.
+  successor_forms: ["8-K12B", "8-K12G3"]
+  cik_lookup_url: "https://www.sec.gov/Archives/edgar/cik-lookup-data.txt"
   max_retries: 5                   # then give up and name the URL — a permanent
                                    # 404 must not spin forever inside a
                                    # 1,500-company run
