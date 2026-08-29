@@ -14,9 +14,19 @@ http:
   # traffic at 10 requests/second. That is the entire terms of service.
   user_agent: "NMAMIT ISE Project 31 (18881ujwal@gmail.com)"
 
-# The study window. Bounded at the start by yfinance's ~2-year hourly history.
+# The study window.
+#
+# SHORTENED 2026-08-29, from 2024-09-01, by decision. Finnhub's free tier
+# serves only ~12 months of news (earliest article obtainable anywhere:
+# 2025-09-03), so under the old window 49,539 of 97,518 in-window 8-Ks — 51% —
+# could never receive the news-based t0 correction, which is this project's
+# headline contribution. A clean claim over eleven months beats a caveated one
+# over twenty-three. ~48,000 8-Ks remain.
+#
+# The old start was set by yfinance's ~2-year hourly history; the new one is
+# well inside it, so price coverage stops being a constraint.
 study_window:
-  start: "2024-09-01"
+  start: "2025-09-01"
   end: "2026-08-01"
 
 # ------------------------------------------------------------
@@ -108,6 +118,18 @@ news:
 
   finnhub_base: "https://finnhub.io/api/v1"
   finnhub_min_interval_s: 1.1      # free tier ~60 calls/min
+  # MEASURED 2026-08-29: /company-news caps a response at ~245 articles and
+  # returns the NEWEST ones. Asking TSLA for 2025-09-01..2026-08-29 returned
+  # 242 articles, all from 2026-08-11 onward — a year requested, a fortnight
+  # delivered, HTTP 200, no warning. Long ranges are chunked into windows this
+  # size so nothing is lost silently.
+  max_window_days: 7
+  default_lookback_days: 7         # a daily run collects the last week
+  # MEASURED 2026-08-29: nothing before ~2025-09-03 is served on the free tier,
+  # and the cutoff rolls forward daily. This is the measurement that shortened
+  # `study_window` — see the note there. The window start now sits just inside
+  # the cutoff, with only days of margin, so news must keep being collected.
+  history_days: 365
   gdelt_base: "https://api.gdeltproject.org/api/v2/doc/doc"
   gdelt_min_interval_s: 5.0        # unreliable under load — breadth only, never a dependency
   max_records: 75

@@ -204,6 +204,43 @@ def default_gdelt_query(conn, ticker: str) -> str:
     return f'"{name}"' if name else ticker
 
 
+def date_windows(cfg: dict, start_ts: int, end_ts: int) -> list[tuple[int, int]]:
+    """Split [start_ts, end_ts] into windows of `news.max_window_days`.
+
+    MEASURED 2026-08-29: `/company-news` caps a response at ~245 articles and
+    returns the NEWEST ones. TSLA for 2025-09-01..2026-08-29 came back with 242
+    articles, every one of them from 2026-08-11 onward — a year requested, a
+    fortnight delivered, HTTP 200, no warning. The same shape as the redirect
+    HTML the collectors already guard against: the response looks fine and the
+    data is missing.
+
+    Chunked rather than warned about, because a warning inside a 6,000-company
+    run is not read and the loss is invisible in the output.
+    """
+    span = cfg["news"]["max_window_days"] * 86400
+    windows = []
+    cursor = start_ts
+    while cursor < end_ts:
+        stop = min(cursor + span, end_ts)
+        windows.append((cursor, stop))
+        cursor = stop
+    return windows or [(start_ts, end_ts)]
+
+
+def universe_tickers_for_news(conn) -> list[str]:
+    """Every company in `companies`, or the liquid subset once Phase 3 sets it.
+
+    `in_universe` is NULL for all 6,054 rows until the Phase 3 liquidity filter
+    runs, so falling back to the whole table is the difference between
+    collecting news and collecting nothing.
+    """
+    liquid = db.universe_tickers(conn)
+    if liquid:
+        return liquid
+    return [r[0] for r in conn.execute(
+        "SELECT ticker FROM companies WHERE ticker IS NOT NULL ORDER BY ticker")]
+
+
 def collect(cfg: dict, conn, ticker: str, query: str | None,
             start_ts: int, end_ts: int, apis: list[str],
             gdelt_limiter: RateLimiter | None = None,
@@ -267,18 +304,27 @@ def collect_many(cfg: dict, conn, tickers: list[str], start_ts: int, end_ts: int
     gdelt_limiter = RateLimiter(ncfg["gdelt_min_interval_s"])
     finnhub_limiter = RateLimiter(ncfg["finnhub_min_interval_s"])
 
+    windows = date_windows(cfg, start_ts, end_ts)
+    if len(windows) > 1:
+        log.info("range split into %d window(s) of %d day(s) — a single long "
+                 "request returns only the newest ~245 articles",
+                 len(windows), ncfg["max_window_days"])
+
     total, failed = 0, 0
     for ticker in tickers:
-        try:
-            total += collect(cfg, conn, ticker, query, start_ts, end_ts, apis,
-                             gdelt_limiter=gdelt_limiter,
-                             finnhub_limiter=finnhub_limiter)
-        except Exception:
-            failed += 1
-            log.exception("failed to collect %s — continuing", ticker)
+        for win_start, win_end in windows:
+            try:
+                total += collect(cfg, conn, ticker, query, win_start, win_end,
+                                 apis, gdelt_limiter=gdelt_limiter,
+                                 finnhub_limiter=finnhub_limiter)
+            except Exception:
+                failed += 1
+                log.exception("failed to collect %s %s -> %s — continuing",
+                              ticker, ts_to_dt(win_start).date(),
+                              ts_to_dt(win_end).date())
 
-    log.info("Done. %d ticker(s) processed (%d failed); %d record(s) parsed.",
-             len(tickers), failed, total)
+    log.info("Done. %d ticker(s) x %d window(s) processed (%d failed); "
+             "%d record(s) parsed.", len(tickers), len(windows), failed, total)
 
     if cfg["logging"]["fail_on_zero_records"] and total == 0:
         raise SystemExit(
@@ -296,6 +342,9 @@ def main() -> None:
     parser.add_argument("--tickers", help="comma-separated tickers")
     parser.add_argument("--watchlist", action="store_true",
                         help="use news.seed_watchlist from config")
+    parser.add_argument("--universe", action="store_true",
+                        help="every company in `companies` (the liquid subset "
+                             "once Phase 3 sets in_universe)")
     parser.add_argument("--retier", action="store_true",
                         help="recompute source_tier for every stored row from "
                              "the current whitelist, then exit. Use after "
@@ -317,23 +366,32 @@ def main() -> None:
         log.info("Re-tiered from current config: %d row(s) changed.", changed)
         return
 
-    if args.watchlist:
+    if args.universe:
+        tickers = universe_tickers_for_news(conn)
+        if not tickers:
+            raise SystemExit(
+                "companies table is empty — run "
+                "`python -m src.collectors.edgar --build-universe` first.")
+    elif args.watchlist:
         tickers = list(cfg["news"]["seed_watchlist"])
     elif args.tickers:
         tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
     elif args.ticker:
         tickers = [args.ticker.upper()]
     else:
-        parser.error("give one of --ticker, --tickers or --watchlist "
-                     "(or --retier)")
+        parser.error("give one of --ticker, --tickers, --watchlist or "
+                     "--universe (or --retier)")
 
-    if not args.start:
-        parser.error("--start is required")
+    # A daily run needs no dates: the last `default_lookback_days` is exactly
+    # the "accumulating" this collector exists to do.
+    end_ts = date_str_to_ts(args.end) if args.end else utc_now_ts()
+    start_ts = (date_str_to_ts(args.start) if args.start
+                else end_ts - cfg["news"]["default_lookback_days"] * 86400)
 
     collect_many(
         cfg, conn, tickers,
-        start_ts=date_str_to_ts(args.start),
-        end_ts=date_str_to_ts(args.end) if args.end else utc_now_ts(),
+        start_ts=start_ts,
+        end_ts=end_ts,
         apis=[a.strip() for a in args.apis.split(",")],
         query=args.query,
     )

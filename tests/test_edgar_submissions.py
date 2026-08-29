@@ -61,10 +61,18 @@ def cfg() -> dict:
     return load_config()
 
 
+#: A window that reaches back PAST JPMorgan's `recent` block, so paging is
+#: required. Deliberately explicit rather than read from config: this file
+#: tests `pages_to_fetch`, and tying it to whatever the study window happens to
+#: be today would make the tests silently stop exercising the paging logic the
+#: moment the window moves. It moved on 2026-08-29 (shortened to 2025-09-01),
+#: which is exactly how this was found.
+PAGING_WINDOW = (date_str_to_ts("2024-09-01"), date_str_to_ts("2026-08-01"))
+
+
 @pytest.fixture(scope="module")
-def window(cfg) -> tuple[int, int]:
-    return (date_str_to_ts(cfg["study_window"]["start"]),
-            date_str_to_ts(cfg["study_window"]["end"]))
+def window() -> tuple[int, int]:
+    return PAGING_WINDOW
 
 
 def block(**fields) -> dict:
@@ -170,10 +178,10 @@ def test_filings_from_recent_and_pages_are_combined(cfg):
         for i, p in enumerate(JPM_PAGES)
     }
     client = FakeClient(submissions, pages)
-    records = fetch_company_filings(cfg, client, "0000019617")
+    records = fetch_company_filings(cfg, client, "0000019617", *PAGING_WINDOW)
 
     dates = sorted(r["filingDate"] for r in records)
-    assert dates[0] < cfg["study_window"]["start"] <= dates[-1], (
+    assert dates[0] < "2024-09-01" <= dates[-1], (
         "paging must reach earlier than the recent block's own start")
     assert len(client.urls) == 12, "1 submissions call + 11 pages, not 70"
 
@@ -199,7 +207,8 @@ def test_duplicate_accession_numbers_are_dropped(cfg):
     pages = {JPM_PAGES[9]["name"]: block(
         accessionNumber=["dup", "other"], form=["8-K", "8-K"],
         filingDate=["2024-09-03", "2024-09-04"])}
-    records = fetch_company_filings(cfg, FakeClient(submissions, pages), "x")
+    records = fetch_company_filings(cfg, FakeClient(submissions, pages), "x",
+                                    *PAGING_WINDOW)
     assert sorted(r["accessionNumber"] for r in records) == ["dup", "other"]
 
 
@@ -219,3 +228,33 @@ def test_a_wrapped_block_is_named_not_a_keyerror():
     """The main file wraps the block; a page does not. Confusing the two should say so."""
     with pytest.raises(EdgarRequestError, match="parallel arrays"):
         records_from_block({"filings": {"recent": {"form": ["8-K"]}}})
+
+
+# --------------------------------------------------------------------------
+# What the shortened study window did to paging (2026-08-29)
+# --------------------------------------------------------------------------
+
+def test_the_current_window_needs_fewer_pages_but_not_none_for_long(cfg):
+    """Paging is not dead code just because the window shrank.
+
+    `recent` holds the most recent 1,000 filings OR one year, whichever is
+    larger. The window now opens 2025-09-01, and one year back from today is
+    2025-08-29 — **three days of margin**. Every week that passes, `recent`'s
+    one-year floor moves a week closer to the window start, and heavy filers
+    need their pages again.
+
+    So this asserts the mechanism still selects correctly against the live
+    config, without asserting a page count that is true only this week.
+    """
+    start = date_str_to_ts(cfg["study_window"]["start"])
+    end = date_str_to_ts(cfg["study_window"]["end"])
+
+    # A page that ends after the window opens is always required.
+    overlapping = [{"name": "p-late.json", "filingFrom": "2025-08-01",
+                    "filingTo": "2025-09-15"}]
+    assert pages_to_fetch(overlapping, start, end) == ["p-late.json"]
+
+    # One that ends before it never is.
+    old = [{"name": "p-old.json", "filingFrom": "2024-01-01",
+            "filingTo": "2024-06-01"}]
+    assert pages_to_fetch(old, start, end) == []

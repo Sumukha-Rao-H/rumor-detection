@@ -91,7 +91,7 @@ SEC requires it, and it is the entire terms of service alongside a 10 req/s cap.
 
 ```bash
 # Market data — yfinance hourly bars, cached incrementally.
-python -m src.collectors.market --tickers TSLA,AAPL --start 2024-09-01 --end 2026-08-01
+python -m src.collectors.market --tickers TSLA,AAPL --start 2025-09-01 --end 2026-08-01
 python -m src.collectors.market --universe --stamp-snapshot
 
 # News — Finnhub primary, GDELT for breadth. Runs from week 1.

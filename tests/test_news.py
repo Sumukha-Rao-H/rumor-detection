@@ -272,3 +272,104 @@ def test_seed_watchlist_comes_from_config(cfg):
     watchlist = cfg["news"]["seed_watchlist"]
     assert len(watchlist) >= 5
     assert all(t.isupper() for t in watchlist)
+
+
+# --------------------------------------------------------------------------
+# P2-09 — date-window chunking and universe selection
+# --------------------------------------------------------------------------
+
+import sqlite3
+
+from src import db
+from src.collectors.news import date_windows, universe_tickers_for_news
+from src.utils.timeutils import date_str_to_ts
+
+
+DAY = 86400
+
+
+def test_a_long_range_is_split_into_windows(cfg):
+    """The silent-truncation fix.
+
+    MEASURED 2026-08-29: asking Finnhub for TSLA over 2025-09-01..2026-08-29
+    returned 242 articles, all from 2026-08-11 onward. A year requested, a
+    fortnight delivered, HTTP 200, no warning. One request per week is the
+    difference between a backfill and an empty table.
+    """
+    start, end = date_str_to_ts("2025-09-01"), date_str_to_ts("2026-08-29")
+    windows = date_windows(cfg, start, end)
+    assert len(windows) > 40, "eleven months cannot be one request"
+
+
+def test_window_count_matches_the_configured_size(cfg):
+    start = date_str_to_ts("2026-01-01")
+    windows = date_windows(cfg, start, start + 30 * DAY)
+    expected = -(-30 // cfg["news"]["max_window_days"])  # ceiling division
+    assert len(windows) == expected
+
+
+def test_a_short_range_is_one_call(cfg):
+    start = date_str_to_ts("2026-08-20")
+    assert len(date_windows(cfg, start, start + 3 * DAY)) == 1
+
+
+def test_windows_cover_the_whole_range_with_no_gap(cfg):
+    start, end = date_str_to_ts("2025-09-01"), date_str_to_ts("2025-12-01")
+    windows = date_windows(cfg, start, end)
+    assert windows[0][0] == start
+    assert windows[-1][1] == end
+    for (_, a_end), (b_start, _) in zip(windows, windows[1:]):
+        assert a_end == b_start, "a gap here loses days with no error"
+
+
+def test_windows_do_not_overlap_into_double_counting(cfg):
+    """Dedupe by URL is a second defence, not the first."""
+    start, end = date_str_to_ts("2025-09-01"), date_str_to_ts("2025-11-01")
+    windows = date_windows(cfg, start, end)
+    for (_, a_end), (b_start, _) in zip(windows, windows[1:]):
+        assert b_start >= a_end
+
+
+def test_a_zero_length_range_still_yields_one_window(cfg):
+    ts = date_str_to_ts("2026-08-20")
+    assert date_windows(cfg, ts, ts) == [(ts, ts)]
+
+
+def test_universe_selection_reads_companies(tmp_path):
+    """Not the seed list — the 6,054 rows edgar.py built."""
+    conn = db.get_conn(tmp_path / "u.db")
+    db.upsert_companies(conn, [
+        {"cik": "0000320193", "ticker": "AAPL", "name": "Apple", "exchange": "Nasdaq"},
+        {"cik": "0000789019", "ticker": "MSFT", "name": "Microsoft", "exchange": "Nasdaq"},
+    ])
+    assert universe_tickers_for_news(conn) == ["AAPL", "MSFT"]
+    conn.close()
+
+
+def test_universe_falls_back_when_in_universe_is_unset(tmp_path):
+    """`in_universe` is NULL for all 6,054 until Phase 3 — the fallback is the
+    difference between collecting news and collecting nothing."""
+    conn = db.get_conn(tmp_path / "f.db")
+    db.upsert_companies(conn, [{"cik": "0000320193", "ticker": "AAPL",
+                                "name": "Apple", "exchange": "Nasdaq",
+                                "in_universe": None}])
+    assert db.universe_tickers(conn) == []
+    assert universe_tickers_for_news(conn) == ["AAPL"]
+    conn.close()
+
+
+def test_universe_narrows_once_phase_3_sets_the_flag(tmp_path):
+    conn = db.get_conn(tmp_path / "n.db")
+    db.upsert_companies(conn, [
+        {"cik": "0000320193", "ticker": "AAPL", "name": "Apple",
+         "exchange": "Nasdaq", "in_universe": 1},
+        {"cik": "0000789019", "ticker": "MSFT", "name": "Microsoft",
+         "exchange": "Nasdaq", "in_universe": 0},
+    ])
+    assert universe_tickers_for_news(conn) == ["AAPL"]
+    conn.close()
+
+
+def test_seed_watchlist_is_still_configured(cfg):
+    """The P1-15 path stays usable for a quick single-company check."""
+    assert len(cfg["news"]["seed_watchlist"]) >= 5

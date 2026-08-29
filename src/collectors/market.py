@@ -16,7 +16,7 @@ Fetches are incremental: each run resumes from the latest cached bar per
 All bar timestamps are stored as UTC epoch seconds of the bar's open.
 
 Usage:
-  python -m src.collectors.market --tickers TSLA,AAPL --start 2024-09-01 --end 2026-08-01
+  python -m src.collectors.market --tickers TSLA,AAPL --start 2025-09-01 --end 2026-08-01
   python -m src.collectors.market --universe              # every liquid ticker + benchmark
   python -m src.collectors.market --universe --interval 1d
   python -m src.collectors.market --universe --stamp-snapshot
