@@ -264,6 +264,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-universe", action="store_true",
                         help="fetch the SEC ticker map into `companies`")
+    parser.add_argument("--universe", action="store_true",
+                        help="collect filings for every company in `companies`")
+    parser.add_argument("--tickers",
+                        help="comma-separated subset, e.g. TSLA,AAPL")
+    parser.add_argument("--resume", action="store_true",
+                        help="skip companies that already have filings stored")
     parser.add_argument("--force", action="store_true",
                         help="re-fetch instead of serving from the raw cache")
     args = parser.parse_args()
@@ -271,15 +277,17 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
     cfg = load_config()
-    if not args.build_universe:
-        parser.error("nothing to do — pass --build-universe")
+    if not (args.build_universe or args.universe or args.tickers):
+        parser.error("nothing to do — pass --build-universe, --universe or --tickers")
 
     conn = db.get_conn(cfg["paths"]["db"])
-    build_universe(cfg, conn, force=args.force)
+    if args.build_universe:
+        build_universe(cfg, conn, force=args.force)
+    if args.universe or args.tickers:
+        tickers = ([t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+                   if args.tickers else None)
+        collect_many(cfg, conn, tickers=tickers, resume=args.resume)
 
-
-if __name__ == "__main__":
-    main()
 
 
 # --------------------------------------------------------------------------
@@ -445,12 +453,91 @@ def filing_rows(cfg: dict, records: list[dict], cik: str,
 
 
 def collect_company(cfg: dict, conn, client: EdgarClient, cik: str,
-                    ticker: str | None) -> int:
-    """Fetch one company's submissions and store its 8-K rows. Returns new rows."""
+                    ticker: str | None) -> tuple[int, int]:
+    """Fetch one company's submissions and store its 8-K rows.
+
+    Returns `(records fetched, new rows)`. The record count is what the
+    run-level guard watches: a company with no 8-Ks is ordinary, but a company
+    with no records at all means the endpoint gave us nothing.
+    """
     records = fetch_company_filings(cfg, client, cik)
     rows = filing_rows(cfg, records, cik, ticker)
     new = db.upsert_filings(conn, rows)
     log.info("%s (%s): %d records fetched, %d %s rows, %d new",
              ticker or "?", cik, len(records), len(rows),
              "/".join(cfg["edgar"]["forms"]), new)
-    return new
+    return len(records), new
+
+
+# --------------------------------------------------------------------------
+# P2-05 — running it over many companies, and refusing to lie about it
+# --------------------------------------------------------------------------
+
+def collect_many(cfg: dict, conn, client: EdgarClient | None = None,
+                 tickers: list[str] | None = None,
+                 resume: bool = False) -> int:
+    """Collect filings for many companies. Returns new rows written.
+
+    Per-company failures are logged and the run continues — one 404 must not
+    cost the other 6,053 companies. The guard is run-level for the same reason
+    P1-15 made the news guard run-level: zero 8-Ks for ONE company is ordinary
+    (plenty of small companies file none in two years), while zero records
+    across EVERY company means the endpoint is broken.
+    """
+    client = client or EdgarClient(cfg)
+    companies = db.companies_for_collection(conn, tickers)
+    if not companies:
+        raise SystemExit(
+            "companies table is empty — run "
+            "`python -m src.collectors.edgar --build-universe` first."
+        )
+
+    skip = db.ciks_with_filings(conn) if resume else set()
+    if skip:
+        log.info("resume: skipping %d companies that already have filings",
+                 sum(1 for c in companies if c["cik"] in skip))
+
+    total_records = total_new = failed = attempted = 0
+    for company in companies:
+        if company["cik"] in skip:
+            continue
+        attempted += 1
+        try:
+            records, new = collect_company(cfg, conn, client,
+                                           company["cik"], company["ticker"])
+        except Exception:
+            failed += 1
+            log.exception("failed to collect %s (%s) — continuing",
+                          company["ticker"], company["cik"])
+            continue
+        total_records += records
+        total_new += new
+
+    n_filings = conn.execute("SELECT COUNT(*) FROM filings").fetchone()[0]
+    log.info("Done. %d companies attempted (%d failed); %d records parsed, "
+             "%d new rows; filings table now holds %d.",
+             attempted, failed, total_records, total_new, n_filings)
+
+    # The silent-failure guard. A 200 carrying redirect HTML already raises in
+    # get_json; this catches the other shape of the same failure — every
+    # response valid JSON, and nothing in any of them.
+    if cfg["logging"]["fail_on_zero_records"]:
+        if attempted and failed == attempted:
+            raise SystemExit(
+                f"EVERY one of {attempted} companies failed — EDGAR is not "
+                f"answering. Do not treat this run as successful."
+            )
+        if attempted and total_records == 0:
+            raise SystemExit(
+                f"ZERO records parsed across {attempted} companies — a 200 "
+                f"response carrying nothing usable. Do not treat this run as "
+                f"successful."
+            )
+    elif attempted and total_records == 0:
+        log.error("ZERO records parsed across %d companies "
+                  "(logging.fail_on_zero_records is off)", attempted)
+    return total_new
+
+
+if __name__ == "__main__":
+    main()

@@ -260,6 +260,32 @@ def upsert_filings(conn: sqlite3.Connection, rows: list[dict]) -> int:
     return after - before
 
 
+def companies_for_collection(conn: sqlite3.Connection,
+                            tickers: list[str] | None = None) -> list[sqlite3.Row]:
+    """Companies to fetch filings for: the whole map, or a named subset.
+
+    Not `universe_tickers` — that returns only what the Phase 3 liquidity
+    filter has approved, which is nothing until Phase 3 runs.
+    """
+    if tickers:
+        marks = ",".join("?" * len(tickers))
+        return conn.execute(
+            f"SELECT cik, ticker FROM companies WHERE ticker IN ({marks}) "
+            f"ORDER BY ticker", tickers
+        ).fetchall()
+    return conn.execute("SELECT cik, ticker FROM companies ORDER BY ticker").fetchall()
+
+
+def ciks_with_filings(conn: sqlite3.Connection) -> set[str]:
+    """CIKs that already have at least one row in `filings`.
+
+    Used by `--resume`. Note what it cannot tell you: a company that was
+    fetched and genuinely has no 8-Ks looks identical to one never tried.
+    P2-06 records per-CIK state to close that gap.
+    """
+    return {r[0] for r in conn.execute("SELECT DISTINCT cik FROM filings")}
+
+
 def latest_filing_ts(conn: sqlite3.Connection, cik: str) -> int | None:
     row = conn.execute(
         "SELECT MAX(acceptance_utc) FROM filings WHERE cik = ?", (cik,)
