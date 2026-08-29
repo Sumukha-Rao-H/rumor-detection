@@ -43,6 +43,13 @@ edgar:
   forms: ["8-K"]
   max_requests_per_s: 8            # SEC allows 10; stay under it
   min_interval_s: 0.125
+  max_retries: 5                   # then give up and name the URL — a permanent
+                                   # 404 must not spin forever inside a
+                                   # 1,500-company run
+  backoff_base_s: 2.0              # SEC throttling clears in seconds. The
+                                   # project-wide Backoff default (60s) is tuned
+                                   # for daily API quotas and would cost ~5 min
+                                   # per transient 429 here.
 
 # ------------------------------------------------------------
 # Event filtering (context.md §5)
