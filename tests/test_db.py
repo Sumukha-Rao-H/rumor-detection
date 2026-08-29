@@ -58,6 +58,24 @@ def test_companies_upsert_and_universe(conn):
     assert db.company_name(conn, "NOPE") is None
 
 
+def test_a_refresh_with_no_liquidity_opinion_keeps_in_universe(conn):
+    """Regression guard (P2-02).
+
+    `upsert_companies` used to write `in_universe = excluded.in_universe` with
+    no COALESCE. The universe build has no opinion about liquidity and passes
+    NULL, so rebuilding the map after the Phase 3 filter had run would empty
+    every flag — and `market.py --universe` would then download nothing while
+    reporting success.
+    """
+    db.upsert_companies(conn, [make_company(in_universe=1)])
+    db.upsert_companies(conn, [make_company(in_universe=None)])
+    assert db.universe_tickers(conn) == ["AAPL"]
+
+    # An explicit 0 still means what it says.
+    db.upsert_companies(conn, [make_company(in_universe=0)])
+    assert db.universe_tickers(conn) == []
+
+
 def test_filings_are_immutable_once_stored(conn):
     assert db.upsert_filings(conn, [make_filing()]) == 1
     assert db.upsert_filings(conn, [make_filing(items="1.01")]) == 0

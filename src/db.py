@@ -201,7 +201,12 @@ def upsert_companies(conn: sqlite3.Connection, rows: list[dict]) -> int:
           name = COALESCE(excluded.name, companies.name),
           exchange = COALESCE(excluded.exchange, companies.exchange),
           sic = COALESCE(excluded.sic, companies.sic),
-          in_universe = excluded.in_universe,
+          -- COALESCE, not a plain overwrite: a collector that has no opinion
+          -- about liquidity passes NULL, and a universe rebuild must not wipe
+          -- the flags the Phase 3 filter set. Same failure as the one P1-14
+          -- fixed in upsert_news — a re-run losing a column another stage
+          -- filled. The filter still writes 0 and 1 explicitly.
+          in_universe = COALESCE(excluded.in_universe, companies.in_universe),
           adv_usd = COALESCE(excluded.adv_usd, companies.adv_usd),
           last_price = COALESCE(excluded.last_price, companies.last_price),
           universe_as_of = COALESCE(excluded.universe_as_of, companies.universe_as_of)

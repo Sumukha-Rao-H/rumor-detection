@@ -13,16 +13,17 @@ served without touching the network — so a repeat run of the full universe
 makes zero requests, and a body that turns out not to be JSON is dropped rather
 than cached forever.
 
-Parsing, the universe build, and the filings upsert are P2-02 … P2-04.
+On top of that sits the universe build (P2-02): SEC's ticker->CIK map,
+filtered to the configured exchanges and collapsed to one row per company.
+Per-company submissions and the 8-K parse are P2-03 and P2-04.
 
-Usage (P2-05 adds the CLI):
-  from src.collectors.edgar import EdgarClient
-  client = EdgarClient(load_config())
-  data = client.get_json(client.submissions_url("0000320193"))
+Usage:
+  python -m src.collectors.edgar --build-universe
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
@@ -31,7 +32,10 @@ from urllib.parse import urlparse
 
 import requests
 
+from src import db
+from src.utils.config import load_config
 from src.utils.ratelimit import Backoff, RateLimiter
+from src.utils.timeutils import date_str_to_ts
 
 log = logging.getLogger(__name__)
 
@@ -166,3 +170,107 @@ class EdgarClient:
                 f"EDGAR returned non-JSON for {url} "
                 f"(first 120 bytes: {body[:120]!r}) — cache entry discarded"
             ) from exc
+
+
+# --------------------------------------------------------------------------
+# P2-02 — the universe
+# --------------------------------------------------------------------------
+
+def pick_primary_ticker(tickers: list[str]) -> str:
+    """The one listing that represents a company, out of all its listings.
+
+    A CIK routinely carries several tickers — share classes, preferred series,
+    structured notes. On the real file, 895 of 6,054 companies do. `companies`
+    is keyed by CIK, so taking whichever arrives last would leave JPMorgan
+    labelled `VYLD` (a structured note): the filings would still be right,
+    while the prices and news joined to them would be a different instrument.
+    Nothing would error.
+
+    A hyphen in this file marks a preferred series or a share class
+    (`JPM-PC`, `ORCL-PD`), so prefer a plain ticker; among equals keep SEC's
+    own order, which runs from most to least prominent. Companies whose only
+    listings are hyphenated — genuine dual-class commons like `BRK-B`, or a
+    preferred-only filer — keep the first of those rather than being dropped.
+    """
+    plain = [t for t in tickers if "-" not in t]
+    return (plain or tickers)[0]
+
+
+def company_rows(cfg: dict, payload: dict) -> list[dict]:
+    """`company_tickers_exchange.json` -> one `companies` row per CIK.
+
+    The universe is dated at the START of the study window, never today: a map
+    built from today has already dropped every company that was acquired or
+    delisted, which is exactly the dramatic events this study is about.
+    """
+    fields = [f.lower() for f in payload["fields"]]
+    idx = {name: fields.index(name) for name in ("cik", "name", "ticker", "exchange")}
+    keep = set(cfg["universe"]["exchanges"])
+    as_of = date_str_to_ts(cfg["study_window"]["start"])
+
+    # Insertion-ordered, so "first in the file" survives to pick_primary_ticker.
+    seen: dict[str, dict] = {}
+    for record in payload["data"]:
+        exchange = record[idx["exchange"]]
+        ticker = record[idx["ticker"]]
+        if exchange not in keep or not ticker:
+            continue
+        cik = str(record[idx["cik"]]).zfill(10)  # string, ten digits, always
+        entry = seen.setdefault(cik, {
+            "cik": cik,
+            "name": record[idx["name"]],
+            "exchange": exchange,
+            "universe_as_of": as_of,
+            "in_universe": None,   # the Phase 3 liquidity filter decides
+            "_tickers": [],
+        })
+        entry["_tickers"].append(ticker)
+
+    rows = []
+    for entry in seen.values():
+        tickers = entry.pop("_tickers")
+        rows.append({**entry, "ticker": pick_primary_ticker(tickers)})
+    return rows
+
+
+def build_universe(cfg: dict, conn, client: EdgarClient | None = None,
+                   force: bool = False) -> int:
+    """Fetch the ticker map and upsert it into `companies`. Returns rows written."""
+    client = client or EdgarClient(cfg)
+    payload = client.get_json(client.company_tickers_url(), force=force)
+    rows = company_rows(cfg, payload)
+
+    if not rows and cfg["logging"]["fail_on_zero_records"]:
+        raise RuntimeError(
+            f"universe: parsed ZERO companies from "
+            f"{client.company_tickers_url()} for exchanges "
+            f"{cfg['universe']['exchanges']} — refusing to report success"
+        )
+
+    new = db.upsert_companies(conn, rows)
+    total = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
+    log.info("universe: %d companies parsed, %d new, %d rows in companies",
+             len(rows), new, total)
+    return len(rows)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--build-universe", action="store_true",
+                        help="fetch the SEC ticker map into `companies`")
+    parser.add_argument("--force", action="store_true",
+                        help="re-fetch instead of serving from the raw cache")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(message)s")
+    cfg = load_config()
+    if not args.build_universe:
+        parser.error("nothing to do — pass --build-universe")
+
+    conn = db.get_conn(cfg["paths"]["db"])
+    build_universe(cfg, conn, force=args.force)
+
+
+if __name__ == "__main__":
+    main()
