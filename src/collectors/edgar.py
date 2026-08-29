@@ -14,8 +14,10 @@ makes zero requests, and a body that turns out not to be JSON is dropped rather
 than cached forever.
 
 On top of that sits the universe build (P2-02): SEC's ticker->CIK map,
-filtered to the configured exchanges and collapsed to one row per company.
-Per-company submissions and the 8-K parse are P2-03 and P2-04.
+filtered to the configured exchanges and collapsed to one row per company; and
+the per-company submissions fetch (P2-03), which follows SEC's older-filings
+pages so a heavy filer's window is not silently truncated. The 8-K parse and
+the upsert into `filings` are P2-04.
 
 Usage:
   python -m src.collectors.edgar --build-universe
@@ -78,6 +80,10 @@ class EdgarClient:
     def submissions_url(self, cik: str) -> str:
         """Submissions JSON for a zero-padded 10-digit CIK."""
         return f"{self.cfg['edgar']['submissions_base']}/CIK{cik}.json"
+
+    def submissions_page_url(self, page_name: str) -> str:
+        """An older-filings page sits beside the main submissions file."""
+        return f"{self.cfg['edgar']['submissions_base']}/{page_name}"
 
     def company_tickers_url(self) -> str:
         """The ticker -> CIK map used to build the universe (P2-02)."""
@@ -274,3 +280,99 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# --------------------------------------------------------------------------
+# P2-03 — per-company submissions, including the older-filings pages
+# --------------------------------------------------------------------------
+
+def pages_to_fetch(files_block: list[dict], since_ts: int,
+                   until_ts: int) -> list[str]:
+    """Which older-filings pages overlap the study window.
+
+    `filings.recent` is not a company's whole history: SEC keeps the most
+    recent 1,000 filings or one year there, whichever is larger, and the rest
+    in these pages. JPMorgan files enough that one year fills 25,937 records,
+    so its `recent` block starts 2025-08-29 while the window opens 2024-09-01.
+    Reading `recent` alone would drop eleven months for exactly the companies
+    that file the most — with no error, just a company that appears to have had
+    no events.
+
+    Only overlapping pages are fetched: for JPMorgan that is 11 of 69. A page
+    with a missing bound is fetched rather than guessed at, because a wrong
+    skip is invisible in the output.
+    """
+    wanted = []
+    for page in files_block or []:
+        name = page.get("name")
+        if not name:
+            continue
+        frm, to = page.get("filingFrom"), page.get("filingTo")
+        if not frm or not to:
+            wanted.append(name)   # fail safe: never narrow the window by guess
+            continue
+        if date_str_to_ts(to) >= since_ts and date_str_to_ts(frm) <= until_ts:
+            wanted.append(name)
+    return wanted
+
+
+def records_from_block(block: dict) -> list[dict]:
+    """SEC's parallel arrays -> one dict per filing.
+
+    `recent` and each page store a list per field rather than a list of
+    records. Zipping ragged arrays would silently truncate to the shortest and
+    misalign every field after the gap, so the lengths are checked instead.
+    """
+    if not block:
+        return []
+    fields = list(block.keys())
+    # An older-filings page is the bare block; the main file wraps it under
+    # `filings.recent`. Mixing the two up otherwise surfaces as a KeyError
+    # deep in the zip, which says nothing about what went wrong.
+    if not all(isinstance(block[f], list) for f in fields):
+        raise EdgarRequestError(
+            f"expected a block of parallel arrays, got fields "
+            f"{fields[:5]} whose values are not lists"
+        )
+    lengths = {len(block[f]) for f in fields}
+    if len(lengths) > 1:
+        raise EdgarRequestError(
+            f"submissions block has ragged arrays: "
+            f"{ {f: len(block[f]) for f in fields} } — zipping would misalign fields"
+        )
+    n = lengths.pop() if lengths else 0
+    return [{f: block[f][i] for f in fields} for i in range(n)]
+
+
+def fetch_company_filings(cfg: dict, client: EdgarClient, cik: str,
+                          since_ts: int | None = None,
+                          until_ts: int | None = None) -> list[dict]:
+    """Every filing record for one CIK that could fall inside the window.
+
+    Returns raw records — all form types, SEC's own field names and string
+    values. The 8-K filter and the type conversions are P2-04, because page
+    selection depends on all filings' dates: a page holding one 8-K among
+    2,000 Form 4s must still be fetched.
+    """
+    since_ts = since_ts if since_ts is not None else date_str_to_ts(
+        cfg["study_window"]["start"])
+    until_ts = until_ts if until_ts is not None else date_str_to_ts(
+        cfg["study_window"]["end"])
+
+    payload = client.get_json(client.submissions_url(cik))
+    filings = payload.get("filings", {})
+    records = records_from_block(filings.get("recent", {}))
+
+    for name in pages_to_fetch(filings.get("files", []), since_ts, until_ts):
+        page = client.get_json(client.submissions_page_url(name))
+        records.extend(records_from_block(page))
+
+    # Consecutive pages share an edge date, so the same filing can arrive
+    # twice. The upsert would absorb it, but a duplicated count reported as
+    # fact would not be caught anywhere.
+    seen: dict[str, dict] = {}
+    for record in records:
+        acc = record.get("accessionNumber")
+        if acc and acc not in seen:
+            seen[acc] = record
+    return list(seen.values())
