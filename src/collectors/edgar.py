@@ -473,6 +473,10 @@ def collect_company(cfg: dict, conn, client: EdgarClient, cik: str,
 # P2-05 — running it over many companies, and refusing to lie about it
 # --------------------------------------------------------------------------
 
+#: Namespace for this collector's rows in `fetch_state`.
+FETCH_SOURCE = "edgar"
+
+
 def collect_many(cfg: dict, conn, client: EdgarClient | None = None,
                  tickers: list[str] | None = None,
                  resume: bool = False) -> int:
@@ -483,6 +487,12 @@ def collect_many(cfg: dict, conn, client: EdgarClient | None = None,
     P1-15 made the news guard run-level: zero 8-Ks for ONE company is ordinary
     (plenty of small companies file none in two years), while zero records
     across EVERY company means the endpoint is broken.
+
+    Every company's outcome is written to `fetch_state` and committed as it
+    happens, so `resume=True` continues an interrupted run instead of
+    restarting. `KeyboardInterrupt` is deliberately not caught here — `except
+    Exception` does not cover it — so Ctrl-C stops the run with everything
+    collected so far already committed.
     """
     client = client or EdgarClient(cfg)
     companies = db.companies_for_collection(conn, tickers)
@@ -492,24 +502,30 @@ def collect_many(cfg: dict, conn, client: EdgarClient | None = None,
             "`python -m src.collectors.edgar --build-universe` first."
         )
 
-    skip = db.ciks_with_filings(conn) if resume else set()
+    skip = db.completed_keys(conn, FETCH_SOURCE) if resume else set()
     if skip:
-        log.info("resume: skipping %d companies that already have filings",
+        log.info("resume: skipping %d companies already collected",
                  sum(1 for c in companies if c["cik"] in skip))
 
     total_records = total_new = failed = attempted = 0
     for company in companies:
-        if company["cik"] in skip:
+        cik, ticker = company["cik"], company["ticker"]
+        if cik in skip:
             continue
         attempted += 1
         try:
-            records, new = collect_company(cfg, conn, client,
-                                           company["cik"], company["ticker"])
-        except Exception:
+            records, new = collect_company(cfg, conn, client, cik, ticker)
+        except Exception as exc:
             failed += 1
-            log.exception("failed to collect %s (%s) — continuing",
-                          company["ticker"], company["cik"])
+            log.exception("failed to collect %s (%s) — continuing", ticker, cik)
+            db.set_fetch_state(conn, FETCH_SOURCE, cik, "failed",
+                               error=f"{type(exc).__name__}: {exc}"[:500])
             continue
+        # After the upsert, never before: a crash between the two re-fetches one
+        # company, which is free. The reverse order would mark a company done
+        # whose rows never landed.
+        db.set_fetch_state(conn, FETCH_SOURCE, cik, "ok",
+                           records=records, rows_written=new)
         total_records += records
         total_new += new
 

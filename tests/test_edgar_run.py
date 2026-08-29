@@ -192,11 +192,13 @@ def test_resume_on_a_fresh_db_collects_everything(cfg, conn):
     assert len(client.calls) == 3
 
 
-def test_resume_still_refetches_a_company_with_no_8ks(cfg, conn):
-    """Known limitation, stated so it is not mistaken for the finished feature.
+def test_resume_does_not_refetch_a_company_with_no_8ks(cfg, conn):
+    """This was P2-05's known limitation, closed by P2-06.
 
-    From `filings` alone, "fetched and files no 8-Ks" is indistinguishable from
-    "never tried". P2-06 records per-CIK state to close this.
+    From `filings` alone, "fetched and files no 8-Ks" was indistinguishable
+    from "never tried", so a quiet company was re-fetched on every resume.
+    `fetch_state` records the outcome, so 'ok' with rows_written = 0 now means
+    "do not come back".
     """
     form4 = {"accessionNumber": "x-1", "form": "4", "items": "",
              "acceptanceDateTime": "2026-01-02T20:00:00.000Z",
@@ -208,7 +210,7 @@ def test_resume_still_refetches_a_company_with_no_8ks(cfg, conn):
     collect_many(cfg, conn, client=FakeClient(payloads))
     second = FakeClient(payloads)
     collect_many(cfg, conn, client=second, resume=True)
-    assert sorted(second.calls) == ["0000789019", "0001318605"]
+    assert second.calls == []
 
 
 def test_universe_with_an_empty_companies_table_says_what_to_run(cfg, tmp_path):

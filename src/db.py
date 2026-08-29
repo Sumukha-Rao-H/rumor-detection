@@ -1,6 +1,6 @@
 """SQLite storage layer.
 
-Five tables:
+Seven tables:
 
   companies  the study universe, dated at the START of the window so the
              ticker->CIK map is not survivorship-biased (review §7.5).
@@ -11,6 +11,7 @@ Five tables:
   news       headlines with timestamps — this is LABEL infrastructure, not a
              feature source, because t0 = min(acceptance, earliest article).
   meta       key/value provenance, e.g. when the price snapshot was frozen.
+  fetch_state per-item collector progress, so an interrupted run resumes.
 
 All timestamps are UTC epoch seconds. All writes are idempotent upserts so
 re-running any collector never duplicates rows. Plain sqlite3, no ORM.
@@ -98,6 +99,23 @@ CREATE INDEX IF NOT EXISTS idx_news_ticker ON news (ticker, seen_utc);
 
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY, value TEXT, updated_utc INTEGER
+);
+
+-- Per-item collector progress, so an interrupted run continues instead of
+-- restarting. Deliberately NOT a column on `companies`: that table is an
+-- as-of snapshot dated at the window start, and a mutable progress counter
+-- does not belong inside it. Records the OUTCOME, not just the attempt --
+-- 'ok' with rows_written = 0 means "fetched, genuinely files no 8-Ks, do not
+-- come back", which the filings table alone cannot express.
+CREATE TABLE IF NOT EXISTS fetch_state (
+  source TEXT,                   -- 'edgar'
+  key TEXT,                      -- the CIK for edgar
+  status TEXT,                   -- 'ok' | 'failed'
+  records INTEGER,               -- what the fetch returned
+  rows_written INTEGER,          -- what was stored from it
+  error TEXT,
+  updated_utc INTEGER,
+  PRIMARY KEY (source, key)
 );
 """
 
@@ -274,16 +292,6 @@ def companies_for_collection(conn: sqlite3.Connection,
             f"ORDER BY ticker", tickers
         ).fetchall()
     return conn.execute("SELECT cik, ticker FROM companies ORDER BY ticker").fetchall()
-
-
-def ciks_with_filings(conn: sqlite3.Connection) -> set[str]:
-    """CIKs that already have at least one row in `filings`.
-
-    Used by `--resume`. Note what it cannot tell you: a company that was
-    fetched and genuinely has no 8-Ks looks identical to one never tried.
-    P2-06 records per-CIK state to close that gap.
-    """
-    return {r[0] for r in conn.execute("SELECT DISTINCT cik FROM filings")}
 
 
 def latest_filing_ts(conn: sqlite3.Connection, cik: str) -> int | None:
@@ -490,6 +498,47 @@ def retier_news(conn: sqlite3.Connection, cfg: dict) -> int:
 # --------------------------------------------------------------------------
 # meta
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# fetch_state — collector progress
+# --------------------------------------------------------------------------
+
+def set_fetch_state(conn: sqlite3.Connection, source: str, key: str,
+                    status: str, records: int = 0, rows_written: int = 0,
+                    error: str | None = None) -> None:
+    """Record one item's outcome and COMMIT immediately.
+
+    Committed per item on purpose: state buffered to the end of a run is
+    worthless, because surviving a kill is the entire point.
+    """
+    conn.execute(
+        """INSERT INTO fetch_state
+             (source, key, status, records, rows_written, error, updated_utc)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(source, key) DO UPDATE SET
+             status = excluded.status,
+             records = excluded.records,
+             rows_written = excluded.rows_written,
+             error = excluded.error,
+             updated_utc = excluded.updated_utc""",
+        (source, key, status, records, rows_written, error, int(time.time())),
+    )
+    conn.commit()
+
+
+def completed_keys(conn: sqlite3.Connection, source: str) -> set[str]:
+    """Keys this source finished successfully — what `--resume` skips.
+
+    Only 'ok'. A failure is usually a transient 503 or a dropped connection,
+    and picking those up is the reason to resume after an outage.
+    """
+    return {
+        row[0] for row in conn.execute(
+            "SELECT key FROM fetch_state WHERE source = ? AND status = 'ok'",
+            (source,),
+        )
+    }
+
 
 def set_meta(conn: sqlite3.Connection, key: str, value: str, ts_utc: int) -> None:
     """Provenance. Used to stamp the price-snapshot freeze date, because
