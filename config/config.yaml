@@ -135,7 +135,14 @@ market:
   min_session_coverage: 0.9
   # Hourly history is a ROLLING ~2-year window: bars available today disappear
   # later. Download broad coverage early, freeze it, and never re-download.
-  snapshot_frozen: false           # flipped to true once the snapshot is taken
+  # FROZEN 2026-08-30 (P3-06). Stamps live in `meta` as snapshot_frozen_1d /
+  # snapshot_frozen_60m. The collector now refuses any run whose REQUESTED
+  # start predates its interval's stamp, because bars are fetched with
+  # auto_adjust=True and yfinance restates history after a split — a re-pull
+  # would silently rewrite bars already used in results. Appending newer bars
+  # is still allowed, so the Phase 7 live monitor keeps working. --force is the
+  # deliberate override.
+  snapshot_frozen: true
   calendar: "XNYS"                 # exchange_calendars code for NYSE/Nasdaq hours
 
 # ------------------------------------------------------------

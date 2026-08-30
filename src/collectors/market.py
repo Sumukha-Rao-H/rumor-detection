@@ -37,7 +37,7 @@ from src import db
 from src.utils.config import load_config
 from src.utils.ratelimit import RateLimiter
 from src.utils.timeutils import (
-    date_str_to_ts, ts_to_dt, ts_to_iso, utc_now_ts,
+    date_str_to_ts, iso_utc_to_ts, ts_to_dt, ts_to_iso, utc_now_ts,
 )
 
 log = logging.getLogger(__name__)
@@ -119,6 +119,46 @@ def clamp_start(start_ts: int, interval: str, now_ts: int) -> int:
                         "%s -> %s", ts_to_iso(start_ts), ts_to_iso(floor))
             return floor
     return start_ts
+
+
+def assert_not_frozen(cfg: dict, conn, interval: str, requested_start_ts: int,
+                      force: bool = False) -> None:
+    """Refuse to re-download a frozen snapshot, while still allowing appends.
+
+    The hazard is not wasted time: bars are fetched with `auto_adjust=True`, so
+    a split or dividend **restates** every earlier price. Re-pull a stock after
+    a 2-for-1 split and its whole pre-split history silently halves, making any
+    earlier result unreproducible with nothing in the data to explain why.
+
+    The rule keys on the REQUESTED start, not on the resolved incremental one.
+    `collect_ticker` always resumes from `last_bar + 1s`, which is before the
+    stamp, so keying on that would refuse every append too — and quietly break
+    the Phase 7 live monitor weeks later, in a different phase.
+    """
+    if not cfg["market"]["snapshot_frozen"] or force:
+        if force:
+            log.warning("--force: bypassing the %s snapshot freeze. yfinance "
+                        "restates history after splits, so bars already stored "
+                        "may change and earlier results stop reproducing.",
+                        interval)
+        return
+    stamp = db.get_meta(conn, f"snapshot_frozen_{interval}")
+    if stamp is None:
+        raise SystemExit(
+            f"market.snapshot_frozen is true but no snapshot_frozen_{interval} "
+            f"stamp exists in `meta`. Either stamp it with --stamp-snapshot or "
+            f"set snapshot_frozen: false — a flag with no evidence behind it is "
+            f"worse than no flag."
+        )
+    stamp_ts = iso_utc_to_ts(stamp)
+    if requested_start_ts < stamp_ts:
+        raise SystemExit(
+            f"{interval} bars were frozen at {stamp}. Refusing to re-download "
+            f"from {ts_to_iso(requested_start_ts)}: yfinance restates history "
+            f"after splits, so this would silently change bars already used in "
+            f"results. Append newer bars with --start after the stamp, or pass "
+            f"--force if you genuinely mean to replace the snapshot."
+        )
 
 
 def collect_ticker(conn, ticker: str, start_ts: int, end_ts: int,
@@ -328,6 +368,10 @@ def main() -> None:
                         help="skip tickers already collected for this interval")
     parser.add_argument("--report", action="store_true",
                         help="print the coverage report and exit, fetching nothing")
+    parser.add_argument("--force", action="store_true",
+                        help="re-download even though the snapshot is frozen. "
+                             "yfinance restates history after splits, so this "
+                             "can change bars already used in results.")
     parser.add_argument("--stamp-snapshot", action="store_true",
                         help="record this run's date as the frozen snapshot date")
     args = parser.parse_args()
@@ -367,6 +411,7 @@ def main() -> None:
         print_coverage_report(coverage_report(cfg, conn, tickers, interval))
         return
 
+    assert_not_frozen(cfg, conn, interval, start_ts, force=args.force)
     collect_many(cfg, conn, tickers, start_ts, end_ts, interval,
                  resume=args.resume)
 

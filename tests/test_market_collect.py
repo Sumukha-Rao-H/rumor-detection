@@ -14,7 +14,8 @@ import pytest
 from src import db
 from src.collectors import market
 from src.collectors.market import (
-    collect_many, coverage_report, default_start_ts, fetch_source,
+    assert_not_frozen, collect_many, coverage_report, default_start_ts,
+    fetch_source,
 )
 from src.utils.config import load_config
 from src.utils.timeutils import date_str_to_ts
@@ -360,3 +361,71 @@ def test_report_flags_a_ticker_never_fetched(cfg, tmp_path):
     conn = fresh_db(tmp_path, "never.db")
     rep = coverage_report(cfg, conn, ["AAPL"], "1d")
     assert rep["missing"] == [("AAPL", "never fetched", None)]
+
+
+# --------------------------------------------------------------------------
+# P3-06 — the snapshot freeze
+# --------------------------------------------------------------------------
+
+def frozen_cfg(cfg, frozen=True):
+    return {**cfg, "market": {**cfg["market"], "snapshot_frozen": frozen}}
+
+
+def stamp(conn, interval, iso):
+    db.set_meta(conn, f"snapshot_frozen_{interval}", iso, 0)
+
+
+def test_frozen_refuses_a_backfill_of_history(cfg, tmp_path):
+    """THE Done-when: re-running the collector refuses to re-download.
+
+    yfinance restates history after a split, so a re-pull would silently change
+    bars already used in results.
+    """
+    conn = fresh_db(tmp_path, "frozen.db")
+    stamp(conn, "1d", "2026-08-30 12:00:00Z")
+    with pytest.raises(SystemExit, match="frozen"):
+        assert_not_frozen(frozen_cfg(cfg), conn, "1d",
+                          date_str_to_ts("2024-09-01"))
+
+
+def test_frozen_allows_appending_newer_bars(cfg, tmp_path):
+    """Phase 7's live monitor must keep working after the freeze.
+
+    It asks for the last few hours, so its requested start is after the stamp.
+    Keying the rule on the resolved incremental start instead would refuse this
+    too, and break the live monitor weeks later in a different phase.
+    """
+    conn = fresh_db(tmp_path, "append.db")
+    stamp(conn, "60m", "2026-08-30 12:00:00Z")
+    assert_not_frozen(frozen_cfg(cfg), conn, "60m",
+                      date_str_to_ts("2026-08-31"))   # no raise
+
+
+def test_force_overrides_the_freeze(cfg, tmp_path):
+    conn = fresh_db(tmp_path, "force.db")
+    stamp(conn, "1d", "2026-08-30 12:00:00Z")
+    assert_not_frozen(frozen_cfg(cfg), conn, "1d",
+                      date_str_to_ts("2024-09-01"), force=True)
+
+
+def test_freeze_is_per_interval(cfg, tmp_path):
+    """Daily and hourly were downloaded on different runs."""
+    conn = fresh_db(tmp_path, "periv.db")
+    stamp(conn, "1d", "2026-08-30 12:00:00Z")
+    with pytest.raises(SystemExit):
+        assert_not_frozen(frozen_cfg(cfg), conn, "1d", date_str_to_ts("2024-09-01"))
+    with pytest.raises(SystemExit, match="no snapshot_frozen_60m stamp"):
+        assert_not_frozen(frozen_cfg(cfg), conn, "60m", date_str_to_ts("2024-09-01"))
+
+
+def test_frozen_without_a_stamp_refuses(cfg, tmp_path):
+    """A flag with no evidence behind it is worse than no flag."""
+    conn = fresh_db(tmp_path, "nostamp.db")
+    with pytest.raises(SystemExit, match="no snapshot_frozen_1d stamp"):
+        assert_not_frozen(frozen_cfg(cfg), conn, "1d", date_str_to_ts("2024-09-01"))
+
+
+def test_unfrozen_is_unaffected(cfg, tmp_path):
+    conn = fresh_db(tmp_path, "unfrozen.db")
+    assert_not_frozen(frozen_cfg(cfg, frozen=False), conn, "1d",
+                      date_str_to_ts("2024-09-01"))   # no raise
