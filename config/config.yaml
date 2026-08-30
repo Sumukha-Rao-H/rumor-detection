@@ -122,6 +122,17 @@ market:
   # calendar is four (Christmas/New Year midweek), so a week leaves margin
   # without being loose enough to hide a real gap.
   coverage_tolerance_days: 7
+  # P3-05. Fraction of exchange sessions in an event's padded span that must
+  # carry at least one bar. Measured in SESSIONS, not bars: a 09:30-16:00
+  # session yields 7 bars (six hours plus the 15:30 half-hour stub) against 6.5
+  # trading hours, so a bar-count ratio scores a perfect event at 1.077 and the
+  # threshold would absorb an artefact instead of measuring a gap.
+  #
+  # 0.9 because a 35-day span holds ~24 sessions, so this tolerates two missing
+  # days — enough for a one-day halt or a data hiccup, tight enough that a
+  # week-long hole fails. 1.0 would flag every early close where the final stub
+  # bar is absent.
+  min_session_coverage: 0.9
   # Hourly history is a ROLLING ~2-year window: bars available today disappear
   # later. Download broad coverage early, freeze it, and never re-download.
   snapshot_frozen: false           # flipped to true once the snapshot is taken
