@@ -2,30 +2,33 @@
 
 Backtest granularity is hourly ('60m') bars: yfinance serves ~730 days of
 those, matching the hourly decision step. Daily bars are supplementary
-context. 1m/5m/15m/30m bars are NOT used (30–60 day history is useless
-for backtests).
+context, and are what the Phase 3 liquidity filter ranks companies by.
+1m/5m/15m/30m bars are NOT used (30-60 day history is useless for backtests).
 
 The hourly window is ROLLING — bars available today silently disappear later —
 so coverage must be downloaded broadly and early, then frozen. Broad coverage
 (not just event windows) is required because negative sampling and trailing
-z-scores both need continuous history. Budget days of wall-clock time for a
-full 1,500-ticker pull, and record the download date with --stamp-snapshot.
+z-scores both need continuous history. Budget hours of wall-clock time for a
+full 6,000-ticker pull, and record the download date with --stamp-snapshot.
 
 Fetches are incremental: each run resumes from the latest cached bar per
-(ticker, interval), so historical bars are fetched once and re-runs are cheap.
-All bar timestamps are stored as UTC epoch seconds of the bar's open.
+(ticker, interval), and every ticker's outcome is recorded in `fetch_state`
+so `--resume` continues an interrupted run. All bar timestamps are stored as
+UTC epoch seconds of the bar's open.
 
 Usage:
   python -m src.collectors.market --tickers TSLA,AAPL --start 2025-09-01 --end 2026-08-01
+  python -m src.collectors.market --candidates --interval 1d --resume
   python -m src.collectors.market --universe              # every liquid ticker + benchmark
-  python -m src.collectors.market --universe --interval 1d
   python -m src.collectors.market --universe --stamp-snapshot
+  python -m src.collectors.market --candidates --interval 1d --report
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+from typing import NamedTuple
 
 import pandas as pd
 import yfinance as yf
@@ -40,6 +43,45 @@ from src.utils.timeutils import (
 log = logging.getLogger(__name__)
 
 HOURLY_MAX_LOOKBACK_S = 729 * 86400  # yfinance serves ~730 days of 60m bars
+DAY_S = 86400
+
+#: Namespace prefix for this collector's rows in `fetch_state`. The interval is
+#: appended, because a ticker finished for daily bars is NOT finished for
+#: hourly ones — a shared namespace would make the hourly run skip all 6,000
+#: tickers on its first --resume.
+FETCH_SOURCE_PREFIX = "market"
+
+
+def fetch_source(interval: str) -> str:
+    """`fetch_state.source` for one bar interval, e.g. 'market:1d'."""
+    return f"{FETCH_SOURCE_PREFIX}:{interval}"
+
+
+class FetchResult(NamedTuple):
+    """One ticker's outcome.
+
+    `attempted` is False when the cache already covers the window and no
+    request was issued — that is not an attempt, and must not arm the
+    zero-record guard.
+    """
+    attempted: bool
+    parsed: int
+    written: int
+
+
+def default_start_ts(cfg: dict, interval: str) -> int:
+    """Start of the download window for one interval, when --start is absent.
+
+    Daily bars reach back `universe.min_history_days` BEFORE the study window,
+    because the liquidity filter applies its history requirement and averages
+    traded value *as of the window start* — it can do neither from bars that
+    begin on that same day. Derived from the knob the filter itself reads,
+    rather than duplicated into a second one that could drift away from it.
+    """
+    start = date_str_to_ts(cfg["study_window"]["start"])
+    if interval == cfg["market"]["daily_interval"]:
+        return start - cfg["universe"]["min_history_days"] * DAY_S
+    return start
 
 
 def df_to_rows(df: pd.DataFrame, ticker: str, interval: str) -> list[tuple]:
@@ -80,8 +122,14 @@ def clamp_start(start_ts: int, interval: str, now_ts: int) -> int:
 
 
 def collect_ticker(conn, ticker: str, start_ts: int, end_ts: int,
-                   interval: str) -> int:
-    """Fetch and upsert bars for one ticker, resuming from the cache."""
+                   interval: str,
+                   limiter: RateLimiter | None = None) -> FetchResult:
+    """Fetch and upsert bars for one ticker, resuming from the cache.
+
+    The rate limiter is waited immediately before the request and not before
+    the cache check, so a run that skips thousands of already-cached tickers
+    does not also sleep a second for each of them.
+    """
     now = utc_now_ts()
     start_ts = clamp_start(start_ts, interval, now)
     cached = db.latest_bar_ts(conn, ticker, interval)
@@ -89,7 +137,9 @@ def collect_ticker(conn, ticker: str, start_ts: int, end_ts: int,
         start_ts = cached + 1  # incremental: refetch nothing we already have
     if start_ts >= end_ts:
         log.info("%s [%s]: cache already covers window", ticker, interval)
-        return 0
+        return FetchResult(attempted=False, parsed=0, written=0)
+    if limiter is not None:
+        limiter.wait()
     hist = yf.Ticker(ticker).history(
         start=ts_to_dt(start_ts), end=ts_to_dt(end_ts),
         interval=interval, auto_adjust=True,
@@ -98,18 +148,186 @@ def collect_ticker(conn, ticker: str, start_ts: int, end_ts: int,
     n = db.upsert_bars(conn, rows)
     log.info("%s [%s]: %d bars upserted (%s -> %s)", ticker, interval,
              len(rows), ts_to_iso(start_ts), ts_to_iso(end_ts))
-    return n
+    return FetchResult(attempted=True, parsed=len(rows), written=n)
+
+
+def collect_many(cfg: dict, conn, tickers: list[str], start_ts: int,
+                 end_ts: int, interval: str, resume: bool = False) -> int:
+    """Collect bars for many tickers. Returns rows parsed across the run.
+
+    Per-ticker failures are logged and the run continues — one delisted symbol
+    must not cost the other 6,000. Every outcome is committed to `fetch_state`
+    as it happens, so `--resume` continues an interrupted run.
+    `KeyboardInterrupt` is deliberately not caught (`except Exception` does not
+    cover it), so Ctrl-C stops the run with everything collected so far saved.
+    """
+    source = fetch_source(interval)
+    skip = db.completed_keys(conn, source) if resume else set()
+    if skip:
+        log.info("resume: skipping %d tickers already collected",
+                 sum(1 for t in tickers if t in skip))
+    # Tickers a previous run already found to return nothing. They are excluded
+    # from the guard's denominator below: a --resume mop-up attempts exactly
+    # these, and all of them coming back empty a second time is the expected
+    # outcome, not evidence that yfinance has stopped answering.
+    known_empty = db.keys_with_status(conn, source, "empty")
+
+    limiter = RateLimiter(cfg["market"]["min_interval_s"])
+    attempted = parsed_total = written_total = failed = empty = 0
+    guard_attempts = guard_parsed = 0
+    for ticker in tickers:
+        if ticker in skip:
+            continue
+        guarded = ticker not in known_empty
+        try:
+            res = collect_ticker(conn, ticker, start_ts, end_ts, interval,
+                                 limiter=limiter)
+        except Exception as exc:
+            failed += 1
+            attempted += 1
+            guard_attempts += guarded
+            log.exception("failed to collect %s [%s] — continuing",
+                          ticker, interval)
+            db.set_fetch_state(conn, source, ticker, "failed",
+                               error=f"{type(exc).__name__}: {exc}"[:500])
+            continue
+        if not res.attempted:
+            continue  # cache already covered it; nothing was tried
+        attempted += 1
+        parsed_total += res.parsed
+        written_total += res.written
+        if guarded:
+            guard_attempts += 1
+            guard_parsed += res.parsed
+        # After the upsert, never before: a crash between the two re-fetches
+        # one ticker, which is free. The reverse order would mark a ticker done
+        # whose bars never landed.
+        #
+        # Zero bars is 'empty', not 'ok', so --resume comes back to it. For
+        # EDGAR a company that files no 8-Ks was a permanent, legitimate 'ok';
+        # a listed company with no daily bars at all is not the same thing — it
+        # is a delisted symbol or a transient Yahoo failure, and the two look
+        # identical from here.
+        if res.parsed:
+            db.set_fetch_state(conn, source, ticker, "ok",
+                               records=res.parsed, rows_written=res.written)
+        else:
+            empty += 1
+            db.set_fetch_state(conn, source, ticker, "empty", records=0,
+                               rows_written=0,
+                               error="yfinance returned no bars for this window")
+
+    n_bars = conn.execute("SELECT COUNT(*) FROM bars WHERE interval = ?",
+                          (interval,)).fetchone()[0]
+    log.info("Done [%s]. %d tickers attempted (%d failed, %d empty); "
+             "%d bars parsed, %d rows written; bars[%s] now holds %d.",
+             interval, attempted, failed, empty, parsed_total, written_total,
+             interval, n_bars)
+
+    # The silent-failure guard, at run level. It deliberately does NOT look at
+    # the size of the bars table: the old `total == 0 and n_bars == 0` form
+    # could only ever fire on a virgin database, so from the second run onward
+    # a completely broken yfinance would have passed quietly.
+    #
+    # An empty frame arrives with no exception, which is precisely the "HTTP 200
+    # carrying nothing" shape this project keeps guarding against, so unlike the
+    # EDGAR guard this one counts empty responses and not only raised errors.
+    if cfg["logging"]["fail_on_zero_records"] and guard_attempts and not guard_parsed:
+        raise SystemExit(
+            f"ZERO bars parsed across all {guard_attempts} tickers attempted "
+            f"[{interval}] that were not already known to be empty — yfinance "
+            f"is returning nothing. Do not treat this run as successful."
+        )
+    return parsed_total
+
+
+# --------------------------------------------------------------------------
+# coverage report
+# --------------------------------------------------------------------------
+
+def coverage_report(cfg: dict, conn, tickers: list[str],
+                    interval: str) -> dict:
+    """Does every candidate have bars spanning the required window?
+
+    The required span is [default_start_ts, study_window.end] — for daily bars
+    that reaches back before the window, because the liquidity filter needs the
+    history. A boundary date can legitimately fall on a weekend or in a holiday
+    week, so `market.coverage_tolerance_days` of slack is allowed at each end.
+    """
+    required_start = default_start_ts(cfg, interval)
+    required_end = date_str_to_ts(cfg["study_window"]["end"])
+    tol = cfg["market"]["coverage_tolerance_days"] * DAY_S
+    coverage = db.bar_coverage(conn, interval)
+    state = {
+        row[0]: (row[1], row[2]) for row in conn.execute(
+            "SELECT key, status, error FROM fetch_state WHERE source = ?",
+            (fetch_source(interval),),
+        )
+    }
+
+    report = {"interval": interval, "required_start": required_start,
+              "required_end": required_end, "candidates": len(tickers),
+              "covered": [], "missing": [], "late_start": [], "early_end": []}
+    for ticker in tickers:
+        got = coverage.get(ticker)
+        if not got or not got[2]:
+            status, error = state.get(ticker, ("never fetched", None))
+            report["missing"].append((ticker, status, error))
+            continue
+        first_ts, last_ts, _ = got
+        if first_ts > required_start + tol:
+            report["late_start"].append((ticker, first_ts))
+        elif last_ts < required_end - tol:
+            report["early_end"].append((ticker, last_ts))
+        else:
+            report["covered"].append(ticker)
+    return report
+
+
+def print_coverage_report(report: dict, max_listed: int = 20) -> None:
+    """Human-readable form of `coverage_report` — the P3-01 acceptance check."""
+    print(f"\n=== Bar coverage [{report['interval']}] ===")
+    print(f"Required span : {ts_to_iso(report['required_start'])} -> "
+          f"{ts_to_iso(report['required_end'])}")
+    print(f"Candidates    : {report['candidates']}")
+    print(f"  covered     : {len(report['covered'])}")
+    print(f"  late start  : {len(report['late_start'])}   "
+          f"(IPO or relisting inside the span)")
+    print(f"  early end   : {len(report['early_end'])}   "
+          f"(delisted or acquired inside the span)")
+    print(f"  missing     : {len(report['missing'])}   (no bars at all)")
+
+    for label, key in (("Late start", "late_start"), ("Early end", "early_end")):
+        rows = report[key]
+        if rows:
+            print(f"\n{label} — first {min(len(rows), max_listed)} of {len(rows)}:")
+            for ticker, ts in rows[:max_listed]:
+                print(f"  {ticker:<8} {ts_to_iso(ts)}")
+    if report["missing"]:
+        rows = report["missing"]
+        print(f"\nMissing — first {min(len(rows), max_listed)} of {len(rows)}:")
+        for ticker, status, error in rows[:max_listed]:
+            print(f"  {ticker:<8} {status:<8} {error or ''}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--tickers", help="comma-separated, e.g. TSLA,AAPL")
+    group.add_argument("--candidates", action="store_true",
+                       help="every ticker in `companies` — the pre-filter list, "
+                            "which is what the liquidity filter is computed from")
     group.add_argument("--universe", action="store_true",
-                       help="every ticker in the liquid universe, plus the benchmark")
-    parser.add_argument("--start", help="YYYY-MM-DD (default: study_window.start)")
+                       help="every ticker that passed the liquidity filter, "
+                            "plus the benchmark")
+    parser.add_argument("--start", help="YYYY-MM-DD (default: per interval — "
+                                       "daily reaches back min_history_days)")
     parser.add_argument("--end", help="YYYY-MM-DD (default: now)")
     parser.add_argument("--interval", help="60m (default) or 1d")
+    parser.add_argument("--resume", action="store_true",
+                        help="skip tickers already collected for this interval")
+    parser.add_argument("--report", action="store_true",
+                        help="print the coverage report and exit, fetching nothing")
     parser.add_argument("--stamp-snapshot", action="store_true",
                         help="record this run's date as the frozen snapshot date")
     args = parser.parse_args()
@@ -119,12 +337,13 @@ def main() -> None:
     cfg = load_config()
     mcfg = cfg["market"]
     interval = args.interval or mcfg["interval"]
-    start_ts = date_str_to_ts(args.start or cfg["study_window"]["start"])
+    start_ts = (date_str_to_ts(args.start) if args.start
+                else default_start_ts(cfg, interval))
     end_ts = date_str_to_ts(args.end) if args.end else utc_now_ts()
 
     conn = db.get_conn(cfg["paths"]["db"])
-    if args.universe:
-        tickers = db.universe_tickers(conn)
+    if args.candidates:
+        tickers = db.candidate_tickers(conn)
         if not tickers:
             raise SystemExit(
                 "companies table is empty — run `python -m src.collectors.edgar "
@@ -132,30 +351,24 @@ def main() -> None:
             )
         if mcfg["benchmark"] not in tickers:
             tickers.append(mcfg["benchmark"])  # SPY market control
+    elif args.universe:
+        tickers = db.universe_tickers(conn)
+        if not tickers:
+            raise SystemExit(
+                "no company has in_universe = 1 — run the liquidity filter "
+                "first, or use --candidates for the unfiltered list."
+            )
+        if mcfg["benchmark"] not in tickers:
+            tickers.append(mcfg["benchmark"])
     else:
         tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
 
-    limiter = RateLimiter(mcfg["min_interval_s"])
-    total = 0
-    failed = 0
-    for ticker in tickers:
-        limiter.wait()
-        try:
-            total += collect_ticker(conn, ticker, start_ts, end_ts, interval)
-        except Exception:
-            failed += 1
-            log.exception("failed to collect %s — continuing", ticker)
+    if args.report:
+        print_coverage_report(coverage_report(cfg, conn, tickers, interval))
+        return
 
-    n_bars = conn.execute("SELECT COUNT(*) FROM bars").fetchone()[0]
-    log.info("Done. %d tickers processed (%d failed); bars table now has %d rows.",
-             len(tickers), failed, n_bars)
-
-    # Silent-failure guard: an empty pull must never pass quietly.
-    if cfg["logging"]["fail_on_zero_records"] and total == 0 and n_bars == 0:
-        raise SystemExit(
-            f"ZERO bars written for {len(tickers)} tickers — yfinance is "
-            f"returning nothing. Do not treat this run as successful."
-        )
+    collect_many(cfg, conn, tickers, start_ts, end_ts, interval,
+                 resume=args.resume)
 
     if args.stamp_snapshot:
         stamp = ts_to_iso(utc_now_ts())

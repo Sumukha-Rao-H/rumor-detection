@@ -249,6 +249,23 @@ def universe_tickers(conn: sqlite3.Connection) -> list[str]:
     return [r[0] for r in rows]
 
 
+def candidate_tickers(conn: sqlite3.Connection) -> list[str]:
+    """Every ticker in the map — the candidate list, before any filtering.
+
+    Not `universe_tickers`: that reads `in_universe`, which is 0 for every row
+    until the Phase 3 liquidity filter runs, and the filter is computed from
+    the very bars this list is used to fetch.
+
+    DISTINCT is load-bearing. P2-11's predecessor rows carry their successor's
+    ticker, so without it a reorganised company is fetched twice.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT ticker FROM companies WHERE ticker IS NOT NULL "
+        "ORDER BY ticker"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
 def company_name(conn: sqlite3.Connection, ticker: str) -> str | None:
     row = conn.execute(
         "SELECT name FROM companies WHERE ticker = ? AND name IS NOT NULL LIMIT 1",
@@ -390,6 +407,25 @@ def latest_bar_ts(conn: sqlite3.Connection, ticker: str, interval: str) -> int |
         (ticker, interval),
     ).fetchone()
     return row[0]
+
+
+def bar_coverage(conn: sqlite3.Connection,
+                 interval: str) -> dict[str, tuple[int, int, int]]:
+    """ticker -> (first_ts_utc, last_ts_utc, n_bars) for one interval.
+
+    One grouped scan rather than three queries per ticker: the coverage report
+    runs over every candidate, and 6,000 round trips to answer "does this
+    ticker have bars at all" is the kind of thing that turns a report into a
+    coffee break.
+    """
+    return {
+        row[0]: (row[1], row[2], row[3])
+        for row in conn.execute(
+            "SELECT ticker, MIN(ts_utc), MAX(ts_utc), COUNT(*) FROM bars "
+            "WHERE interval = ? GROUP BY ticker",
+            (interval,),
+        )
+    }
 
 
 # --------------------------------------------------------------------------
@@ -542,18 +578,24 @@ def set_fetch_state(conn: sqlite3.Connection, source: str, key: str,
     conn.commit()
 
 
+def keys_with_status(conn: sqlite3.Connection, source: str,
+                     status: str) -> set[str]:
+    """Keys this source last recorded with a given status."""
+    return {
+        row[0] for row in conn.execute(
+            "SELECT key FROM fetch_state WHERE source = ? AND status = ?",
+            (source, status),
+        )
+    }
+
+
 def completed_keys(conn: sqlite3.Connection, source: str) -> set[str]:
     """Keys this source finished successfully — what `--resume` skips.
 
     Only 'ok'. A failure is usually a transient 503 or a dropped connection,
     and picking those up is the reason to resume after an outage.
     """
-    return {
-        row[0] for row in conn.execute(
-            "SELECT key FROM fetch_state WHERE source = ? AND status = 'ok'",
-            (source,),
-        )
-    }
+    return keys_with_status(conn, source, "ok")
 
 
 def set_meta(conn: sqlite3.Connection, key: str, value: str, ts_utc: int) -> None:

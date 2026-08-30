@@ -102,6 +102,12 @@ market:
   min_interval_s: 1.0
   pad_days_before: 30              # bars must cover [t0 - 30d, t0 + 5d] per event
   pad_days_after: 5
+  # Slack allowed at each end of the required span by the coverage report. A
+  # boundary date can legitimately land on a weekend or in a holiday week and
+  # have no bar. The longest run of consecutive non-trading days in the US
+  # calendar is four (Christmas/New Year midweek), so a week leaves margin
+  # without being loose enough to hide a real gap.
+  coverage_tolerance_days: 7
   # Hourly history is a ROLLING ~2-year window: bars available today disappear
   # later. Download broad coverage early, freeze it, and never re-download.
   snapshot_frozen: false           # flipped to true once the snapshot is taken
