@@ -71,8 +71,17 @@ def test_no_model_exists_yet() -> None:
     result. Right now that is literally true. Phase 5 will fill these packages
     and this assertion will be retired — the git history is what preserves the
     claim afterwards.
+
+    `pipeline` was dropped from this list in P3-02 (2026-08-30), when
+    `universe.py` became the first module in it. The claim being protected is
+    "no MODEL existed when the metric was chosen"; `src/pipeline/` holds the
+    liquidity filter, t0 correction and feature builder, none of which is a
+    model and all of which Phases 3-4 are meant to fill. The permanent
+    invariant — that `src/eval/` never imports `src.pipeline` — is unchanged
+    and still enforced by the test below, which is what actually stops
+    evaluation code reaching back into the pipeline.
     """
-    for package in ("baselines", "rl", "pipeline"):
+    for package in ("baselines", "rl"):
         modules = [p for p in (REPO / "src" / package).glob("*.py")
                    if p.name != "__init__.py"]
         assert modules == [], f"src/{package} is no longer empty: {modules}"

@@ -266,6 +266,40 @@ def candidate_tickers(conn: sqlite3.Connection) -> list[str]:
     return [r[0] for r in rows]
 
 
+def clear_universe_flags(conn: sqlite3.Connection) -> int:
+    """Reset every liquidity flag before the filter re-runs.
+
+    Without this the filter is additive: a company that qualified on an earlier
+    run but no longer does would keep its flag and quietly stay in the study.
+    """
+    cur = conn.execute(
+        "UPDATE companies SET in_universe = 0, adv_usd = NULL, "
+        "last_price = NULL, universe_as_of = NULL"
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def set_universe_flags(conn: sqlite3.Connection, rows: list[dict]) -> int:
+    """Mark the companies that passed the liquidity filter.
+
+    Written only to primary rows (`successor_cik IS NULL`). P2-11's predecessor
+    rows carry their successor's ticker, so flagging both would double-count a
+    reorganised company in every headcount.
+    """
+    if not rows:
+        return 0
+    cur = conn.executemany(
+        """UPDATE companies
+              SET in_universe = 1, adv_usd = :adv_usd,
+                  last_price = :last_price, universe_as_of = :as_of_utc
+            WHERE ticker = :ticker AND successor_cik IS NULL""",
+        rows,
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def company_name(conn: sqlite3.Connection, ticker: str) -> str | None:
     row = conn.execute(
         "SELECT name FROM companies WHERE ticker = ? AND name IS NOT NULL LIMIT 1",
