@@ -227,6 +227,112 @@ def date_windows(cfg: dict, start_ts: int, end_ts: int) -> list[tuple[int, int]]
     return windows or [(start_ts, end_ts)]
 
 
+#: Namespace for the backfill's rows in `fetch_state`. Keyed per
+#: (ticker, window) pair, because a 15-hour run cannot restart from the top.
+FETCH_SOURCE = "news:backfill"
+
+
+def window_grid(cfg: dict) -> list[tuple[int, int]]:
+    """The study window cut into `news.max_window_days` slices.
+
+    Aligned to `study_window.start` so a window index means the same thing on
+    every run — resume state keyed by index would otherwise point at a
+    different stretch of time whenever the grid shifted.
+    """
+    return date_windows(cfg, date_str_to_ts(cfg["study_window"]["start"]),
+                        date_str_to_ts(cfg["study_window"]["end"]))
+
+
+def backfill_targets(cfg: dict, conn) -> list[tuple[str, int, int, int]]:
+    """(ticker, window_index, start_ts, end_ts) for every week holding a filing.
+
+    Only these weeks are worth fetching: `t0.py` reads `news.t0_lookback_hours`
+    before each acceptance time and nothing else, so the other ~80% of the grid
+    is data we would pay for and never read — 89 hours of calls against 15.
+
+    A filing early in a window needs the PREVIOUS window too, or its lookback
+    is half-covered and the miss shows up later as "no news found" rather than
+    as an error.
+    """
+    grid = window_grid(cfg)
+    if not grid:
+        return []
+    lo, hi = grid[0][0], grid[-1][1]
+    span = cfg["news"]["max_window_days"] * 86400
+    lookback = cfg["news"]["t0_lookback_hours"] * 3600
+
+    wanted: set[tuple[str, int]] = set()
+    for ticker, acceptance in db.filing_acceptance_times(
+            conn, lo, hi, cfg["edgar"]["forms"]):
+        for edge in (acceptance - lookback, acceptance):
+            if lo <= edge < hi:
+                wanted.add((ticker, (edge - lo) // span))
+    return sorted(
+        (ticker, idx, grid[idx][0], grid[idx][1])
+        for ticker, idx in wanted if idx < len(grid)
+    )
+
+
+def collect_targets(cfg: dict, conn, targets: list[tuple[str, int, int, int]],
+                    apis: list[str], resume: bool = False) -> int:
+    """Collect one (ticker, window) pair at a time, recording each outcome.
+
+    Zero records is recorded `ok`, NOT retryable — the opposite of the rule
+    `market.py` uses. A small company genuinely has no coverage in the week it
+    files a routine item, and 4,094 of 6,054 companies had no news at all in
+    P2-09's sample week; marking those retryable would make every resume
+    re-fetch tens of thousands of permanently quiet weeks. A quiet week is a
+    real answer. A delisted ticker was not.
+
+    `KeyboardInterrupt` is deliberately not caught, so Ctrl-C stops the run
+    with every pair collected so far already committed.
+    """
+    ncfg = cfg["news"]
+    gdelt_limiter = RateLimiter(ncfg["gdelt_min_interval_s"])
+    finnhub_limiter = RateLimiter(ncfg["finnhub_min_interval_s"])
+    skip = db.completed_keys(conn, FETCH_SOURCE) if resume else set()
+    if skip:
+        log.info("resume: %d of %d pairs already collected",
+                 sum(1 for t in targets if f"{t[0]}@{t[1]}" in skip), len(targets))
+
+    total = attempted = failed = 0
+    for ticker, idx, win_start, win_end in targets:
+        key = f"{ticker}@{idx}"
+        if key in skip:
+            continue
+        attempted += 1
+        try:
+            parsed = collect(cfg, conn, ticker, None, win_start, win_end, apis,
+                             gdelt_limiter=gdelt_limiter,
+                             finnhub_limiter=finnhub_limiter)
+        except Exception as exc:
+            failed += 1
+            log.exception("failed %s window %d — continuing", ticker, idx)
+            db.set_fetch_state(conn, FETCH_SOURCE, key, "failed",
+                               error=f"{type(exc).__name__}: {exc}"[:500])
+            continue
+        # After the upsert, never before: a crash between the two re-fetches one
+        # pair, which is cheap. The reverse order would mark a pair done whose
+        # articles never landed.
+        db.set_fetch_state(conn, FETCH_SOURCE, key, "ok", records=parsed)
+        total += parsed
+
+    log.info("Backfill done. %d pair(s) attempted (%d failed); %d record(s) "
+             "parsed; news table now holds %d rows.", attempted, failed, total,
+             conn.execute("SELECT COUNT(*) FROM news").fetchone()[0])
+
+    # Attempts are checked before emptiness: a fully resumed run attempted
+    # nothing and so failed at nothing. Without that check a completed backfill
+    # would exit non-zero every time it was re-run.
+    if cfg["logging"]["fail_on_zero_records"] and attempted and total == 0:
+        raise SystemExit(
+            f"ZERO records parsed across all {attempted} (ticker, window) "
+            f"pairs attempted. One quiet week is normal; all of them means the "
+            f"endpoint is broken. Do not treat this run as successful."
+        )
+    return total
+
+
 def universe_tickers_for_news(conn) -> list[str]:
     """Every company in `companies`, or the liquid subset once Phase 3 sets it.
 
@@ -326,7 +432,7 @@ def collect_many(cfg: dict, conn, tickers: list[str], start_ts: int, end_ts: int
     log.info("Done. %d ticker(s) x %d window(s) processed (%d failed); "
              "%d record(s) parsed.", len(tickers), len(windows), failed, total)
 
-    if cfg["logging"]["fail_on_zero_records"] and total == 0:
+    if cfg["logging"]["fail_on_zero_records"] and tickers and windows and total == 0:
         raise SystemExit(
             f"ZERO records parsed across all {len(tickers)} ticker(s) via "
             f"{apis} for {ts_to_dt(start_ts).date()} -> {ts_to_dt(end_ts).date()}. "
@@ -345,6 +451,12 @@ def main() -> None:
     parser.add_argument("--universe", action="store_true",
                         help="every company in `companies` (the liquid subset "
                              "once Phase 3 sets in_universe)")
+    parser.add_argument("--backfill", action="store_true",
+                        help="collect the whole study window for every week "
+                             "that contains an 8-K — what the t0 correction "
+                             "reads. Finnhub only by default; use --resume.")
+    parser.add_argument("--resume", action="store_true",
+                        help="skip (ticker, window) pairs already collected")
     parser.add_argument("--retier", action="store_true",
                         help="recompute source_tier for every stored row from "
                              "the current whitelist, then exit. Use after "
@@ -364,6 +476,23 @@ def main() -> None:
     if args.retier:
         changed = db.retier_news(conn, cfg)
         log.info("Re-tiered from current config: %d row(s) changed.", changed)
+        return
+
+    if args.backfill:
+        targets = backfill_targets(cfg, conn)
+        if not targets:
+            raise SystemExit(
+                "no in-window filings to collect news for — run "
+                "`python -m src.collectors.edgar --universe` first.")
+        # GDELT is 5 s between requests and has been unreachable at every
+        # attempt (issue 13); including it would take a 15-hour run to 66.
+        apis = ([a.strip() for a in args.apis.split(",")]
+                if args.apis != parser.get_default("apis") else ["finnhub"])
+        log.info("Backfill: %d (ticker, window) pair(s) across %d week(s) "
+                 "via %s", len(targets), len(window_grid(cfg)), apis)
+        collect_targets(cfg, conn, targets, apis, resume=args.resume)
+        log.info("Done. news table now has %d rows.",
+                 conn.execute("SELECT COUNT(*) FROM news").fetchone()[0])
         return
 
     if args.universe:

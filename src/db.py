@@ -327,6 +327,26 @@ def companies_for_collection(conn: sqlite3.Connection,
     return conn.execute("SELECT cik, ticker FROM companies ORDER BY ticker").fetchall()
 
 
+def filing_acceptance_times(conn: sqlite3.Connection, start_utc: int,
+                            end_utc: int,
+                            forms: list[str]) -> list[tuple[str, int]]:
+    """(ticker, acceptance_utc) for filings inside a window.
+
+    Drives the news backfill: news is only worth fetching for the weeks that
+    actually contain a filing, because the t0 correction reads a fixed lookback
+    before each acceptance time and nothing else.
+    """
+    marks = ",".join("?" * len(forms))
+    return [
+        (row[0], row[1]) for row in conn.execute(
+            f"SELECT ticker, acceptance_utc FROM filings "
+            f"WHERE acceptance_utc BETWEEN ? AND ? AND form IN ({marks}) "
+            f"AND ticker IS NOT NULL AND acceptance_utc IS NOT NULL",
+            (start_utc, end_utc, *forms),
+        )
+    ]
+
+
 def latest_filing_ts(conn: sqlite3.Connection, cik: str) -> int | None:
     row = conn.execute(
         "SELECT MAX(acceptance_utc) FROM filings WHERE cik = ?", (cik,)
