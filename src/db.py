@@ -361,6 +361,27 @@ def companies_for_collection(conn: sqlite3.Connection,
     return conn.execute("SELECT cik, ticker FROM companies ORDER BY ticker").fetchall()
 
 
+def tickers_with_filings_before(conn: sqlite3.Connection, before_utc: int,
+                                forms: list[str]) -> set[str]:
+    """Tickers with at least one filing before a cutoff.
+
+    Used to tell a real 8-K filer from an entity that structurally cannot be
+    one — foreign private issuers file 6-K/20-F and are exempt, ETFs file
+    neither. Deliberately measured BEFORE the study window: keying on in-window
+    filings would build the universe out of the outcome and guarantee every
+    member a positive.
+    """
+    marks = ",".join("?" * len(forms))
+    return {
+        row[0] for row in conn.execute(
+            f"SELECT DISTINCT ticker FROM filings "
+            f"WHERE acceptance_utc < ? AND form IN ({marks}) "
+            f"AND ticker IS NOT NULL",
+            (before_utc, *forms),
+        )
+    }
+
+
 def filing_acceptance_times(conn: sqlite3.Connection, start_utc: int,
                             end_utc: int,
                             forms: list[str]) -> list[tuple[str, int]]:

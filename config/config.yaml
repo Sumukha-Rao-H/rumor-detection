@@ -39,6 +39,20 @@ universe:
   min_adv_usd: 5000000             # average daily traded value
   min_history_days: 365
   max_tickers: 1500
+  # P3-02b. Foreign private issuers (TSM, BABA, ASML, ARM, SAP, BP...) file
+  # 6-K and 20-F and are EXEMPT from 8-K; ETFs (SPY, QQQ, DIA, MDY) file none.
+  # 191 of the first 1,500-company universe were such entities: they can never
+  # produce a positive, they displace real filers because the universe is
+  # capped, and they deflate the measured base rate.
+  #
+  # Measured BEFORE the window, never during it. "Filed an 8-K in the window"
+  # would build the universe out of the outcome and hand every member a
+  # guaranteed positive. The pre-window form costs 4 domestic companies that
+  # first filed mid-window — the honest price of owing nothing to the future.
+  #
+  # A knob, not a hardcoded rule: "what happens if you keep them?" is a fair
+  # review question and should cost one line to answer.
+  require_prior_8k: true
   # The liquidity filter is applied using data as of study_window.start, never
   # today's — a universe built from today silently drops every company that was
   # acquired or delisted, which is exactly the dramatic events we care about.

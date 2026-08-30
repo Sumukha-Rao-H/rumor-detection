@@ -39,6 +39,19 @@ def add_company(conn, ticker, cik=None, successor=None):
                                 "name": ticker, "successor_cik": successor}])
 
 
+def add_filing(conn, ticker, acceptance_utc, form="8-K", accession=None):
+    db.upsert_filings(conn, [{
+        "accession_no": accession or f"{ticker}-{acceptance_utc}-{form}",
+        "cik": f"CIK{ticker}", "ticker": ticker, "form": form, "items": "1.01",
+        "acceptance_utc": acceptance_utc, "filing_date_utc": acceptance_utc,
+    }])
+
+
+def prior_8k(cfg, conn, ticker, form="8-K"):
+    """An 8-K a month before the window — what makes a real filer eligible."""
+    add_filing(conn, ticker, as_of_ts(cfg) - 30 * DAY, form=form)
+
+
 def add_bars(conn, ticker, start_ts, days, close=10.0, volume=1_000_000,
              interval="1d"):
     """`days` consecutive daily bars, one per calendar day (weekends included).
@@ -53,9 +66,11 @@ def add_bars(conn, ticker, start_ts, days, close=10.0, volume=1_000_000,
     ])
 
 
-def liquid(cfg, conn, ticker, **kw):
+def liquid(cfg, conn, ticker, files_8k=True, **kw):
     """A company that comfortably clears every threshold."""
     add_company(conn, ticker)
+    if files_8k:
+        prior_8k(cfg, conn, ticker)
     start = as_of_ts(cfg) - (cfg["universe"]["min_history_days"] + 30) * DAY
     add_bars(conn, ticker, start, kw.pop("days", 500), **kw)
 
@@ -73,6 +88,7 @@ def test_a_company_delisted_mid_window_still_qualifies(cfg, conn):
     """
     cutoff = as_of_ts(cfg)
     add_company(conn, "GONE")
+    prior_8k(cfg, conn, "GONE")
     add_bars(conn, "GONE", cutoff - 500 * DAY, 500)   # last bar at the cutoff
     survivors, _ = select_universe(cfg, conn)
     assert [c.ticker for c in survivors] == ["GONE"]
@@ -117,12 +133,14 @@ def test_min_price_excludes_a_penny_stock(cfg, conn):
 
 def test_min_history_excludes_a_recent_ipo(cfg, conn):
     add_company(conn, "IPO")
+    prior_8k(cfg, conn, "IPO")
     add_bars(conn, "IPO", as_of_ts(cfg) - 60 * DAY, 60)
     assert classify(cfg, gather_candidates(cfg, conn)["IPO"]) == "short_history"
 
 
 def test_a_company_with_no_bars_is_excluded(cfg, conn):
     add_company(conn, "SVA")
+    prior_8k(cfg, conn, "SVA")
     assert classify(cfg, gather_candidates(cfg, conn)["SVA"]) == "no_bars"
 
 
@@ -136,6 +154,7 @@ def test_history_boundary_tolerates_a_weekend(cfg, conn):
     tol = cfg["market"]["coverage_tolerance_days"]
     first = cutoff - cfg["universe"]["min_history_days"] * DAY + (tol - 1) * DAY
     add_company(conn, "AAA")
+    prior_8k(cfg, conn, "AAA")
     add_bars(conn, "AAA", first, 400)
     assert classify(cfg, gather_candidates(cfg, conn)["AAA"]) is None
 
@@ -223,10 +242,79 @@ def test_every_candidate_is_either_kept_or_given_one_reason(cfg, conn):
     liquid(cfg, conn, "THIN", volume=400)
     liquid(cfg, conn, "PENNY", close=1.0, volume=50_000_000)
     add_company(conn, "IPO")
+    prior_8k(cfg, conn, "IPO")
     add_bars(conn, "IPO", as_of_ts(cfg) - 60 * DAY, 60)
     add_company(conn, "NOBARS")
+    prior_8k(cfg, conn, "NOBARS")
 
     survivors, reasons = select_universe(cfg, conn)
     assert len(survivors) + sum(reasons.values()) == len(db.candidate_tickers(conn))
     assert set(reasons) == {"below_min_adv", "below_min_price", "short_history",
                             "no_bars"}
+
+
+# --------------------------------------------------------------------------
+# P3-02b — entities that cannot file an 8-K
+# --------------------------------------------------------------------------
+
+def test_an_etf_with_no_prior_8k_is_excluded(cfg, conn):
+    """SPY, QQQ and the foreign private issuers can never produce an event."""
+    liquid(cfg, conn, "SPY", files_8k=False, volume=50_000_000)
+    assert classify(cfg, gather_candidates(cfg, conn)["SPY"]) == "no_prior_8k"
+
+
+def test_a_company_with_a_prior_8k_is_kept(cfg, conn):
+    liquid(cfg, conn, "AAPL")
+    assert classify(cfg, gather_candidates(cfg, conn)["AAPL"]) is None
+
+
+def test_only_filings_before_the_window_count(cfg, conn):
+    """No look-ahead: an in-window 8-K must not rescue a company.
+
+    Keying on in-window filings would build the universe out of the outcome and
+    hand every surviving member a guaranteed positive.
+    """
+    liquid(cfg, conn, "NEW", files_8k=False)
+    add_filing(conn, "NEW", as_of_ts(cfg) + 30 * DAY)      # during the window
+    assert classify(cfg, gather_candidates(cfg, conn)["NEW"]) == "no_prior_8k"
+
+
+def test_an_amendment_counts_as_a_prior_filing(cfg, conn):
+    """8-K/A is a real filing with its own acceptance time (P2-04)."""
+    liquid(cfg, conn, "AMD8", files_8k=False)
+    prior_8k(cfg, conn, "AMD8", form="8-K/A")
+    assert classify(cfg, gather_candidates(cfg, conn)["AMD8"]) is None
+
+
+def test_a_non_8k_form_does_not_qualify(cfg, conn):
+    """A 10-Q filer that never files 8-Ks is still outside the answer key."""
+    liquid(cfg, conn, "TENQ", files_8k=False)
+    prior_8k(cfg, conn, "TENQ", form="10-Q")
+    assert classify(cfg, gather_candidates(cfg, conn)["TENQ"]) == "no_prior_8k"
+
+
+def test_the_rule_can_be_switched_off(cfg, conn):
+    """'What if you keep them?' should cost one line to answer."""
+    liquid(cfg, conn, "SPY", files_8k=False)
+    off = {**cfg, "universe": {**cfg["universe"], "require_prior_8k": False}}
+    assert classify(off, gather_candidates(off, conn)["SPY"]) is None
+
+
+def test_excluded_slots_are_backfilled_to_the_cap(cfg, conn):
+    """The user's decision, literally: real filers take the freed slots."""
+    for i in range(5):                      # most liquid, but cannot file
+        liquid(cfg, conn, f"ETF{i}", files_8k=False, volume=90_000_000)
+    for i in range(12):                     # real filers, less liquid
+        liquid(cfg, conn, f"CO{i:02d}", volume=1_000_000 * (i + 1))
+
+    survivors, reasons = select_universe(cfg, conn)
+    assert len(survivors) == cfg["universe"]["max_tickers"] == 10
+    assert not any(t.ticker.startswith("ETF") for t in survivors)
+    assert reasons["no_prior_8k"] == 5
+    assert reasons["over_max_tickers"] == 2   # 12 real filers, 10 slots
+
+
+def test_no_prior_8k_is_reported_before_liquidity_reasons(cfg, conn):
+    """An entity outside the answer key is excluded for that, not for being thin."""
+    liquid(cfg, conn, "THINETF", files_8k=False, volume=400)
+    assert classify(cfg, gather_candidates(cfg, conn)["THINETF"]) == "no_prior_8k"

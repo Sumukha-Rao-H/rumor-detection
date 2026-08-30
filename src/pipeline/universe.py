@@ -41,6 +41,7 @@ class Candidate(NamedTuple):
     last_close: float | None  # last close at or before as-of
     adv_usd: float | None     # mean close*volume over the lookback
     n_bars: int               # bars inside the lookback
+    files_8k: bool = True     # filed an 8-K BEFORE the window (P3-02b)
 
 
 def as_of_ts(cfg: dict) -> int:
@@ -91,11 +92,16 @@ def gather_candidates(cfg: dict, conn) -> dict[str, Candidate]:
             WHERE b.interval = ?""",
         (interval, cutoff, interval))}
 
+    # Measured strictly before the window: keying on in-window filings would
+    # build the universe out of the outcome and hand every member a positive.
+    prior_filers = db.tickers_with_filings_before(conn, cutoff,
+                                                  cfg["edgar"]["forms"])
+
     out = {}
     for ticker in db.candidate_tickers(conn):
         adv, n = window.get(ticker, (None, 0))
         out[ticker] = Candidate(ticker, first.get(ticker), last.get(ticker),
-                                adv, n)
+                                adv, n, ticker in prior_filers)
     return out
 
 
@@ -114,6 +120,14 @@ def classify(cfg: dict, cand: Candidate) -> str | None:
     tolerance = cfg["market"]["coverage_tolerance_days"] * DAY_S
     history_by = cutoff - ucfg["min_history_days"] * DAY_S + tolerance
 
+    # Checked first: "this entity cannot produce an event at all" is more
+    # fundamental than "it trades too thinly to measure", and the report then
+    # reads in order of severity. Foreign private issuers file 6-K/20-F and are
+    # exempt from 8-K; ETFs file neither. Either way the answer key is silent
+    # about them forever, so they can only contribute negatives while occupying
+    # a capped slot that a real filer would otherwise hold.
+    if ucfg["require_prior_8k"] and not cand.files_8k:
+        return "no_prior_8k"
     if cand.first_ts is None or not cand.n_bars:
         return "no_bars"
     if cand.first_ts > history_by:
