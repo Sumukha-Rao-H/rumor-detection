@@ -40,7 +40,14 @@ DAY_S = 86400
 
 
 class Verdict(NamedTuple):
-    """One event's coverage outcome."""
+    """One event's coverage outcome.
+
+    Carries the accession number so the result can be joined to `events` by
+    key. (ticker, acceptance_utc) is not guaranteed unique — a company can file
+    twice in the same second — and a silent mis-join would exclude the wrong
+    event.
+    """
+    accession_no: str
     ticker: str
     acceptance_utc: int
     outcome: str          # ok | no_bars | starts_late | ends_early | gaps
@@ -115,11 +122,8 @@ def audit(cfg: dict, conn) -> list[Verdict]:
         if ticker in universe:
             by_ticker[ticker].append(ts)
 
-    events = [
-        (t, a) for t, a in db.filing_acceptance_times(conn, lo, hi,
-                                                      cfg["edgar"]["forms"])
-        if t in universe
-    ]
+    events = [f for f in db.filings_in_window(conn, lo, hi, cfg["edgar"]["forms"])
+              if f["ticker"] in universe]
     if not events:
         raise SystemExit(
             "no in-window filings for any in-universe company — nothing to "
@@ -128,7 +132,8 @@ def audit(cfg: dict, conn) -> list[Verdict]:
         )
 
     verdicts = []
-    for ticker, acceptance in events:
+    for f in events:
+        ticker, acceptance = f["ticker"], f["acceptance_utc"]
         start, end, clamped = required_span(cfg, acceptance)
         expected = session_count(cfg, start, end)
         stamps = by_ticker.get(ticker, [])
@@ -157,8 +162,8 @@ def audit(cfg: dict, conn) -> list[Verdict]:
                 outcome = "gaps"
             else:
                 outcome = "ok"
-        verdicts.append(Verdict(ticker, acceptance, outcome, expected, present,
-                                clamped))
+        verdicts.append(Verdict(f["accession_no"], ticker, acceptance, outcome,
+                                expected, present, clamped))
     return verdicts
 
 
