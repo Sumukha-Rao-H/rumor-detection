@@ -34,6 +34,7 @@ from typing import NamedTuple
 from src import db
 from src.pipeline import coverage
 from src.utils.config import load_config
+from src.utils.timeutils import date_str_to_ts
 
 log = logging.getLogger(__name__)
 
@@ -167,15 +168,124 @@ def print_report(cfg: dict, conn) -> None:
           f"prediction problems.")
 
 
+def distinct_announcements(rows: list[tuple[str, int]], gap_s: int) -> int:
+    """Collapse events for the same ticker that sit within `gap_s` of each other.
+
+    Issue 28: Capricor filed two 8-Ks on the same day about the same news, and
+    both are usable with an identical price move. Counting one announcement as
+    several positives inflates the total and would let a model be credited
+    twice for detecting the same thing.
+
+    Clusters are transitive along consecutive events, not pairwise: three
+    filings each an hour apart are one announcement, not two.
+    """
+    by_ticker: dict[str, list[int]] = {}
+    for ticker, ts in rows:
+        by_ticker.setdefault(ticker, []).append(ts)
+    total = 0
+    for stamps in by_ticker.values():
+        stamps.sort()
+        total += 1
+        for prev, cur in zip(stamps, stamps[1:]):
+            if cur - prev > gap_s:
+                total += 1
+    return total
+
+
+def census(cfg: dict, conn) -> dict:
+    """The filing -> event -> usable funnel, plus the clustering sensitivity."""
+    rows = conn.execute(
+        "SELECT ticker, t0_utc, is_scheduled, usable, exclude_reason, items "
+        "FROM events").fetchall()
+    usable = [r for r in rows if r["usable"]]
+    reasons = Counter(r["exclude_reason"] for r in rows
+                      if r["exclude_reason"])
+
+    lo = date_str_to_ts(cfg["study_window"]["start"])
+    hi = date_str_to_ts(cfg["study_window"]["end"])
+    months = (hi - lo) / (365.25 / 12 * 86400)
+    tickers = len({r["ticker"] for r in usable}) or 1
+
+    pairs = [(r["ticker"], r["t0_utc"]) for r in usable]
+    return {
+        "events": len(rows),
+        "usable": len(usable),
+        "scheduled": sum(r["is_scheduled"] for r in usable),
+        "reasons": reasons,
+        "tickers": tickers,
+        "months": months,
+        "per_stock_month": len(usable) / tickers / months if months else 0.0,
+        "announcements": {h: distinct_announcements(pairs, h * 3600)
+                          for h in (6, 24, 72)},
+        "top_items": Counter(
+            c for r in usable for c in parse_items(r["items"])
+            if c not in cfg["items"]["exclude"]).most_common(8),
+    }
+
+
+def print_census(cfg: dict, conn) -> None:
+    """The acceptance check: the real positive count, against the plan."""
+    c = census(cfg, conn)
+    budget = cfg["eval"]["alert_budget_per_stock_per_month"]
+    usable, sched = c["usable"], c["scheduled"]
+
+    print(f"\n=== The real positive count ===")
+    print(f"events built            : {c['events']:,}")
+    for reason, n in c["reasons"].most_common():
+        print(f"  excluded {reason:<26} {n:>6,}")
+    print(f"  USABLE POSITIVES {'':<21} {usable:>6,}")
+    print(f"\n  scheduled   : {sched:,}  ({sched/usable:.1%})")
+    print(f"  unscheduled : {usable-sched:,}  ({1-sched/usable:.1%})")
+
+    print(f"\n--- against implementation_plan.md §5 ---")
+    print(f"plan estimated ~3,000-5,000 usable positives "
+          f"('10-20% of filings')")
+    print(f"actual usable           : {usable:,}")
+    print(f"actual unscheduled      : {usable-sched:,}  "
+          f"({(usable-sched)/c['events']:.1%} of events)")
+    verdict = ("ABOVE the estimate" if usable > 5000 else
+               "within the estimate" if usable >= 3000 else
+               "BELOW the estimate — a stop-and-tell, see the plan")
+    print(f"verdict                 : {verdict}")
+
+    print(f"\n--- issue 28: events are not announcements ---")
+    for h, n in c["announcements"].items():
+        print(f"  collapsing events within {h:>2}h : {n:,} distinct "
+              f"announcements ({usable-n:,} absorbed)")
+    print(f"  No de-duplication is applied to the data here — that is a "
+          f"labelling\n  decision for negative sampling (P4-12), not for a "
+          f"census.")
+
+    print(f"\n--- rate, against the alert budget ---")
+    print(f"usable events           : {usable:,} across {c['tickers']:,} "
+          f"tickers over {c['months']:.1f} months")
+    print(f"events per stock/month  : {c['per_stock_month']:.2f}")
+    print(f"alert budget            : {budget} per stock/month")
+    print(f"  the budget is {budget/c['per_stock_month']:.1f}x the event rate, "
+          f"so precision at budget is\n  bounded above by roughly "
+          f"{c['per_stock_month']/budget:.0%} even for a perfect detector.")
+
+    print(f"\n--- most common surviving item codes ---")
+    for code, n in c["top_items"]:
+        tag = "scheduled" if code in cfg["items"]["scheduled"] else ""
+        print(f"  {code:<6}{n:>6,}  {tag}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", action="store_true",
                         help="report only, writing nothing")
+    parser.add_argument("--census", action="store_true",
+                        help="the real positive count, against the plan's "
+                             "estimate. Read-only.")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
     cfg = load_config()
     conn = db.get_conn(cfg["paths"]["db"])
+    if args.census:
+        print_census(cfg, conn)
+        return
     if not args.report:
         write_filters(cfg, conn)
     print_report(cfg, conn)
