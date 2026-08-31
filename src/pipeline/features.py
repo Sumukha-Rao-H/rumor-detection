@@ -91,3 +91,38 @@ def volume_zscore(frame: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     std = base.std()
     z = (volume - base.mean()) / std
     return pd.DataFrame({"volume_z": z.where(std > 0)}, index=frame.index)
+
+
+def realised_volatility(frame: pd.DataFrame,
+                        cfg: dict | None = None) -> pd.DataFrame:
+    """How much this stock has been moving lately: the sd of one-bar returns.
+
+    Context for the footprint — a 3% move means something different in a calm
+    stock than in a jumpy one.
+
+    **No `.shift(1)` here, and that is deliberate.** P4-07 made the shift the
+    whole task, so its absence needs a reason. The z-score is a *comparison*:
+    it asks how far THIS bar sits from its baseline, so the bar must not be in
+    the baseline or it drags normal toward itself. Volatility is a
+    *description*: it asks how much the stock has been moving, and the move
+    realised at `t` is part of the honest answer. It is knowable at `t`, from
+    `close(t)` and `close(t-1)`, both at or before `t`. Excluding it would not
+    be safer, only staler — reporting the previous bar's volatility while
+    labelling it the current one.
+
+    `min_periods` equals the window, not `min_baseline_bars`: volatility "over
+    120 bars" should mean 120 bars. Reusing `min_baseline_bars` would also set a
+    trap, since it happens to equal the window today — shrinking the window
+    would silently make the feature NaN forever.
+
+    Not annualised. Annualising multiplies by a constant, which changes nothing
+    a model can use, and the constant needs a bars-per-year figure the
+    7-bars-per-6.5-hour session makes awkward to state honestly.
+    """
+    cfg = cfg or load_config()
+    window = cfg["features"]["volatility_window_h"]
+    one_bar = frame["close"].pct_change(1)
+    return pd.DataFrame(
+        {"volatility": one_bar.rolling(window, min_periods=window).std()},
+        index=frame.index,
+    )
