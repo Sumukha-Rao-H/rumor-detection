@@ -220,7 +220,16 @@ news:
 # ------------------------------------------------------------
 features:
   return_horizons_h: [1, 4, 24, 120]
-  volume_zscore_window_h: 480      # ~20 trading days of hourly bars
+  # CORRECTED 2026-08-31 (issue 30). This is 480 BARS, which is ~69 trading
+  # days, not the "~20 trading days" this comment used to claim. The old figure
+  # came from 480/24, which would only hold if bars existed around the clock;
+  # they exist for the 6.5-hour session, ~6.97 bars a day. Twenty trading days
+  # would be 139 bars.
+  #
+  # 480 kept on the user's decision: a ~69-day baseline gives a more stable
+  # estimate of "normal" and is less easily dragged by a recent quiet or busy
+  # patch. min_baseline_bars below means a score still starts after 17 sessions.
+  volume_zscore_window_h: 480      # ~69 trading days (480 bars / 6.97 per session)
   volatility_window_h: 120
   min_baseline_bars: 120           # below this the z-score is undefined; skip the hour
   include_benchmark_relative: true
