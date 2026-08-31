@@ -54,3 +54,40 @@ def returns(frame: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
          for h in cfg["features"]["return_horizons_h"]},
         index=frame.index,
     )
+
+
+def volume_zscore(frame: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
+    """How unusual this hour's volume is against the stock's own recent normal.
+
+    The project's central feature. If the detector works at all, it works
+    because of this number.
+
+        base = volume.shift(1).rolling(window, min_periods=min_baseline_bars)
+        z    = (volume - base.mean()) / base.std()
+
+    **`.shift(1)` is the point.** Without it the current bar sits inside its own
+    baseline, so a genuine spike inflates the mean and standard deviation it is
+    measured against and damps the very signal we are hunting. A 10x volume
+    hour would score lower than it should, and nothing would look wrong.
+
+    **The leakage detector cannot catch that.** It perturbs rows AFTER t;
+    including the current bar uses data AT t, which the no-future rule permits.
+    So the property has its own test in `test_features_volume.py` rather than
+    relying on `assert_no_lookahead`.
+
+    Zero variance yields NaN, never infinity. If every baseline bar has the same
+    volume the standard deviation is 0, and any differing current bar would
+    divide to +/-inf — which propagates silently through every downstream
+    statistic and blows up any model that meets it. The frozen snapshot holds
+    34,709 zero-volume bars, so a flat baseline is real, not hypothetical.
+    Undefined is the honest value.
+    """
+    cfg = cfg or load_config()
+    fcfg = cfg["features"]
+    volume = frame["volume"]
+
+    base = volume.shift(1).rolling(fcfg["volume_zscore_window_h"],
+                                   min_periods=fcfg["min_baseline_bars"])
+    std = base.std()
+    z = (volume - base.mean()) / std
+    return pd.DataFrame({"volume_z": z.where(std > 0)}, index=frame.index)
