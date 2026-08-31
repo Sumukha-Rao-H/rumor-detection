@@ -244,6 +244,14 @@ sampling:
   keep_true_base_rate_in_eval: true
   robustness_ratios: [10, 40]      # re-report at these so nobody can call it tuned
   quiet_gap_hours: 168             # a negative window must be this far from any filing
+  # Measured from EVERY filing, not just usable events. That is what stops a
+  # quiet window landing beside an immaterial 8-K and being labelled "nothing
+  # happening" when something did — and it resolves issue 28's clustering for
+  # free, since a cluster's filings are themselves filings.
+  seed: 42                         # which negatives get drawn must be
+                                   # reproducible, or the robustness ratios
+                                   # compare three unrelated samples instead of
+                                   # nested ones
 
 # ------------------------------------------------------------
 # Decision problem — sequential change detection / optimal stopping
