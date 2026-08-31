@@ -29,9 +29,13 @@ plus the 15:30 half-hour stub), so 24 bars is about 22.3 trading hours.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
+import numpy as np
 import pandas as pd
 
 from src.utils.config import load_config
+from src.utils.timeutils import next_market_close, trading_hours_between
 
 
 def returns(frame: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
@@ -173,3 +177,87 @@ def benchmark_relative(frame: pd.DataFrame, benchmark: pd.DataFrame,
          for h in fcfg["return_horizons_h"]},
         index=frame.index,
     )
+
+
+DAY_S = 86400
+
+
+@lru_cache(maxsize=100_000)
+def _hours_to_close(ts_utc: int, calendar: str) -> float:
+    """Trading hours from `ts_utc` to the next close of that session.
+
+    Cached because every ticker shares the same bar timestamps: the calendar
+    lookup costs 0.67 ms, which is 1.2 s per ticker and roughly half an hour
+    across 1,500 if recomputed. There are only ~1,733 distinct timestamps in
+    the study, so this is computed once and free thereafter.
+
+    Out of hours it returns the *next* session's remaining length, so a
+    pre-open bar reports a full session ahead of it. A timestamp outside the
+    exchange calendar raises, by P1-03's design — a silent fallback would let
+    the Phase 7 live monitor conclude the market is permanently shut.
+    """
+    return trading_hours_between(ts_utc, next_market_close(ts_utc))
+
+
+def _days_since(index: pd.Index, event_times: np.ndarray) -> pd.Series:
+    """Calendar days from the most recent event at or before each timestamp.
+
+    `side="right"` is the whole safety property: a filing accepted at exactly
+    `t` counts, because it is public at `t`, and anything later does not. The
+    naive alternative — "the most recent filing in the table" — would hand the
+    model the answer.
+
+    NaN where no prior event exists. "No previous filing" is not "a filing
+    infinitely long ago", and 0 would be a lie in the opposite direction.
+    """
+    stamps = np.asarray(index, dtype=np.int64)
+    if event_times.size == 0:
+        return pd.Series(np.nan, index=index)
+    pos = np.searchsorted(event_times, stamps, side="right") - 1
+    last = np.where(pos >= 0, event_times[np.clip(pos, 0, None)], np.nan)
+    return pd.Series((stamps - last) / DAY_S, index=index)
+
+
+def context_signals(frame: pd.DataFrame, filing_times: np.ndarray | None = None,
+                    earnings_times: np.ndarray | None = None,
+                    cfg: dict | None = None) -> pd.DataFrame:
+    """Where we are in the session, and how long since this company spoke.
+
+    `filing_times` and `earnings_times` are that ticker's 8-K acceptance times,
+    sorted ascending. Supplied by the caller; this module does no I/O.
+
+    ⚠ **The event being predicted IS an 8-K**, so `days_since_last_8k` falls to
+    0 at exactly t0. A feature row at or after t0 does not merely leak — it
+    announces the event. The decision window must be STRICTLY before t0, which
+    is P4-11's boundary to enforce. The leakage detector cannot catch it: it
+    perturbs rows after `t`, and this reads a filing AT `t`.
+
+    Earnings proximity is days since the LAST results filing, never days until
+    the next. We have no earnings calendar, only 2.02 filings recording that
+    results happened, so "until the next" would mean reading a future filing.
+    Earnings are quarterly, so "since the last" carries the same information
+    legitimately, and any "expected days until" is a deterministic transform a
+    model can make for itself.
+
+    Units differ on purpose. Hours to close is in TRADING hours — it is a
+    question about the session. Days since is in CALENDAR days — it measures how
+    stale news is, and news ages over a weekend.
+    """
+    cfg = cfg or load_config()
+    fcfg = cfg["features"]
+    calendar = cfg["market"]["calendar"]
+
+    out: dict[str, pd.Series] = {
+        "trading_hours_to_close": pd.Series(
+            [_hours_to_close(int(ts), calendar) for ts in frame.index],
+            index=frame.index),
+    }
+    if fcfg["include_days_since_last_8k"]:
+        out["days_since_last_8k"] = _days_since(
+            frame.index, np.asarray(filing_times if filing_times is not None
+                                    else [], dtype=np.int64))
+    if fcfg["include_earnings_proximity"]:
+        out["days_since_last_earnings"] = _days_since(
+            frame.index, np.asarray(earnings_times if earnings_times is not None
+                                    else [], dtype=np.int64))
+    return pd.DataFrame(out, index=frame.index)
