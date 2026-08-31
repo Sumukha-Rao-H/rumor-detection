@@ -152,7 +152,25 @@ news:
   # t0 = min(8-K acceptanceDateTime, earliest article for that ticker/event).
   # Companies wire a press release first and file the 8-K minutes-to-hours
   # later; using acceptance time alone inflates every lead-time number.
-  t0_lookback_hours: 24            # how far before acceptance to search for the release
+  # CHANGED 2026-08-31, 24h -> 3h, on the user's decision (issue 27).
+  # MEASURED over 16,842 in-universe filings: at 24h, 78.9% matched but the
+  # MEDIAN gap was 9.9h and only 6% landed within 2h — where a wire release
+  # actually sits. A 24h window on a liquid stock nearly always contains SOME
+  # article, so taking the earliest matched unrelated daily coverage: Agilent's
+  # "earliest article" was a lithium-mining roundup, then a different company's
+  # earnings, then an analyst note.
+  #
+  # The bias direction was conservative (an early t0 shortens measured lead
+  # times) but it made t0 ARBITRARY — two identical events getting different t0
+  # depending on whether unrelated coverage happened to exist. Noise in the
+  # label, not a safe margin.
+  #
+  # Alternatives measured (matched / median gap): 2h 46.8% / 0.4h ·
+  # 3h 51.4% / 1.0h · 4h 59.6% / 3.3h · 6h 65.9% / 4.0h · 24h 78.9% / 9.9h.
+  # 3h keeps a plausible release-to-filing interval while staying wide enough
+  # for a release issued a couple of hours ahead. Events that no longer match
+  # fall back to filing time — the uncorrected default all prior work uses.
+  t0_lookback_hours: 3             # how far before acceptance to search for the release
   # Seed watchlist for phase 1. news.py needs company names from `companies`
   # for its GDELT query, and that table is not populated until P2-02 — so
   # collection starts against a hand-picked list and P2-09 swaps in the real

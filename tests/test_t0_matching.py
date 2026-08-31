@@ -32,6 +32,17 @@ def conn(tmp_path):
     return db.get_conn(tmp_path / "t0.db")
 
 
+def add_news_at(conn, ticker, published_utc, tier=2, name="Benzinga",
+                title="t"):
+    """Insert an article at an exact epoch, for tests keyed off the lookback."""
+    db.upsert_news(conn, [{
+        "url": f"http://x/{ticker}/{published_utc}", "ticker": ticker,
+        "title": title, "source_name": name, "source_domain": "x.com",
+        "source_tier": tier, "published_utc": published_utc, "api": "finnhub",
+    }])
+    return published_utc
+
+
 def add_news(conn, ticker, published_iso, tier=2, name="Benzinga",
              title="t", url=None, seen_utc=None):
     ts = iso_utc_to_ts(published_iso)
@@ -78,10 +89,15 @@ def test_lookback_window_ends_at_acceptance(cfg):
 
 
 def test_takes_the_earliest_article_not_the_latest(cfg, conn):
-    """t0 is a minimum: the first public moment, not the most recent one."""
+    """t0 is a minimum: the first public moment, not the most recent one.
+
+    Both articles are placed relative to the configured lookback, so the test
+    keeps meaning what it says if the window is retuned again.
+    """
     acc = iso_utc_to_ts("2026-02-25T20:30:00Z")
-    first = add_news(conn, "AAPL", "2026-02-25T14:00:00Z")
-    add_news(conn, "AAPL", "2026-02-25T20:10:00Z")
+    look = cfg["news"]["t0_lookback_hours"] * HOUR
+    first = add_news_at(conn, "AAPL", acc - look + 60)      # just inside
+    add_news_at(conn, "AAPL", acc - 60)                     # just before filing
     assert match_filing(cfg, conn, "AAPL", acc).t0_utc == first
 
 
@@ -94,11 +110,15 @@ def test_ignores_articles_published_after_acceptance(cfg, conn):
 
 
 def test_ignores_articles_before_the_lookback_opens(cfg, conn):
-    """The window has a floor, or yesterday's unrelated coverage becomes t0."""
+    """The window has a floor.
+
+    This is the whole point of issue 27: without a floor, unrelated earlier
+    coverage becomes t0 and the label turns arbitrary.
+    """
     acc = iso_utc_to_ts("2026-02-25T20:30:00Z")
-    add_news(conn, "AAPL", "2026-02-24T19:00:00Z", title="25.5h before")
-    inside = add_news(conn, "AAPL", "2026-02-25T10:00:00Z")
-    assert cfg["news"]["t0_lookback_hours"] == 24
+    look = cfg["news"]["t0_lookback_hours"] * HOUR
+    add_news_at(conn, "AAPL", acc - look - HOUR, title="an hour too early")
+    inside = add_news_at(conn, "AAPL", acc - look + 60)
     assert match_filing(cfg, conn, "AAPL", acc).t0_utc == inside
 
 
@@ -109,7 +129,8 @@ def test_the_lookback_floor_is_inclusive(cfg, conn):
     other way, and it decides t0 for any event sitting on it.
     """
     acc = iso_utc_to_ts("2026-02-25T20:30:00Z")
-    edge = add_news(conn, "AAPL", "2026-02-24T20:30:00Z")   # exactly 24h before
+    look = cfg["news"]["t0_lookback_hours"] * HOUR
+    edge = add_news_at(conn, "AAPL", acc - look)            # exactly on the floor
     assert match_filing(cfg, conn, "AAPL", acc).t0_utc == edge
 
 
