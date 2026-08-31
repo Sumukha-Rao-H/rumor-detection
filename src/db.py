@@ -382,6 +382,24 @@ def tickers_with_filings_before(conn: sqlite3.Connection, before_utc: int,
     }
 
 
+def filings_in_window(conn: sqlite3.Connection, start_utc: int, end_utc: int,
+                      forms: list[str]) -> list[sqlite3.Row]:
+    """Full filing rows inside a window — what the event builder needs.
+
+    Separate from `filing_acceptance_times`, which returns only (ticker, time)
+    because the news backfill needs nothing else and pulling every column for
+    half a million rows to discard most of them would be waste.
+    """
+    marks = ",".join("?" * len(forms))
+    return conn.execute(
+        f"SELECT accession_no, ticker, items, acceptance_utc FROM filings "
+        f"WHERE acceptance_utc BETWEEN ? AND ? AND form IN ({marks}) "
+        f"AND ticker IS NOT NULL AND acceptance_utc IS NOT NULL "
+        f"ORDER BY acceptance_utc",
+        (start_utc, end_utc, *forms),
+    ).fetchall()
+
+
 def filing_acceptance_times(conn: sqlite3.Connection, start_utc: int,
                             end_utc: int,
                             forms: list[str]) -> list[tuple[str, int]]:

@@ -105,6 +105,117 @@ def match_all(cfg: dict, conn, max_tier: int | None = 2,
     return [match_filing(cfg, conn, t, a, max_tier=max_tier) for t, a in filings]
 
 
+def event_id_for(accession_no: str) -> str:
+    """Accession number with punctuation stripped, per the `events` schema.
+
+    Accession numbers are globally unique and immutable, so keying on them
+    makes the event builder re-runnable: a config change updates rows in place
+    instead of creating a second copy of the study.
+    """
+    return accession_no.replace("-", "").replace(".", "").strip()
+
+
+def build_events(cfg: dict, conn, max_tier: int | None = 2) -> list[dict]:
+    """One row per in-window, in-universe filing, carrying all three clocks.
+
+    All three are kept apart on purpose — it is a frozen decision. Collapsing
+    them into one column would push a variant switch into every metric, and
+    would throw away the acceptance-minus-news gap, which is itself a result.
+
+    Unmatched filings are built too, with t0 falling back to acceptance. That
+    is not a failure: it is the uncorrected baseline every prior paper uses,
+    and both variants must cover the same population or they describe two
+    different studies.
+
+    `usable` and `exclude_reason` are left alone here. Item filtering is P4-03
+    and materiality P4-04; this task fixes the analysis unit and its clock.
+    """
+    lo = date_str_to_ts(cfg["study_window"]["start"])
+    hi = date_str_to_ts(cfg["study_window"]["end"])
+    universe = set(db.universe_tickers(conn))
+
+    rows = []
+    for f in db.filings_in_window(conn, lo, hi, cfg["edgar"]["forms"]):
+        if f["ticker"] not in universe:
+            continue
+        m = match_filing(cfg, conn, f["ticker"], f["acceptance_utc"],
+                         max_tier=max_tier)
+        rows.append({
+            "event_id": event_id_for(f["accession_no"]),
+            "accession_no": f["accession_no"],
+            "ticker": f["ticker"],
+            "items": f["items"],
+            "t0_filing_utc": f["acceptance_utc"],
+            "t0_news_utc": m.news_utc,
+            "t0_utc": m.t0_utc,
+            "t0_source": m.source,
+            # Explicit 0, not left to the column default: `upsert_events`
+            # writes every column, so an absent key becomes NULL and silently
+            # overrides `DEFAULT 0`. NULL would also hide these rows from any
+            # later `WHERE usable = 0` query looking for rejected events.
+            # 0 is the honest value here — not yet proven usable, because the
+            # filters that decide (P4-03, P4-04) have not run.
+            "usable": 0,
+        })
+    if not rows:
+        raise SystemExit(
+            "no events could be built — check that the EDGAR collection and "
+            "the liquidity filter have both run."
+        )
+    return rows
+
+
+def write_events(cfg: dict, conn, max_tier: int | None = 2) -> tuple[int, int]:
+    """Build and store. Returns (rows written, newly created).
+
+    `upsert_events` recomputes derived columns on conflict, so re-running after
+    a config change corrects existing rows rather than duplicating them. Not
+    hypothetical: the lookback moved 24h -> 3h, so any events built before that
+    would now carry a stale t0.
+    """
+    rows = build_events(cfg, conn, max_tier=max_tier)
+    new = db.upsert_events(conn, rows)
+    log.info("events: %d rows written (%d new); %d matched to news",
+             len(rows), new, sum(1 for r in rows if r["t0_source"] == "news"))
+    return len(rows), new
+
+
+def stored_gap_report(cfg: dict, conn) -> None:
+    """The Done-when: median and tail of acceptance minus news, from `events`.
+
+    Read back from the table rather than recomputed, so the number reported is
+    the number stored.
+    """
+    rows = conn.execute(
+        "SELECT t0_filing_utc, t0_news_utc, t0_source FROM events").fetchall()
+    if not rows:
+        print("\nNo events stored — run without --report first.")
+        return
+    gaps = sorted((r["t0_filing_utc"] - r["t0_news_utc"]) / HOUR_S
+                  for r in rows if r["t0_source"] == "news")
+    matched = len(gaps)
+
+    print(f"\n=== t0 variants, as stored in `events` ===")
+    print(f"events              : {len(rows):,}")
+    print(f"t0 from news        : {matched:,}  ({matched/len(rows):.1%})")
+    print(f"t0 from filing time : {len(rows)-matched:,}")
+    if not matched:
+        print("\nNo event took its t0 from news at this tier.")
+        return
+
+    def q(p: float) -> float:
+        return gaps[min(int(matched * p), matched - 1)]
+    print(f"\nacceptance minus news, for the {matched:,} corrected events:")
+    for label, v in (("min", gaps[0]), ("p25", q(.25)), ("median", q(.50)),
+                     ("p75", q(.75)), ("p90", q(.90)), ("p99", q(.99)),
+                     ("max", gaps[-1])):
+        print(f"  {label:<7}: {v*60:7.1f} min  ({v:5.2f} h)")
+    print(f"  {'mean':<7}: {sum(gaps)/matched*60:7.1f} min  "
+          f"({sum(gaps)/matched:5.2f} h)")
+    print(f"\nThis gap is the correction: time the market already knew that "
+          f"acceptance-only\nt0 would have counted as advance warning.")
+
+
 def gap_percentiles(matches: list[Match]) -> dict[str, float]:
     """Where the matched articles actually sit, relative to acceptance.
 
@@ -185,6 +296,12 @@ def main() -> None:
                         help="match rate and gap distribution")
     parser.add_argument("--sample", type=int, metavar="N",
                         help="print N matched filings with their headlines")
+    parser.add_argument("--build", action="store_true",
+                        help="build/refresh `events` rows with all three t0 "
+                             "columns. Safe to re-run after a config change.")
+    parser.add_argument("--gap", action="store_true",
+                        help="median and tail of acceptance minus news, read "
+                             "back from the stored events")
     parser.add_argument("--tier", type=int, choices=(1, 2),
                         help="credibility tier ceiling (default 2)")
     args = parser.parse_args()
@@ -194,7 +311,12 @@ def main() -> None:
     cfg = load_config()
     conn = db.get_conn(cfg["paths"]["db"])
     tier = args.tier if args.tier else 2
-    if args.sample:
+    if args.build:
+        write_events(cfg, conn, max_tier=tier)
+        stored_gap_report(cfg, conn)
+    elif args.gap:
+        stored_gap_report(cfg, conn)
+    elif args.sample:
         print_sample(cfg, conn, args.sample, max_tier=tier)
     else:
         print_report(cfg, conn, max_tier=tier)
