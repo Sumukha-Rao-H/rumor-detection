@@ -13,7 +13,8 @@ import pytest
 from src import db
 from src.collectors import news
 from src.collectors.news import (
-    FETCH_SOURCE, backfill_targets, collect_targets, window_grid,
+    FETCH_SOURCE, backfill_targets, collect_targets, full_coverage_targets,
+    window_grid,
 )
 from src.utils.config import load_config
 from src.utils.timeutils import date_str_to_ts
@@ -237,3 +238,68 @@ def test_guard_silent_when_everything_was_skipped(cfg, conn, monkeypatch):
     collect_targets(cfg, conn, targets, ["finnhub"])
     monkeypatch.setattr(news, "collect", FakeCollect(per_call=0))
     assert collect_targets(cfg, conn, targets, ["finnhub"], resume=True) == 0
+
+
+# --------------------------------------------------------------------------
+# P4-00b — continuous coverage for the Phase 8 ablation
+# --------------------------------------------------------------------------
+
+def add_universe_company(conn, ticker, in_universe=1):
+    db.upsert_companies(conn, [{"cik": f"CIK{ticker}", "ticker": ticker,
+                                "name": ticker, "in_universe": in_universe}])
+
+
+def test_full_coverage_is_every_universe_ticker_times_every_week(cfg, conn):
+    """THE Done-when: no week is skipped, so a zero count means 'nothing
+    published' rather than 'nobody asked'."""
+    for t in ("AAA", "BBB", "CCC"):
+        add_universe_company(conn, t)
+    weeks = len(window_grid(cfg))
+    targets = full_coverage_targets(cfg, conn)
+    assert len(targets) == 3 * weeks
+    assert {t for t, _, _, _ in targets} == {"AAA", "BBB", "CCC"}
+    assert {i for _, i, _, _ in targets} == set(range(weeks))
+
+
+def test_full_coverage_excludes_non_universe_tickers(cfg, conn):
+    """No feature is ever computed for a company outside the universe."""
+    add_universe_company(conn, "IN")
+    add_universe_company(conn, "OUT", in_universe=0)
+    assert {t for t, _, _, _ in full_coverage_targets(cfg, conn)} == {"IN"}
+
+
+def test_full_coverage_includes_tickers_with_no_filings(cfg, conn):
+    """8 real universe members file nothing in the window — their quiet weeks
+    are exactly the negatives Phase 8 needs."""
+    add_universe_company(conn, "QUIET")
+    assert backfill_targets(cfg, conn) == []          # no filings, so no backfill
+    assert len(full_coverage_targets(cfg, conn)) == len(window_grid(cfg))
+
+
+def test_full_coverage_reuses_the_backfill_window_grid(cfg, conn):
+    """Shared `fetch_state` keys must mean the same spans in both modes, or
+    resume would skip a pair that covered a different stretch of time."""
+    add_universe_company(conn, "AAA")
+    grid = window_grid(cfg)
+    add_filing(conn, "AAA", grid[5][0] + 80 * HOUR)
+    bf = {(i, s, e) for _, i, s, e in backfill_targets(cfg, conn)}
+    fc = {(i, s, e) for _, i, s, e in full_coverage_targets(cfg, conn)}
+    assert bf <= fc
+
+
+def test_resume_skips_pairs_already_done_by_the_backfill(cfg, conn, monkeypatch):
+    """The 16,467 pairs P4-00 already collected must not be re-fetched."""
+    add_universe_company(conn, "AAA")
+    grid = window_grid(cfg)
+    add_filing(conn, "AAA", grid[5][0] + 80 * HOUR)
+    monkeypatch.setattr(news, "collect", FakeCollect())
+    collect_targets(cfg, conn, backfill_targets(cfg, conn), ["finnhub"])
+    already = len(db.completed_keys(conn, FETCH_SOURCE))
+    assert already > 0
+
+    second = FakeCollect()
+    monkeypatch.setattr(news, "collect", second)
+    collect_targets(cfg, conn, full_coverage_targets(cfg, conn), ["finnhub"],
+                    resume=True)
+    assert len(second.calls) == len(window_grid(cfg)) - already
+    assert len(db.completed_keys(conn, FETCH_SOURCE)) == len(window_grid(cfg))

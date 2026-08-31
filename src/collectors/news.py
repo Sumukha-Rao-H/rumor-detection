@@ -273,6 +273,31 @@ def backfill_targets(cfg: dict, conn) -> list[tuple[str, int, int, int]]:
     )
 
 
+def full_coverage_targets(cfg: dict, conn) -> list[tuple[str, int, int, int]]:
+    """Every in-universe ticker crossed with every week of the study window.
+
+    `backfill_targets` fetches only the weeks containing an 8-K, which is right
+    for t0 and wrong for the Phase 8 ablation. P8-01's features count articles
+    in trailing windows at EVERY decision hour, and `sampling.quiet_gap_hours`
+    puts negative windows at least a week away from any filing — exactly the
+    weeks the backfill skips. Left as-is, every negative would carry a
+    structural zero and a model would learn "articles exist -> announcement
+    coming", scoring superbly on an artefact of collection rather than anything
+    in the market. The leakage tests would stay green throughout.
+
+    Universe tickers only: no feature is ever computed for a company outside it.
+    Uses the same `window_grid` as the backfill, so the two modes share
+    `fetch_state` keys that mean the same spans and the 16,467 pairs already
+    collected are skipped for free.
+    """
+    grid = window_grid(cfg)
+    return [
+        (ticker, idx, start, stop)
+        for ticker in db.universe_tickers(conn)
+        for idx, (start, stop) in enumerate(grid)
+    ]
+
+
 def collect_targets(cfg: dict, conn, targets: list[tuple[str, int, int, int]],
                     apis: list[str], resume: bool = False) -> int:
     """Collect one (ticker, window) pair at a time, recording each outcome.
@@ -455,6 +480,11 @@ def main() -> None:
                         help="collect the whole study window for every week "
                              "that contains an 8-K — what the t0 correction "
                              "reads. Finnhub only by default; use --resume.")
+    parser.add_argument("--full-coverage", action="store_true",
+                        help="every in-universe ticker x every week, not just "
+                             "the weeks containing an 8-K. Needed by the Phase 8 "
+                             "ablation so a zero article count means 'nothing "
+                             "was published', not 'nobody asked'.")
     parser.add_argument("--resume", action="store_true",
                         help="skip (ticker, window) pairs already collected")
     parser.add_argument("--retier", action="store_true",
@@ -478,12 +508,19 @@ def main() -> None:
         log.info("Re-tiered from current config: %d row(s) changed.", changed)
         return
 
-    if args.backfill:
-        targets = backfill_targets(cfg, conn)
-        if not targets:
-            raise SystemExit(
-                "no in-window filings to collect news for — run "
-                "`python -m src.collectors.edgar --universe` first.")
+    if args.backfill or args.full_coverage:
+        if args.full_coverage:
+            targets = full_coverage_targets(cfg, conn)
+            if not targets:
+                raise SystemExit(
+                    "no company has in_universe = 1 — run "
+                    "`python -m src.pipeline.universe` first.")
+        else:
+            targets = backfill_targets(cfg, conn)
+            if not targets:
+                raise SystemExit(
+                    "no in-window filings to collect news for — run "
+                    "`python -m src.collectors.edgar --universe` first.")
         # GDELT is 5 s between requests and has been unreachable at every
         # attempt (issue 13); including it would take a 15-hour run to 66.
         apis = ([a.strip() for a in args.apis.split(",")]
