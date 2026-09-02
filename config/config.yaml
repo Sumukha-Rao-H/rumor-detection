@@ -14,6 +14,17 @@ http:
   # traffic at 10 requests/second. That is the entire terms of service.
   user_agent: "NMAMIT ISE Project 31 (18881ujwal@gmail.com)"
 
+# ------------------------------------------------------------
+# Rate limiting — shared across every collector's Backoff (src/utils/ratelimit.py)
+# ------------------------------------------------------------
+ratelimit:
+  # Ceiling on any collector's backoff sleep, no matter how many consecutive
+  # failures or how large its own `backoff_base_s`. Previously hardcoded as a
+  # Python default (never sourced from config), which violated the "no
+  # hardcoded rate limits" rule. 3600.0 is the value that default already
+  # had, kept as-is so this doesn't silently change collector behaviour.
+  backoff_cap_s: 3600.0
+
 # The study window.
 #
 # SHORTENED 2026-08-29, from 2024-09-01, by decision. Finnhub's free tier
@@ -39,6 +50,14 @@ universe:
   min_adv_usd: 5000000             # average daily traded value
   min_history_days: 365
   max_tickers: 1500
+  # ADV is a mean, so it needs a denominator worth trusting: a name that traded
+  # four days all year would otherwise rank above every real company. ~250 US
+  # sessions fall in a 365-day lookback, so 200 is four fifths of a year.
+  min_bars_in_lookback: 200
+  # The company must still have been trading when the window opened — a name
+  # delisted months BEFORE the start is not a member, it is history. Ten days
+  # clears the longest US holiday closure (four sessions) with margin.
+  max_bar_staleness_days: 10
   # P3-02b. Foreign private issuers (TSM, BABA, ASML, ARM, SAP, BP...) file
   # 6-K and 20-F and are EXEMPT from 8-K; ETFs (SPY, QQQ, DIA, MDY) file none.
   # 191 of the first 1,500-company universe were such entities: they can never
@@ -53,6 +72,16 @@ universe:
   # A knob, not a hardcoded rule: "what happens if you keep them?" is a fair
   # review question and should cost one line to answer.
   require_prior_8k: true
+  # ...and filed one RECENTLY. Without a lower bound the rule reads "ever filed
+  # an 8-K since 1994", which QQQ satisfies on two administrative filings from
+  # 2014 while sitting at #3 by ADV. Measured strictly before the window, like
+  # the rule above. A year, because a domestic operating company files several
+  # 8-Ks a year and silence that long marks a trust or a shell: on the built
+  # universe it drops 14 members (QQQ, UUP, BAR, GLD, SLV, IAU, SGOL, SIVR,
+  # PPLT, OUNZ, GLDM, IAUM, DBC and one issuer that has filed nothing since
+  # 2023), which between them filed 12 in-window 8-Ks — all trust
+  # administration — and admits 14 operating companies that filed 129.
+  prior_8k_lookback_days: 365
   # The liquidity filter is applied using data as of study_window.start, never
   # today's — a universe built from today silently drops every company that was
   # acquired or delisted, which is exactly the dramatic events we care about.
@@ -90,13 +119,29 @@ edgar:
 items:
   # 9.01 is an attachment marker, not an event type — it rides along with other
   # items and would dominate the label distribution if kept.
+  # 5.07 (shareholder vote results) is excluded as routine paperwork, per
+  # implementation_plan.md §5. It was ALSO listed under `scheduled` below,
+  # which is unreachable — exclusion runs first — so the report announced 5.07
+  # as a scheduled code while every 5.07 filing was in fact either dropped or
+  # called a surprise. The two lists must stay disjoint; events.py now refuses
+  # to run if they overlap.
   exclude: ["9.01", "5.07"]
   # Known in advance (dates published weeks ahead). Kept, but every headline
   # number is reported split scheduled vs unscheduled, never pooled.
-  scheduled: ["2.02", "5.07"]
+  scheduled: ["2.02"]
   # Genuinely unscheduled and market-moving — the real target.
   unscheduled_focus: ["1.01", "5.02", "8.01", "2.03", "7.01", "1.03", "2.01",
                       "4.01", "4.02", "5.01"]
+
+# The positive-count census (P4-05). Thresholds live here, not in source.
+census:
+  # Issue 28: events are not announcements. Reported at several gaps because
+  # the right one is a judgement, and the sensitivity is the honest answer.
+  cluster_gap_hours: [6, 24, 72]
+  # implementation_plan.md §5: "Plan for ~3,000-5,000 usable positives."
+  # Below the minimum is a stop-and-tell, not something to absorb quietly.
+  expected_usable_min: 3000
+  expected_usable_max: 5000
 
 materiality:
   # An 8-K only counts as a positive if the market actually reacted. Without
@@ -171,6 +216,11 @@ news:
   # for a release issued a couple of hours ahead. Events that no longer match
   # fall back to filing time — the uncorrected default all prior work uses.
   t0_lookback_hours: 3             # how far before acceptance to search for the release
+  # Where --report buckets the matched articles inside that window, as
+  # FRACTIONS of t0_lookback_hours. Fractions, not fixed hours: a gap can never
+  # exceed the lookback, so the old fixed 2h/6h/12h edges went dead the moment
+  # the window narrowed to 3h — "beyond 6h: 0%" was a tautology, not a finding.
+  gap_bucket_fractions: [0.25, 0.5, 0.75]
   # Seed watchlist for phase 1. news.py needs company names from `companies`
   # for its GDELT query, and that table is not populated until P2-02 — so
   # collection starts against a hand-picked list and P2-09 swaps in the real
@@ -195,6 +245,11 @@ news:
   gdelt_base: "https://api.gdeltproject.org/api/v2/doc/doc"
   gdelt_min_interval_s: 5.0        # unreliable under load — breadth only, never a dependency
   max_records: 75
+  backoff_base_s: 15.0             # first retry delay on a 429/503 or a request
+                                   # error, from either API; doubles per attempt
+                                   # (see src/utils/ratelimit.py Backoff). Mirrors
+                                   # edgar.backoff_base_s — same pattern, same key
+                                   # shape, so it is not a hardcoded threshold.
   # What "the news is public" means for the t0 correction — TIERED, because a
   # wire-only list would apply to almost nothing on free data.
   #
@@ -240,9 +295,28 @@ features:
 # Sampling (review "Day 9" — fix this now, report two ratios)
 # ------------------------------------------------------------
 sampling:
-  negatives_per_positive: 20       # training only
+  # DECIDED 2026-09-01 (issue 33). Was 20. Only ~3.5:1 of genuinely quiet
+  # windows EXISTS: 23,634 against 6,737 positives, and 20:1 would need
+  # 134,740. The binding constraint is tiling, not the gap — non-overlapping
+  # 48-bar windows are all the calendar holds — so loosening
+  # `quiet_gap_hours` does not rescue it (12h reaches only 6.3:1) and would
+  # cost the contamination guarantee that closed issue 28.
+  #
+  # The alternative was sliding rather than tiling, which manufactures
+  # negatives that share 47 of 48 bars with their neighbours: more rows, no
+  # more information, and a model free to memorise one quiet afternoon. So
+  # the ratio is set to what the data actually supports and the ceiling is
+  # reported as a measured limitation rather than papered over.
+  #
+  # 3, not 3.5: the shortfall must be zero at the configured ratio, or the
+  # drawn sample silently stops being the ratio it claims to be.
+  negatives_per_positive: 3        # training only — the measured ceiling
   keep_true_base_rate_in_eval: true
-  robustness_ratios: [10, 40]      # re-report at these so nobody can call it tuned
+  # Nested, and all BELOW the ~3.5:1 ceiling so the three samples are
+  # genuinely different draws rather than three names for one exhausted pool.
+  # The old [10, 40] both exceeded what exists, so every ratio returned the
+  # same capped set and the robustness check compared a sample with itself.
+  robustness_ratios: [1, 2]        # re-report at these so nobody can call it tuned
   quiet_gap_hours: 168             # a negative window must be this far from any filing
   # Measured from EVERY filing, not just usable events. That is what stops a
   # quiet window landing beside an immaterial 8-K and being labelled "nothing
