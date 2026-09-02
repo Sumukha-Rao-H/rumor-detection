@@ -6,15 +6,25 @@ normally and no filing followed.
 
 Two rules make a window genuinely quiet.
 
-**The gap is measured from EVERY filing, not just usable events.** An
-immaterial 8-K is still an 8-K; a window sitting beside one is not "nothing
-happening". This also resolves issue 28's clustering for free — a quiet window
-cannot land inside an event's cluster, because the cluster's filings are
-themselves filings.
+**The gap is measured from EVERY filing's t0, not just usable events'
+acceptance time.** An immaterial 8-K is still an 8-K; a window sitting beside
+one is not "nothing happening" (issue 28's clustering is resolved for free —
+a quiet window cannot land inside an event's cluster, because the cluster's
+filings are themselves filings). And per AGENTS.md rule 3, the instant that
+matters is t0 = min(acceptance, matched news), not acceptance alone: a filing
+that already has an `events` row uses that row's `t0_utc`; one that does not
+(outside the study window, or not yet matched) falls back to its own
+`acceptance_utc`, the same uncorrected baseline `t0.py` itself falls back to.
 
-**A window with no volume baseline is excluded**, exactly as the 234
-unscoreable positives are (issue 32). A detector cannot tell "quiet" from
-"unmeasurable", so neither should the sample.
+**A window with no volume baseline is excluded.** `features.py`'s
+`volume_zscore()` needs `features.min_baseline_bars` prior bars before it is
+defined at all — issue 32 found 234 positive windows entirely NaN on
+volume_z for exactly this reason, unscoreable by any volume-based detector.
+A detector cannot tell "quiet" from "unmeasurable", so an anchor without that
+much history behind it is not offered as a candidate here either. (Nothing
+yet excludes those 234 positive windows themselves — that is P5's call, not
+this module's — but a quiet window claiming to be their negative counterpart
+should not dodge the same standard.)
 
 Quiet windows are built in the same shape as positives — 48 bars ending
 strictly before an anchor timestamp — so nothing distinguishes the two except
@@ -22,8 +32,8 @@ the label. Any structural difference would be something a model could learn
 instead of the market.
 
 Usage:
-  python -m src.pipeline.sampling --report          # what is available
-  python -m src.pipeline.sampling --ratio 20        # draw and report a sample
+  python -m src.pipeline.sampling --ratio 20        # availability report at this ratio
+  python -m src.pipeline.sampling                   # same report, at the configured ratio
 """
 
 from __future__ import annotations
@@ -35,6 +45,7 @@ import numpy as np
 
 from src import db
 from src.utils.config import load_config
+from src.utils.timeutils import date_str_to_ts
 
 log = logging.getLogger(__name__)
 
@@ -50,20 +61,41 @@ def quiet_candidates(cfg: dict, conn, ticker: str) -> np.ndarray:
     Non-overlapping on purpose. Two windows sharing 47 of 48 bars are not two
     observations, and tiling rather than sliding keeps the sample from being
     dominated by near-duplicates of a single quiet afternoon.
+
+    Anchors are confined to `study_window`, inclusive at both ends, exactly as
+    `events.py` confines positives. The price snapshot deliberately runs past
+    the window end (frozen 2026-08-30 against a 2026-08-01 end), so without
+    this bound negatives could be drawn from a stretch of calendar no positive
+    can ever occupy — handing a model "which month is this?" as a free
+    separator instead of making it learn quiet-versus-about-to-file.
     """
     gap = cfg["sampling"]["quiet_gap_hours"] * HOUR_S
     horizon = cfg["decision"]["horizon_hours"]
+    min_baseline = cfg["features"]["min_baseline_bars"]
+    lo = date_str_to_ts(cfg["study_window"]["start"])
+    hi = date_str_to_ts(cfg["study_window"]["end"])
 
     bars = np.array([r[0] for r in conn.execute(
         "SELECT ts_utc FROM bars WHERE ticker = ? AND interval = ? "
-        "ORDER BY ts_utc", (ticker, cfg["market"]["interval"]))], dtype=np.int64)
+        "AND ts_utc BETWEEN ? AND ? ORDER BY ts_utc",
+        (ticker, cfg["market"]["interval"], lo, hi))], dtype=np.int64)
     if bars.size <= horizon:
         return np.empty(0, dtype=np.int64)
 
-    filings = np.array([r[0] for r in conn.execute(
-        "SELECT acceptance_utc FROM filings WHERE ticker = ? AND "
-        "acceptance_utc IS NOT NULL ORDER BY acceptance_utc",
-        (ticker,))], dtype=np.int64)
+    # AGENTS.md rule 3: the instant that matters is t0 = min(acceptance,
+    # matched news), never acceptance alone. A filing already matched into
+    # `events` (t0.py's job) contributes its stored `t0_utc`; one that is not
+    # in `events` (outside the study window, or not yet built) falls back to
+    # its own `acceptance_utc` — the same uncorrected baseline t0.py itself
+    # falls back to when no news matched.
+    rows = conn.execute(
+        "SELECT f.acceptance_utc AS acceptance_utc, e.t0_utc AS t0_utc "
+        "FROM filings f LEFT JOIN events e ON e.accession_no = f.accession_no "
+        "WHERE f.ticker = ? AND f.acceptance_utc IS NOT NULL",
+        (ticker,)).fetchall()
+    filings = np.sort(np.array(
+        [r["t0_utc"] if r["t0_utc"] is not None else r["acceptance_utc"]
+         for r in rows], dtype=np.int64))
 
     if filings.size == 0:
         quiet = np.ones(bars.size, dtype=bool)
@@ -77,12 +109,18 @@ def quiet_candidates(cfg: dict, conn, ticker: str) -> np.ndarray:
         quiet = (before > gap) & (after > gap)
 
     # An anchor needs `horizon` quiet bars behind it, all of them quiet: a
-    # window straddling a filing is not a quiet window.
+    # window straddling a filing is not a quiet window. It also needs
+    # `min_baseline` bars of history behind THAT window: `volume_zscore()`
+    # is undefined before then (min_periods=min_baseline_bars), so an anchor
+    # any earlier would be "unmeasurable", not "quiet" — see the module
+    # docstring's issue-32 note. `i` is the anchor's position in this
+    # ticker's full bar history, matching the position `volume_zscore` counts
+    # from, so `i - horizon` is the position of the window's earliest bar.
     anchors = []
     run = 0
     for i, ok in enumerate(quiet):
         run = run + 1 if ok else 0
-        if run > horizon:
+        if run > horizon and i - horizon >= min_baseline:
             anchors.append(int(bars[i]))
             run = 0            # tile, do not slide
     return np.array(anchors, dtype=np.int64)
@@ -101,6 +139,67 @@ def all_candidates(cfg: dict, conn) -> dict[str, np.ndarray]:
             "sampling.quiet_gap_hours against the filing density."
         )
     return out
+
+
+def eval_decision_points(cfg: dict, conn) -> dict:
+    """The EVALUATION population, at the true base rate. P4-12, decided 2026-09-01.
+
+    Training and evaluation take deliberately different shapes, and conflating
+    them is what made this task stall.
+
+    TRAINING draws a balanced-ish sample: `negatives_per_positive` quiet
+    windows per positive, tiled so no two negatives are near-duplicates. That
+    is a sampling choice and it is allowed to distort the base rate, because
+    the model needs enough positives to learn from.
+
+    EVALUATION must not distort it. In live use the system sees EVERY trading
+    hour for every covered company and must stay quiet through almost all of
+    them, so the honest denominator is every in-universe bar:
+
+        base rate = usable events / all in-universe bars
+                  = 6,737 / 2,584,872 = 0.26%
+
+    which is where the plan's "~0.3%, and always-quiet scores 99.7%" comes
+    from. One positive per EVENT, not per pre-event hour: 48 positive hours
+    per event would put the rate at 12.5% and always-quiet at 87.5%, which is
+    not the number the plan is quoting.
+
+    The rejected alternative was non-overlapping tiling of the quiet stretches
+    too. Feasible, but it puts the base rate at 22.2% and then the alert
+    budget covers most of the set, leaving precision-at-budget with almost
+    nothing to discriminate.
+
+    Storage was the original objection and it was based on a miscount: one
+    window per bar materialised as 48 rows each is ~124M rows (~11 GB), but
+    scoring per HOUR needs one row per bar — 2.58M rows, ~246 MB measured
+    against the current matrix's bytes-per-row. A 48x difference, and the
+    reason this framing is affordable after all.
+
+    Returns the counts; materialising the frame is the evaluation harness's
+    job in Phase 5, and it reads these definitions.
+    """
+    interval = cfg["market"]["interval"]
+    lo = date_str_to_ts(cfg["study_window"]["start"])
+    hi = date_str_to_ts(cfg["study_window"]["end"])
+
+    total_bars = conn.execute(
+        "SELECT COUNT(*) FROM bars WHERE interval = ? AND ts_utc BETWEEN ? AND ? "
+        "AND ticker IN (SELECT ticker FROM companies WHERE in_universe = 1)",
+        (interval, lo, hi)).fetchone()[0]
+    positives = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE usable = 1").fetchone()[0]
+
+    if not total_bars:
+        raise SystemExit(
+            "no in-universe bars in the study window — run the market "
+            "collector and the liquidity filter before sizing the eval set."
+        )
+    return {
+        "decision_points": total_bars,
+        "positives": positives,
+        "base_rate": positives / total_bars,
+        "always_quiet_accuracy": 1 - positives / total_bars,
+    }
 
 
 def draw(cfg: dict, candidates: dict[str, np.ndarray], n: int,
@@ -127,7 +226,7 @@ def report(cfg: dict, conn, ratio: int | None = None) -> dict:
     """What is available, and what the base rate would be under each framing."""
     scfg = cfg["sampling"]
     horizon = cfg["decision"]["horizon_hours"]
-    ratio = ratio or scfg["negatives_per_positive"]
+    ratio = scfg["negatives_per_positive"] if ratio is None else ratio
 
     positives = conn.execute(
         "SELECT COUNT(*) FROM events WHERE usable = 1").fetchone()[0]
@@ -148,7 +247,8 @@ def report(cfg: dict, conn, ratio: int | None = None) -> dict:
             "shortfall": max(0, wanted - available), "horizon": horizon,
             "total_bars": total_bars,
             "rate_tiled": positives / (positives + available),
-            "rate_per_bar": positives / total_bars}
+            "rate_per_bar": positives / total_bars,
+            "eval": eval_decision_points(cfg, conn)}
 
 
 def print_report(cfg: dict, conn, ratio: int | None = None) -> None:
@@ -159,7 +259,14 @@ def print_report(cfg: dict, conn, ratio: int | None = None) -> None:
           f"(not just usable events)")
     print(f"window length    : {r['horizon']} bars, ending strictly before "
           f"its anchor")
-    print(f"\npositives        : {r['positives']:,}")
+    ev = r["eval"]
+    print(f"\n-- evaluation set (P4-12, true base rate) --")
+    print(f"decision points  : {ev['decision_points']:,} in-universe bars")
+    print(f"positives        : {ev['positives']:,}")
+    print(f"base rate        : {ev['base_rate']:.3%}  "
+          f"(always-quiet accuracy {ev['always_quiet_accuracy']:.1%})")
+    print(f"\n-- training sample --")
+    print(f"positives        : {r['positives']:,}")
     print(f"quiet windows    : {r['available']:,} available across "
           f"{r['tickers_with_quiet']:,} tickers")
     print(f"wanted at {(r['wanted']//r['positives']) if r['positives'] else 0}:1"
@@ -185,8 +292,8 @@ def print_report(cfg: dict, conn, ratio: int | None = None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ratio", type=int, help="negatives per positive")
-    parser.add_argument("--report", action="store_true", help="availability only")
+    parser.add_argument("--ratio", type=int, help="negatives per positive "
+                        "(default: sampling.negatives_per_positive)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
