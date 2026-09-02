@@ -172,3 +172,52 @@ def test_rerunning_overwrites_rather_than_appends(cfg, conn):
     from pathlib import Path
     written = pd.read_parquet(Path(cfg["paths"]["processed"]) / "features.parquet")
     assert len(written) == len(first)
+
+
+# --------------------------------------------------------------------------
+# robustness — data gaps and edge configs that must not crash the whole run
+# --------------------------------------------------------------------------
+
+def test_a_ticker_with_zero_bars_is_skipped_not_crashed(cfg, conn):
+    """A usable event whose ticker has no bars for the configured interval is
+    a plausible data gap (a collector miss, a delisted name) — the run must
+    skip it, not raise a KeyError while building an empty frame.
+    """
+    seed(conn, cfg, ticker="AAA", event_id="keep")
+
+    base = date_str_to_ts(cfg["study_window"]["start"]) + 200 * 86400
+    t0 = base + 700 * HOUR
+    db.upsert_companies(conn, [{"cik": "CIKBBB", "ticker": "BBB",
+                               "in_universe": 1}])
+    db.upsert_filings(conn, [{
+        "accession_no": "drop", "cik": "CIKBBB", "ticker": "BBB",
+        "form": "8-K", "items": "8.01", "acceptance_utc": t0,
+        "filing_date_utc": t0}])
+    db.upsert_events(conn, [{
+        "event_id": "drop", "accession_no": "drop", "ticker": "BBB",
+        "items": "8.01", "t0_filing_utc": t0, "t0_utc": t0,
+        "t0_source": "filing", "is_scheduled": 0, "usable": 1}])
+    # BBB has zero rows in `bars` — no bars were ever inserted for it.
+
+    m = build_matrix(cfg, conn)
+    assert set(m["window_id"]) == {"keep"}
+
+
+def test_every_window_empty_raises_the_clear_systemexit(cfg, conn):
+    """t0 at the ticker's very first bar leaves nothing before it. When that
+    is true of every event in the run, `pd.concat([])` must not be the
+    message the caller sees — the intended `SystemExit` must be.
+    """
+    seed(conn, cfg, t0_offset=0)
+    with pytest.raises(SystemExit, match="feature matrix is empty"):
+        build_matrix(cfg, conn)
+
+
+def test_empty_scheduled_codes_does_not_break_the_earnings_query(cfg, conn):
+    """`items.scheduled: []` is a valid, if unusual, config — the earnings SQL
+    must not degrade to the syntax error `AND ()`.
+    """
+    seed(conn, cfg)
+    empty_scheduled = {**cfg, "items": {**cfg["items"], "scheduled": []}}
+    m = build_matrix(empty_scheduled, conn)
+    assert m["days_since_last_earnings"].isna().all()

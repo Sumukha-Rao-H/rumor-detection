@@ -8,13 +8,16 @@ is widened by the t0 lookback so it cannot pass what t0 would fail, and
 coverage is counted in exchange sessions rather than bars.
 """
 
+import copy
+
 import pandas as pd
 import pytest
 
 from src import db
-from src.pipeline.coverage import audit, required_span, session_count
+from src.pipeline.coverage import (Verdict, audit, print_report,
+                                   required_span, session_count)
 from src.utils.config import load_config
-from src.utils.timeutils import date_str_to_ts
+from src.utils.timeutils import date_str_to_ts, get_market_calendar
 
 
 DAY = 86400
@@ -110,6 +113,116 @@ def test_sessions_not_bar_counts(cfg, conn):
     written = add_session_bars(conn, "AAA", start, end)
     v = audit(cfg, conn)[0]
     assert v.sessions_present == v.sessions_expected == written
+    assert v.outcome == "ok"
+
+
+def test_weekend_dated_bars_do_not_inflate_coverage(cfg, conn):
+    """A bar planted on a non-session date must never substitute for a real
+    trading-day gap.
+
+    Before the calendar intersection, `audit()` counted "distinct calendar
+    dates with a bar" directly, so padding a real gap with bars dated on
+    Saturdays inside the same span could turn a genuine `gaps` verdict into
+    a false `ok`. This reproduces exactly that padding and asserts it has no
+    effect.
+    """
+    acc = mid_window(cfg)
+    start, end, _ = required_span(cfg, acc)
+    hole_lo = pd.Timestamp(start + 6 * DAY, unit="s", tz="UTC").tz_localize(None)
+    hole_hi = pd.Timestamp(start + 16 * DAY, unit="s", tz="UTC").tz_localize(None)
+    add_universe_company(conn, "WKND")
+    add_filing(conn, "WKND", acc)
+    add_session_bars(conn, "WKND", start, end,
+                     skip=lambda d: hole_lo <= d <= hole_hi)
+
+    # Without padding, the missing real sessions are a genuine gap.
+    v = audit(cfg, conn)[0]
+    assert v.outcome == "gaps"
+    real_present = v.sessions_present
+
+    # Pad the hole with bars dated on Saturdays in the same date range — a
+    # real yfinance pull would never legitimately produce these for a 60m
+    # interval, but nothing in `audit()` used to check for it.
+    cal = get_market_calendar(cfg["market"]["calendar"])
+    rows = []
+    d = hole_lo
+    while d <= hole_hi:
+        saturday = d + pd.Timedelta(days=(5 - d.dayofweek) % 7)
+        if saturday <= hole_hi:
+            ts = int(saturday.tz_localize("UTC").timestamp()) + 14 * HOUR
+            rows.append(("WKND", ts, 1.0, 1.0, 1.0, 1.0, 1000.0,
+                        cfg["market"]["interval"]))
+        d += pd.Timedelta(days=7)
+    assert rows, "test setup: no Saturdays landed inside the hole"
+    db.upsert_bars(conn, rows)
+
+    v2 = audit(cfg, conn)[0]
+    assert v2.sessions_present == real_present   # weekend bars must not count
+    assert v2.outcome == "gaps"                  # still a real gap, not "ok"
+
+
+def test_zero_expected_sessions_is_reported_explicitly(conn):
+    """A required span with no exchange sessions must never fall through to
+    `ok` on the strength of a stray bar.
+
+    Not reachable with today's config (`pad_days_before=30` alone guarantees
+    `expected > 0`), but the guard used to be a bare `if expected and ...`
+    truthiness check, which would have skipped the coverage-ratio check
+    entirely and reported `ok` here. This pins the explicit `no_sessions`
+    outcome instead.
+    """
+    cfg = copy.deepcopy(load_config())
+    cfg["market"]["pad_days_before"] = 0
+    cfg["market"]["pad_days_after"] = 0
+    cfg["news"]["t0_lookback_hours"] = 0
+    # A Saturday: with every pad zeroed, the required span is this single
+    # non-session date, so `session_count` must be 0.
+    acc = date_str_to_ts("2025-09-06") + 12 * HOUR
+    start, end, clamped = required_span(cfg, acc)
+    assert not clamped
+    assert session_count(cfg, start, end) == 0
+
+    add_universe_company(conn, "WKEND0")
+    add_filing(conn, "WKEND0", acc)
+    db.upsert_bars(conn, [("WKEND0", acc, 1.0, 1.0, 1.0, 1.0, 1000.0,
+                          cfg["market"]["interval"])])
+
+    v = audit(cfg, conn)[0]
+    assert v.sessions_expected == 0
+    assert v.outcome == "no_sessions"
+
+
+def test_ratio_exactly_at_min_session_coverage_is_ok(conn):
+    """The ratio check is strict `<`: exactly at the threshold is still ok.
+
+    Two full trading weeks (10 sessions, no holiday in range) with one
+    mid-span session missing gives present/expected == 9/10 == 0.9, which is
+    today's configured `min_session_coverage` exactly.
+    """
+    cfg = copy.deepcopy(load_config())
+    assert cfg["market"]["min_session_coverage"] == 0.9
+    cfg["market"]["pad_days_before"] = 0
+    cfg["market"]["pad_days_after"] = 13
+    cfg["news"]["t0_lookback_hours"] = 0
+
+    acc = date_str_to_ts("2026-02-02")  # Monday, no holiday until Feb 16
+    start, end, clamped = required_span(cfg, acc)
+    assert not clamped
+
+    cal = get_market_calendar(cfg["market"]["calendar"])
+    a = pd.Timestamp(start, unit="s", tz="UTC").normalize().tz_localize(None)
+    b = pd.Timestamp(end, unit="s", tz="UTC").normalize().tz_localize(None)
+    sessions = list(cal.sessions_in_range(a, b))
+    assert len(sessions) == 10
+    drop = sessions[4]                  # a mid-span session, not an edge one
+
+    add_universe_company(conn, "EDGE")
+    add_filing(conn, "EDGE", acc)
+    add_session_bars(conn, "EDGE", start, end, skip=lambda d: d == drop)
+
+    v = audit(cfg, conn)[0]
+    assert v.sessions_expected == 10
+    assert v.sessions_present == 9
     assert v.outcome == "ok"
 
 
@@ -230,3 +343,62 @@ def test_session_count_matches_the_calendar(cfg):
     start = date_str_to_ts("2025-10-06")          # Monday
     end = date_str_to_ts("2025-10-10")            # Friday
     assert session_count(cfg, start, end) == 5
+
+
+# --------------------------------------------------------------------------
+# print_report — the acceptance check itself
+# --------------------------------------------------------------------------
+
+def _verdict(ticker, outcome, accession=None, expected=10, present=10,
+            clamped=False):
+    return Verdict(accession or f"{ticker}-{outcome}-{present}", ticker,
+                   0, outcome, expected, present, clamped)
+
+
+def test_print_report_summarises_counts_and_percentage(cfg, capsys):
+    verdicts = [
+        _verdict("AAA", "ok"),
+        _verdict("AAA", "ok", accession="AAA-2"),
+        _verdict("BBB", "no_bars", present=0),
+        _verdict("BBB", "starts_late", accession="BBB-2"),
+        _verdict("CCC", "gaps", present=5),
+    ]
+    print_report(cfg, verdicts)
+    out = capsys.readouterr().out
+    assert "events audited : 5" in out
+    assert "ok           : 2  (40.0%)" in out
+    assert "no_bars      : 1" in out
+    assert "starts_late  : 1" in out
+    assert "gaps         : 1" in out
+    # no_sessions never fired, so it must not clutter a report that has none.
+    assert "no_sessions" not in out
+
+
+def test_print_report_worst_offenders_label_matches_ticker_outcome_pairs(cfg, capsys):
+    """Regression: the header used to read "Failing tickers — worst 25 of 27"
+    on the real DB when the true count was 14 distinct tickers — `worst` is
+    keyed by (ticker, outcome), so one ticker failing two different ways (BBB
+    here) inflated the "tickers" count without the label saying so.
+    """
+    verdicts = [
+        _verdict("AAA", "ok"),
+        _verdict("BBB", "no_bars", present=0),
+        _verdict("BBB", "starts_late", accession="BBB-2"),
+        _verdict("CCC", "gaps", present=5),
+    ]
+    print_report(cfg, verdicts, list_failures=True)
+    out = capsys.readouterr().out
+    # 3 (ticker, outcome) pairs from 2 distinct failing tickers (BBB, CCC) —
+    # not "3 failing tickers".
+    assert "Worst offenders — 3 of 3 (ticker, outcome) pairs, 2 distinct tickers:" in out
+    assert "All 3 failing events:" in out
+
+
+def test_print_report_runs_with_no_failures(cfg, capsys):
+    """The all-clear path: no "Worst offenders" section when nothing failed."""
+    verdicts = [_verdict("AAA", "ok"), _verdict("BBB", "ok")]
+    print_report(cfg, verdicts, list_failures=True)
+    out = capsys.readouterr().out
+    assert "ok           : 2  (100.0%)" in out
+    assert "Worst offenders" not in out
+    assert "All 0 failing events:" in out

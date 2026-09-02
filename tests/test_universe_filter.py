@@ -85,13 +85,46 @@ def test_a_company_delisted_mid_window_still_qualifies(cfg, conn):
     Being acquired or delisted IS the market-moving event this project detects.
     A filter that drops those companies removes the most interesting rows in
     the study and leaves no trace that it did.
+
+    The scenario is built literally: GONE's bars run up to the window start,
+    continue 180 days into the window and then stop. A filter keyed on recent
+    trading must judge it by the last bar at or before the cutoff, never by the
+    last bar it has. ALIVE is the control — both must survive together, or the
+    test would also pass on a filter that keeps nothing but noise.
     """
     cutoff = as_of_ts(cfg)
     add_company(conn, "GONE")
     prior_8k(cfg, conn, "GONE")
-    add_bars(conn, "GONE", cutoff - 500 * DAY, 500)   # last bar at the cutoff
-    survivors, _ = select_universe(cfg, conn)
-    assert [c.ticker for c in survivors] == ["GONE"]
+    add_bars(conn, "GONE", cutoff - 400 * DAY, 400 + 180)   # stops mid-window
+    liquid(cfg, conn, "ALIVE")
+    survivors, reasons = select_universe(cfg, conn)
+    assert sorted(c.ticker for c in survivors) == ["ALIVE", "GONE"]
+    assert reasons == {}
+
+
+def test_a_company_that_stopped_trading_before_the_window_is_excluded(cfg, conn):
+    """The mirror image, and the one the as-of rule must NOT let through.
+
+    Delisted six months BEFORE the start, it never trades during the window at
+    all. Its ADV is a mean over the days it was alive, so it can still outrank
+    a real company and take a capped slot.
+    """
+    cutoff = as_of_ts(cfg)
+    add_company(conn, "DEAD")
+    prior_8k(cfg, conn, "DEAD")
+    add_bars(conn, "DEAD", cutoff - 400 * DAY, 220,        # last bar 181d back
+             close=20.0, volume=12_000_000)
+    assert classify(cfg, gather_candidates(cfg, conn)["DEAD"]) \
+        == "not_trading_at_as_of"
+
+
+def test_a_mid_window_ipo_has_no_bars_to_measure(cfg, conn):
+    """The look-ahead rule's mirror: bars only after the start measure nothing."""
+    cutoff = as_of_ts(cfg)
+    add_company(conn, "IPO2")
+    prior_8k(cfg, conn, "IPO2")
+    add_bars(conn, "IPO2", cutoff + DAY, 300)
+    assert classify(cfg, gather_candidates(cfg, conn)["IPO2"]) == "no_bars"
 
 
 def test_bars_after_the_window_start_are_ignored(cfg, conn):
@@ -160,6 +193,143 @@ def test_history_boundary_tolerates_a_weekend(cfg, conn):
 
 
 # --------------------------------------------------------------------------
+# exactly at each threshold
+#
+# Every threshold is documented as inclusive — "price >= $5", "ADV >= $5M" —
+# and inclusive is what the report prints. Without a case sitting exactly on
+# the line, `<` and `<=` are indistinguishable and the printed claim is not
+# checked by anything. Each pair below is a value on the line (must qualify)
+# and its nearest neighbour on the wrong side (must not).
+# --------------------------------------------------------------------------
+
+def test_a_price_exactly_at_the_minimum_qualifies(cfg, conn):
+    liquid(cfg, conn, "EDGE", close=cfg["universe"]["min_price_usd"],
+           volume=2_000_000)
+    assert classify(cfg, gather_candidates(cfg, conn)["EDGE"]) is None
+
+
+def test_a_price_a_cent_below_the_minimum_is_excluded(cfg, conn):
+    liquid(cfg, conn, "EDGE", close=cfg["universe"]["min_price_usd"] - 0.01,
+           volume=2_000_000)
+    assert classify(cfg, gather_candidates(cfg, conn)["EDGE"]) == "below_min_price"
+
+
+def test_an_adv_exactly_at_the_minimum_qualifies(cfg, conn):
+    """close * volume lands on min_adv_usd to the cent, on every bar."""
+    liquid(cfg, conn, "EDGE", close=10.0,
+           volume=cfg["universe"]["min_adv_usd"] // 10)
+    cand = gather_candidates(cfg, conn)["EDGE"]
+    assert cand.adv_usd == cfg["universe"]["min_adv_usd"]
+    assert classify(cfg, cand) is None
+
+
+def test_an_adv_a_hair_below_the_minimum_is_excluded(cfg, conn):
+    liquid(cfg, conn, "EDGE", close=10.0,
+           volume=cfg["universe"]["min_adv_usd"] // 10 - 1)
+    assert classify(cfg, gather_candidates(cfg, conn)["EDGE"]) == "below_min_adv"
+
+
+def history_boundary(cfg):
+    """The earliest first bar that still counts as a full year of history."""
+    return (as_of_ts(cfg) - cfg["universe"]["min_history_days"] * DAY
+            + cfg["market"]["coverage_tolerance_days"] * DAY)
+
+
+def test_history_exactly_at_the_boundary_qualifies(cfg, conn):
+    cutoff, first = as_of_ts(cfg), history_boundary(cfg)
+    add_company(conn, "EDGE")
+    prior_8k(cfg, conn, "EDGE")
+    add_bars(conn, "EDGE", first, (cutoff - first) // DAY + 1)
+    assert classify(cfg, gather_candidates(cfg, conn)["EDGE"]) is None
+
+
+def test_history_one_day_short_of_the_boundary_is_excluded(cfg, conn):
+    cutoff, first = as_of_ts(cfg), history_boundary(cfg) + DAY
+    add_company(conn, "EDGE")
+    prior_8k(cfg, conn, "EDGE")
+    add_bars(conn, "EDGE", first, (cutoff - first) // DAY + 1)
+    assert classify(cfg, gather_candidates(cfg, conn)["EDGE"]) == "short_history"
+
+
+def sparse(cfg, conn, ticker, n_bars, **kw):
+    """Enough history to clear `min_history_days`, but only `n_bars` recent."""
+    cutoff = as_of_ts(cfg)
+    add_company(conn, ticker)
+    prior_8k(cfg, conn, ticker)
+    add_bars(conn, ticker, cutoff - 400 * DAY, 1, **kw)   # outside the lookback
+    add_bars(conn, ticker, cutoff - (n_bars - 1) * DAY, n_bars, **kw)
+
+
+def test_exactly_the_minimum_bar_count_qualifies(cfg, conn):
+    sparse(cfg, conn, "EDGE", cfg["universe"]["min_bars_in_lookback"],
+           close=10.0, volume=1_000_000)
+    assert classify(cfg, gather_candidates(cfg, conn)["EDGE"]) is None
+
+
+def test_one_bar_short_of_the_minimum_is_excluded(cfg, conn):
+    """An ADV averaged over a handful of days is not an average daily volume."""
+    sparse(cfg, conn, "EDGE", cfg["universe"]["min_bars_in_lookback"] - 1,
+           close=10.0, volume=1_000_000)
+    assert classify(cfg, gather_candidates(cfg, conn)["EDGE"]) == "too_few_bars"
+
+
+def test_a_last_bar_exactly_at_the_staleness_limit_qualifies(cfg, conn):
+    cutoff = as_of_ts(cfg)
+    stale = cfg["universe"]["max_bar_staleness_days"]
+    add_company(conn, "EDGE")
+    prior_8k(cfg, conn, "EDGE")
+    add_bars(conn, "EDGE", cutoff - 400 * DAY, 400 - stale + 1)
+    assert classify(cfg, gather_candidates(cfg, conn)["EDGE"]) is None
+
+
+def test_a_last_bar_one_day_past_the_staleness_limit_is_excluded(cfg, conn):
+    cutoff = as_of_ts(cfg)
+    stale = cfg["universe"]["max_bar_staleness_days"]
+    add_company(conn, "EDGE")
+    prior_8k(cfg, conn, "EDGE")
+    add_bars(conn, "EDGE", cutoff - 400 * DAY, 400 - stale)
+    assert classify(cfg, gather_candidates(cfg, conn)["EDGE"]) \
+        == "not_trading_at_as_of"
+
+
+def test_bars_with_no_price_data_get_their_own_reason(cfg, conn):
+    """A broken collector cycle must not read as "trades too thinly".
+
+    NULL closes never reach the real `bars` table today, and a NaN written from
+    Python arrives as NULL. Either way the aggregate is NULL, not small, and
+    the report should say so rather than blaming the company.
+    """
+    cutoff = as_of_ts(cfg)
+    add_company(conn, "NULLS")
+    prior_8k(cfg, conn, "NULLS")
+    add_bars(conn, "NULLS", cutoff - 400 * DAY, 1)         # history, real bar
+    db.upsert_bars(conn, [("NULLS", cutoff - i * DAY, None, None, None, None,
+                           None, "1d") for i in range(300)])
+    assert classify(cfg, gather_candidates(cfg, conn)["NULLS"]) == "no_usable_bars"
+
+
+def test_a_sparse_or_dead_name_never_outranks_a_continuously_traded_one(cfg, conn):
+    """The cap is a scarce resource, and a mean over four days can win it.
+
+    SPARSE traded four days all year and ranks first on ADV; DEAD stopped six
+    months before the window. Both used to take slots from ALIVE, which traded
+    every session.
+    """
+    cfg = {**cfg, "universe": {**cfg["universe"], "max_tickers": 2}}
+    cutoff = as_of_ts(cfg)
+    sparse(cfg, conn, "SPARSE", 4, close=50.0, volume=20_000_000)
+    add_company(conn, "DEAD")
+    prior_8k(cfg, conn, "DEAD")
+    add_bars(conn, "DEAD", cutoff - 400 * DAY, 220, close=20.0,
+             volume=12_000_000)
+    liquid(cfg, conn, "ALIVE", close=10.0, volume=1_200_000)
+
+    survivors, reasons = select_universe(cfg, conn)
+    assert [c.ticker for c in survivors] == ["ALIVE"]
+    assert reasons == {"too_few_bars": 1, "not_trading_at_as_of": 1}
+
+
+# --------------------------------------------------------------------------
 # the cap
 # --------------------------------------------------------------------------
 
@@ -222,6 +392,31 @@ def test_rerun_demotes_a_company_that_no_longer_qualifies(cfg, conn):
     conn.commit()
     apply_filter(cfg, conn)
     assert db.universe_tickers(conn) == ["AAA"]
+
+
+def test_a_survivor_that_cannot_be_flagged_fails_loudly_and_writes_nothing(
+        cfg, conn):
+    """Two guarantees in one run: the count is checked, and the write is atomic.
+
+    GHOST clears every threshold but carries no primary row — every row with
+    its ticker is a predecessor — so the UPDATE matches nothing and it would
+    vanish from the study with only a log line one short. And because the clear
+    and the set share a transaction, the failure leaves the previous run's
+    flags exactly as they were: the alternative is `in_universe = 0` on every
+    row, which every later stage reads as an empty universe and calls success.
+    """
+    liquid(cfg, conn, "AAA")
+    apply_filter(cfg, conn)
+    assert db.universe_tickers(conn) == ["AAA"]
+
+    add_company(conn, "GHOST", cik="OLDGHOST", successor="CIKGHOST")
+    prior_8k(cfg, conn, "GHOST")
+    add_bars(conn, "GHOST", as_of_ts(cfg) - 395 * DAY, 500)
+
+    with pytest.raises(SystemExit, match="write mismatch") as err:
+        apply_filter(cfg, conn)
+    assert "GHOST" in str(err.value)
+    assert db.universe_tickers(conn) == ["AAA"]   # nothing cleared, nothing set
 
 
 def test_raises_when_nothing_survives(cfg, conn):
@@ -318,3 +513,41 @@ def test_no_prior_8k_is_reported_before_liquidity_reasons(cfg, conn):
     """An entity outside the answer key is excluded for that, not for being thin."""
     liquid(cfg, conn, "THINETF", files_8k=False, volume=400)
     assert classify(cfg, gather_candidates(cfg, conn)["THINETF"]) == "no_prior_8k"
+
+
+def test_a_decade_old_8k_does_not_make_a_trust_a_filer(cfg, conn):
+    """QQQ, literally: two administrative filings in 2014 and nothing since.
+
+    "Ever filed an 8-K since 1994" is not the rule the config describes. A
+    grantor trust that files sponsor paperwork once a decade can never produce
+    the kind of event this project detects, yet it is liquid enough to take a
+    capped slot from a real filer — the #3 slot by ADV, in the built universe.
+    """
+    liquid(cfg, conn, "QQQ", files_8k=False, volume=50_000_000)
+    add_filing(conn, "QQQ", as_of_ts(cfg) - 4000 * DAY)
+    assert classify(cfg, gather_candidates(cfg, conn)["QQQ"]) == "no_prior_8k"
+
+
+def test_an_8k_exactly_at_the_recency_boundary_still_counts(cfg, conn):
+    liquid(cfg, conn, "OLD", files_8k=False)
+    add_filing(conn, "OLD",
+               as_of_ts(cfg) - cfg["universe"]["prior_8k_lookback_days"] * DAY)
+    assert classify(cfg, gather_candidates(cfg, conn)["OLD"]) is None
+
+
+def test_an_8k_a_day_older_than_the_boundary_does_not(cfg, conn):
+    liquid(cfg, conn, "OLD", files_8k=False)
+    add_filing(conn, "OLD", as_of_ts(cfg)
+               - (cfg["universe"]["prior_8k_lookback_days"] + 1) * DAY)
+    assert classify(cfg, gather_candidates(cfg, conn)["OLD"]) == "no_prior_8k"
+
+
+def test_a_candidate_must_carry_its_filing_evidence(cfg):
+    """Fail closed: no default may let an entity qualify on silence.
+
+    `files_8k` decides membership. A default of True means any Candidate built
+    without filing evidence — a fixture, a future caller — silently passes the
+    one rule that keeps entities outside the answer key out of the study.
+    """
+    with pytest.raises(TypeError):
+        Candidate("ZZZ", 0, 0, 50.0, 1e8, 300)

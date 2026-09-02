@@ -66,6 +66,16 @@ def test_days_since_is_nan_before_any_filing(cfg):
     assert np.isnan(out["days_since_last_8k"].iloc[0])
 
 
+def test_unsorted_filing_times_are_rejected(cfg):
+    """`np.searchsorted` returns silently wrong insertion points against an
+    unsorted array — the exact "looks fine, is wrong" failure this module's
+    header warns about, just via an unguarded precondition. Now a loud error.
+    """
+    filings = np.array([MID, MID - 30 * DAY])   # out of order
+    with pytest.raises(ValueError, match="sorted"):
+        context_signals(bars([MID]), filings, cfg=cfg)
+
+
 def test_the_most_recent_prior_filing_wins(cfg):
     filings = np.array([MID - 30 * DAY, MID - 3 * DAY, MID - 90 * DAY])
     filings.sort()

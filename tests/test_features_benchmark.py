@@ -89,6 +89,17 @@ def test_alignment_happens_before_differencing(cfg):
     assert rel["ret_rel_1h"].iloc[1] == pytest.approx(0.10)
 
 
+def test_a_zero_prior_close_gives_nan_not_infinity(cfg):
+    """A zero close on either leg would otherwise make `pct_change` divide out
+    to +/-inf, the same failure `returns()` guards against for the same
+    reason."""
+    stock = bars([0.0, 100.0, 101.0])
+    bench = bars([50.0, 52.0, 53.0])
+    rel = benchmark_relative(stock, bench, cfg)["ret_rel_1h"]
+    assert np.isnan(rel.iloc[1])
+    assert not np.isinf(rel.to_numpy(dtype=float)).any()
+
+
 def test_a_missing_benchmark_bar_gives_nan_not_a_stale_price(cfg):
     """Forward-filling would compare this hour's move to an older market move."""
     stock = bars([100.0, 110.0, 121.0])

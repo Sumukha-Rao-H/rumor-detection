@@ -93,12 +93,30 @@ def test_a_frame_shorter_than_the_horizon_is_all_nan(cfg):
     assert f["ret_120h"].isna().all()
 
 
+def test_a_zero_prior_close_gives_nan_not_infinity(cfg):
+    """`pct_change` would otherwise divide by zero and return +inf — worse
+    than NaN, because `print_matrix_report`'s NaN-only audit would miss it."""
+    f = returns(bars([0.0, 100.0, 101.0]), cfg)["ret_1h"]
+    assert np.isnan(f.iloc[1])
+    assert not np.isinf(f.to_numpy(dtype=float)).any()
+
+
 def test_index_and_length_are_preserved(cfg):
     frame = random_bars(50)
     f = returns(frame, cfg)
     assert len(f) == len(frame)
     assert f.index.equals(frame.index)
     assert f.index.name == "ts_utc"
+
+
+def test_an_unsorted_frame_is_rejected(cfg):
+    """The module's one precondition — ascending timestamps — is a runtime
+    check now, not just a docstring promise a future caller could violate
+    silently."""
+    frame = bars([100, 101, 102])
+    shuffled = frame.iloc[[1, 0, 2]]
+    with pytest.raises(ValueError, match="sorted"):
+        returns(shuffled, cfg)
 
 
 def test_an_overnight_gap_is_one_step_not_many(cfg):

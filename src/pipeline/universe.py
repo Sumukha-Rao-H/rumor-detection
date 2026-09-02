@@ -13,6 +13,30 @@ acquired or delisted during the window — precisely the dramatic, market-moving
 population this project exists to detect. A company that was liquid on the
 window-start date and delisted eight months later belongs in the study; its
 bars simply stop early, which is the coverage audit's problem, not this one's.
+A company that had already stopped trading BEFORE that date does not belong:
+its last bar sits months behind the cutoff and it never traded during the
+window at all.
+
+**KNOWN LIMITATION — the guarantee above is not delivered end-to-end.**
+Measured 2026-09-01, decided 2026-09-02: keep it and report it, do not
+re-collect. Everything this module does is correct, and it is not enough.
+`db.candidate_tickers` reads `companies`, which `edgar.py` builds from SEC's
+company_tickers_exchange.json — a LIVE register listing who holds a ticker
+TODAY. A company acquired or delisted during the window has already fallen
+off it, so it was never ingested and can never reach this filter to be kept.
+The evidence: across 5,540 tickers over eleven months, **zero** have daily
+history ending more than 90 days before the snapshot. The delisted population
+is not thinned, it is absent.
+
+So the as-of arithmetic here guards a door that is already open one stage
+upstream, and the honest statement of scope is: **results hold for companies
+that were listed at the window start and still listed at the snapshot date.**
+Acquisitions and delistings — dramatic, market-moving, and exactly the
+population the project most wants — are outside it. Closing this needs a
+point-in-time company register, a full EDGAR re-collection, and a new price
+snapshot; that is a bigger change than the finding warrants right now, so it
+is a stated bound on the claim rather than a silent one. It belongs in the
+report next to the Finnhub twelve-month bound, which is handled the same way.
 
 Usage:
   python -m src.pipeline.universe            # apply the filter and write flags
@@ -38,10 +62,13 @@ class Candidate(NamedTuple):
     """One company's liquidity picture, measured as of the window start."""
     ticker: str
     first_ts: int | None      # earliest daily bar ever, at or before as-of
-    last_close: float | None  # last close at or before as-of
+    last_ts: int | None       # latest daily bar at or before as-of
+    last_close: float | None  # close of that bar
     adv_usd: float | None     # mean close*volume over the lookback
     n_bars: int               # bars inside the lookback
-    files_8k: bool = True     # filed an 8-K BEFORE the window (P3-02b)
+    files_8k: bool            # filed a RECENT 8-K before the window (P3-02b).
+    # No default on purpose: it decides membership, and a default of True would
+    # let a Candidate built without filing evidence qualify on silence.
 
 
 def as_of_ts(cfg: dict) -> int:
@@ -84,8 +111,8 @@ def gather_candidates(cfg: dict, conn) -> dict[str, Candidate]:
         "WHERE interval = ? AND ts_utc BETWEEN ? AND ? GROUP BY ticker",
         (interval, lookback_start, cutoff))}
 
-    last = {r[0]: r[1] for r in conn.execute(
-        """SELECT b.ticker, b.close FROM bars b
+    last = {r[0]: (r[1], r[2]) for r in conn.execute(
+        """SELECT b.ticker, b.ts_utc, b.close FROM bars b
              JOIN (SELECT ticker, MAX(ts_utc) AS mx FROM bars
                     WHERE interval = ? AND ts_utc <= ? GROUP BY ticker) m
                ON b.ticker = m.ticker AND b.ts_utc = m.mx
@@ -94,13 +121,25 @@ def gather_candidates(cfg: dict, conn) -> dict[str, Candidate]:
 
     # Measured strictly before the window: keying on in-window filings would
     # build the universe out of the outcome and hand every member a positive.
-    prior_filers = db.tickers_with_filings_before(conn, cutoff,
-                                                  cfg["edgar"]["forms"])
+    # Bounded below as well: "ever filed an 8-K since 1994" admits a trust on
+    # two administrative filings from a decade ago. One query with both bounds
+    # rather than `db.tickers_with_filings_before` (which has no lower bound)
+    # intersected with a second set — that intersection would count a ticker
+    # whose only recent filing lands INSIDE the window, i.e. look-ahead.
+    forms = cfg["edgar"]["forms"]
+    marks = ",".join("?" * len(forms))
+    since = cutoff - ucfg["prior_8k_lookback_days"] * DAY_S
+    prior_filers = {r[0] for r in conn.execute(
+        f"SELECT DISTINCT ticker FROM filings "
+        f"WHERE acceptance_utc >= ? AND acceptance_utc < ? "
+        f"AND form IN ({marks}) AND ticker IS NOT NULL",
+        (since, cutoff, *forms))}
 
     out = {}
     for ticker in db.candidate_tickers(conn):
         adv, n = window.get(ticker, (None, 0))
-        out[ticker] = Candidate(ticker, first.get(ticker), last.get(ticker),
+        last_ts, last_close = last.get(ticker, (None, None))
+        out[ticker] = Candidate(ticker, first.get(ticker), last_ts, last_close,
                                 adv, n, ticker in prior_filers)
     return out
 
@@ -132,9 +171,27 @@ def classify(cfg: dict, cand: Candidate) -> str | None:
         return "no_bars"
     if cand.first_ts > history_by:
         return "short_history"
-    if cand.last_close is None or cand.last_close < ucfg["min_price_usd"]:
+    # Liquid a year ago and gone before the window opened is not a member. The
+    # docstring's promise is the other direction — a company alive AT the start
+    # and delisted during the window stays, and its last bar is at the cutoff.
+    # Checked before the bar count because a name that died mid-lookback is
+    # short of bars as well, and "it stopped trading" is the truer reason.
+    if (cand.last_ts is None
+            or cutoff - cand.last_ts > ucfg["max_bar_staleness_days"] * DAY_S):
+        return "not_trading_at_as_of"
+    # ADV is a mean, so the denominator matters: over four bars it measures four
+    # days, not a year. Without a floor a name that traded one week outranks
+    # every continuously-traded company and takes a capped slot from it.
+    if cand.n_bars < ucfg["min_bars_in_lookback"]:
+        return "too_few_bars"
+    # Bars exist but carry no price or volume. Distinct from "too cheap" and
+    # from "too thin": those are facts about the company, this is a data fault,
+    # and reporting it as thin trading would hide a broken collector cycle.
+    if cand.last_close is None or cand.adv_usd is None:
+        return "no_usable_bars"
+    if cand.last_close < ucfg["min_price_usd"]:
         return "below_min_price"
-    if cand.adv_usd is None or cand.adv_usd < ucfg["min_adv_usd"]:
+    if cand.adv_usd < ucfg["min_adv_usd"]:
         return "below_min_adv"
     return None
 
@@ -165,6 +222,55 @@ def select_universe(cfg: dict, conn) -> tuple[list[Candidate], dict[str, int]]:
     return passed, reasons
 
 
+CLEAR_FLAGS_SQL = """
+    UPDATE companies SET in_universe = 0, adv_usd = NULL, last_price = NULL,
+                         universe_as_of = NULL
+"""
+
+SET_FLAGS_SQL = """
+    UPDATE companies
+       SET in_universe = 1, adv_usd = :adv_usd,
+           last_price = :last_price, universe_as_of = :as_of_utc
+     WHERE ticker = :ticker AND successor_cik IS NULL
+"""
+
+
+def write_flags(conn, survivors: list[Candidate], cutoff: int) -> int:
+    """Clear every flag and set the survivors' — in ONE transaction.
+
+    Clearing is not optional: the filter rebuilds the universe rather than
+    adding to it, so a company that no longer qualifies must be demoted. But
+    clear-then-set as two commits means a crash in between leaves `in_universe`
+    zero on every row, and t0, sampling, coverage and the news collector all
+    read an empty universe and report success. So the two statements share a
+    transaction and either both land or neither does. Written here rather than
+    through `db.clear_universe_flags` / `db.set_universe_flags` because each of
+    those commits on its own; folding the pair into one db-layer call is the
+    tidier home for this and is filed as a cross-unit note.
+
+    Every survivor must land on exactly one primary row. Fewer means a company
+    silently dropped out of the study, more means one counted twice, and both
+    are worth stopping the run for.
+    """
+    rows = [{"ticker": c.ticker, "adv_usd": c.adv_usd,
+             "last_price": c.last_close, "as_of_utc": cutoff}
+            for c in survivors]
+    with conn:                      # commits once at the end, rolls back whole
+        conn.execute(CLEAR_FLAGS_SQL)
+        written = conn.executemany(SET_FLAGS_SQL, rows).rowcount
+        if written != len(survivors):
+            flagged = {r[0] for r in conn.execute(
+                "SELECT ticker FROM companies WHERE in_universe = 1")}
+            missing = sorted({c.ticker for c in survivors} - flagged)
+            raise SystemExit(
+                f"universe write mismatch: {len(survivors)} companies selected "
+                f"but {written} rows flagged. Flags left untouched. "
+                f"Unflagged tickers (no row with successor_cik IS NULL): "
+                f"{missing or 'none — some ticker has two primary rows'}"
+            )
+    return written
+
+
 def apply_filter(cfg: dict, conn) -> list[Candidate]:
     """Select the universe and write the flags. Returns the survivors."""
     survivors, reasons = select_universe(cfg, conn)
@@ -175,13 +281,7 @@ def apply_filter(cfg: dict, conn) -> list[Candidate]:
             "nothing while reporting success."
         )
     cutoff = as_of_ts(cfg)
-    db.clear_universe_flags(conn)   # not additive: a company that no longer
-                                    # qualifies must be demoted, not left set
-    written = db.set_universe_flags(conn, [
-        {"ticker": c.ticker, "adv_usd": c.adv_usd,
-         "last_price": c.last_close, "as_of_utc": cutoff}
-        for c in survivors
-    ])
+    written = write_flags(conn, survivors, cutoff)
     log.info("Universe: %d companies flagged (as of %s); excluded %s",
              written, ts_to_iso(cutoff),
              ", ".join(f"{k}={v}" for k, v in sorted(reasons.items())))
@@ -197,6 +297,9 @@ def print_report(cfg: dict, conn, max_listed: int = 15) -> None:
     print(f"thresholds: price >= ${ucfg['min_price_usd']}, "
           f"ADV >= ${ucfg['min_adv_usd']:,}, "
           f"history >= {ucfg['min_history_days']}d, cap {ucfg['max_tickers']}")
+    print(f"            bars >= {ucfg['min_bars_in_lookback']} in the lookback, "
+          f"last bar within {ucfg['max_bar_staleness_days']}d of the as-of date, "
+          f"8-K within {ucfg['prior_8k_lookback_days']}d before it")
     print(f"\ncandidates : {total}")
     print(f"in universe: {len(survivors)}")
     for reason, n in sorted(reasons.items(), key=lambda kv: -kv[1]):

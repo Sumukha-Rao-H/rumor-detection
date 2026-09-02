@@ -13,7 +13,8 @@ import pytest
 
 from src import db
 from src.pipeline.t0 import (
-    Match, gap_percentiles, lookback_window, match_all, match_filing,
+    Match, NO_NEWS_FOR_TICKER, NO_NEWS_IN_LOOKBACK, gap_buckets,
+    gap_percentiles, lookback_window, match_all, match_filing,
 )
 from src.utils.config import load_config
 from src.utils.timeutils import date_str_to_ts, iso_utc_to_ts
@@ -236,17 +237,84 @@ def test_match_all_raises_when_there_is_nothing_to_match(cfg, conn):
 
 
 def test_gap_percentiles_measure_only_news_matches(cfg):
-    """The diagnostic behind issue 27 — filing-time fallbacks are not gaps."""
+    """The diagnostic behind issue 27 — filing-time fallbacks are not gaps.
+
+    Both articles are placed as fractions of the configured lookback, because
+    a gap can never exceed it: the old fixture used 18h gaps, which the 3h
+    window makes impossible, so it exercised buckets that are structurally
+    empty in production.
+    """
     acc = 1_800_000_000
-    ms = [Match("A", acc, acc - 2 * HOUR, acc - 2 * HOUR, "news"),
-          Match("B", acc, acc - 18 * HOUR, acc - 18 * HOUR, "news"),
-          Match("C", acc, None, acc, "filing")]
-    pct = gap_percentiles(ms)
-    assert pct["within_2h"] == pytest.approx(0.5)
-    assert pct["beyond_12h"] == pytest.approx(0.5)
-    assert pct["mean"] == pytest.approx(10.0)
+    look = cfg["news"]["t0_lookback_hours"]
+    near = int(0.1 * look * HOUR)                  # just before acceptance
+    far = int(0.4 * look * HOUR)                   # well into the window
+    ms = [Match("A", acc, acc - near, acc - near, "news"),
+          Match("B", acc, acc - far, acc - far, "news"),
+          Match("C", acc, None, acc, "filing", NO_NEWS_IN_LOOKBACK)]
+
+    pct = gap_percentiles(ms, cfg)
+    lo_bucket, mid_bucket, _ = gap_buckets(cfg)    # 0.25 / 0.5 / 0.75 of look
+    assert pct["within"][lo_bucket] == pytest.approx(0.5)   # only the near one
+    assert pct["within"][mid_bucket] == pytest.approx(1.0)  # both
+    assert pct["mean"] == pytest.approx(0.25 * look)        # the fallback is
+    assert len(pct["within"]) == 3                          # not averaged in
+
+
+def test_gap_buckets_stay_inside_the_lookback_window(cfg):
+    """Bug 4: fixed 6h/12h edges under a 3h lookback were 0% by construction.
+
+    A bucket at or beyond the lookback cannot ever be informative, so the
+    edges are fractions of the window and move with it.
+    """
+    look = cfg["news"]["t0_lookback_hours"]
+    buckets = gap_buckets(cfg)
+    assert buckets and max(buckets) < look
+
+    wide = {**cfg, "news": {**cfg["news"], "t0_lookback_hours": 24}}
+    assert gap_buckets(wide) == [b * 24 / look for b in buckets]
 
 
 def test_gap_percentiles_empty_when_nothing_matched(cfg):
     """Tier 1 on the real data produces exactly this."""
-    assert gap_percentiles([Match("A", 1, None, 1, "filing")]) == {}
+    assert gap_percentiles([Match("A", 1, None, 1, "filing")], cfg) == {}
+
+
+# --------------------------------------------------------------------------
+# why a filing kept its own time — two causes, not one
+# --------------------------------------------------------------------------
+
+def test_fallback_says_the_ticker_has_no_news_at_all(cfg, conn):
+    """A ticker with nothing stored is a COVERAGE HOLE, not a measurement.
+
+    It is also how a lost article looks from here: `news` is keyed on url
+    alone, so an article first stored under another ticker is invisible to
+    this query and its correction is silently gone. Counting it apart from
+    the ordinary fallback is what makes that visible.
+    """
+    acc = iso_utc_to_ts("2026-02-25T20:30:00Z")
+    m = match_filing(cfg, conn, "AAPL", acc)
+    assert m.source == "filing" and m.reason == NO_NEWS_FOR_TICKER
+
+
+def test_fallback_says_the_window_was_empty_when_the_ticker_is_covered(cfg, conn):
+    """The intended baseline: covered ticker, nothing inside the lookback."""
+    acc = iso_utc_to_ts("2026-02-25T20:30:00Z")
+    look = cfg["news"]["t0_lookback_hours"] * HOUR
+    add_news_at(conn, "AAPL", acc - look - HOUR)      # covered, but too early
+    m = match_filing(cfg, conn, "AAPL", acc)
+    assert m.source == "filing" and m.reason == NO_NEWS_IN_LOOKBACK
+
+
+def test_an_untiered_article_still_counts_as_coverage(cfg, conn):
+    """The two reasons split on whether the ticker is covered at all, not on
+    the tier ceiling — otherwise every tier-1 run would report the whole
+    study as a coverage hole."""
+    acc = iso_utc_to_ts("2026-02-25T20:30:00Z")
+    add_news_at(conn, "AAPL", acc - 30 * 60, tier=None)
+    assert match_filing(cfg, conn, "AAPL", acc).reason == NO_NEWS_IN_LOOKBACK
+
+
+def test_a_matched_filing_carries_no_fallback_reason(cfg, conn):
+    acc = iso_utc_to_ts("2026-02-25T20:30:00Z")
+    add_news_at(conn, "AAPL", acc - 30 * 60)
+    assert match_filing(cfg, conn, "AAPL", acc).reason is None

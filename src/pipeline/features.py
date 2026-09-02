@@ -42,6 +42,24 @@ from src.utils.timeutils import next_market_close, trading_hours_between
 log = logging.getLogger(__name__)
 
 
+def _assert_sorted(values, what: str) -> None:
+    """Guard the module's one precondition: ascending timestamps.
+
+    Every builder below computes positionally — `pct_change`, `rolling`,
+    `shift`, `searchsorted` — and simply trusts that row order matches
+    `ts_utc` order. `build_matrix` always feeds sorted SQL output, so this
+    never fires in the real pipeline. But these are public, individually
+    importable functions, and the module's own header warns that breaking the
+    no-future rule "does not raise an error, it produces a number that looks
+    good and is wrong" — that is equally true of an unsorted input, just via
+    an unguarded precondition instead of the intended failure mode. A loud
+    `ValueError` here is cheap; a silently wrong feature is not.
+    """
+    arr = np.asarray(values)
+    if arr.size > 1 and not np.all(arr[:-1] <= arr[1:]):
+        raise ValueError(f"{what} must be sorted ascending by timestamp")
+
+
 def returns(frame: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     """Trailing returns over each configured horizon.
 
@@ -54,11 +72,19 @@ def returns(frame: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     of "no move", and forward-filling would invent a price that never traded.
     `pct_change` no longer fills by default on pandas 3, so this is the library
     behaviour rather than something layered on top.
+
+    NaN, not infinity, when the prior close is zero or negative. `pct_change`
+    would otherwise divide by that price and return +/-inf — the same
+    zero-denominator failure `volume_zscore` guards against for its own
+    baseline. An undefined return is the honest value; `+inf` would sail
+    through `print_matrix_report`'s NaN-only audit and poison every
+    downstream statistic that touches it.
     """
     cfg = cfg or load_config()
     close = frame["close"]
+    _assert_sorted(frame.index, "frame index")
     return pd.DataFrame(
-        {f"ret_{h}h": close.pct_change(h)
+        {f"ret_{h}h": close.pct_change(h).where(close.shift(h) > 0)
          for h in cfg["features"]["return_horizons_h"]},
         index=frame.index,
     )
@@ -93,6 +119,7 @@ def volume_zscore(frame: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     cfg = cfg or load_config()
     fcfg = cfg["features"]
     volume = frame["volume"]
+    _assert_sorted(frame.index, "frame index")
 
     base = volume.shift(1).rolling(fcfg["volume_zscore_window_h"],
                                    min_periods=fcfg["min_baseline_bars"])
@@ -129,6 +156,7 @@ def realised_volatility(frame: pd.DataFrame,
     """
     cfg = cfg or load_config()
     window = cfg["features"]["volatility_window_h"]
+    _assert_sorted(frame.index, "frame index")
     one_bar = frame["close"].pct_change(1)
     return pd.DataFrame(
         {"volatility": one_bar.rolling(window, min_periods=window).std()},
@@ -161,6 +189,10 @@ def benchmark_relative(frame: pd.DataFrame, benchmark: pd.DataFrame,
     substituting an older market move and calling the difference
     company-specific is precisely the error this feature exists to avoid.
 
+    A zero or negative close, in either leg, also gives NaN rather than the
+    +/-inf `pct_change` would otherwise divide out to — the same guard
+    `returns()` applies for the same reason.
+
     Simple excess return, not a beta-adjusted market-model residual. Beta would
     have to be estimated on yet another rolling window with its own minimum and
     its own leakage surface, and nothing has asked for it. The plain difference
@@ -172,13 +204,18 @@ def benchmark_relative(frame: pd.DataFrame, benchmark: pd.DataFrame,
     """
     cfg = cfg or load_config()
     fcfg = cfg["features"]
+    _assert_sorted(frame.index, "frame index")
     if not fcfg["include_benchmark_relative"]:
         return pd.DataFrame(index=frame.index)
 
     close = frame["close"]
     bench = benchmark["close"].reindex(frame.index)
+
+    def rel_return(series: pd.Series, h: int) -> pd.Series:
+        return series.pct_change(h).where(series.shift(h) > 0)
+
     return pd.DataFrame(
-        {f"ret_rel_{h}h": close.pct_change(h) - bench.pct_change(h)
+        {f"ret_rel_{h}h": rel_return(close, h) - rel_return(bench, h)
          for h in fcfg["return_horizons_h"]},
         index=frame.index,
     )
@@ -218,6 +255,7 @@ def _days_since(index: pd.Index, event_times: np.ndarray) -> pd.Series:
     stamps = np.asarray(index, dtype=np.int64)
     if event_times.size == 0:
         return pd.Series(np.nan, index=index)
+    _assert_sorted(event_times, "event_times")
     pos = np.searchsorted(event_times, stamps, side="right") - 1
     last = np.where(pos >= 0, event_times[np.clip(pos, 0, None)], np.nan)
     return pd.Series((stamps - last) / DAY_S, index=index)
@@ -251,6 +289,7 @@ def context_signals(frame: pd.DataFrame, filing_times: np.ndarray | None = None,
     cfg = cfg or load_config()
     fcfg = cfg["features"]
     calendar = cfg["market"]["calendar"]
+    _assert_sorted(frame.index, "frame index")
 
     out: dict[str, pd.Series] = {
         "trading_hours_to_close": pd.Series(
@@ -280,9 +319,20 @@ ID_COLUMNS = ("window_id", "ticker", "ts_utc", "t0_utc", "is_scheduled",
 
 
 def _ticker_frame(conn, ticker: str, interval: str) -> pd.DataFrame:
+    """A ticker's bars, indexed by `ts_utc`. Empty (not a crash) with zero bars.
+
+    `pd.DataFrame([])` has no columns at all, so `.set_index("ts_utc")` would
+    raise `KeyError` on a ticker with no rows for this interval — a plausible
+    data gap (a collector miss, a delisted name, a benchmark not yet backfilled)
+    rather than a hypothetical. Returning an empty-but-valid frame instead lets
+    `build_matrix`'s own `if frame.empty: continue` guard actually run, rather
+    than a raw `KeyError` taking down the whole assembly.
+    """
     rows = conn.execute(
         "SELECT ts_utc, close, volume FROM bars WHERE ticker = ? AND "
         "interval = ? ORDER BY ts_utc", (ticker, interval)).fetchall()
+    if not rows:
+        return pd.DataFrame(columns=["close", "volume"]).rename_axis("ts_utc")
     return pd.DataFrame([dict(r) for r in rows]).set_index("ts_utc")
 
 
@@ -351,12 +401,18 @@ def build_matrix(cfg: dict, conn) -> pd.DataFrame:
             f"SELECT acceptance_utc FROM filings WHERE ticker = ? AND form IN "
             f"({marks}) AND acceptance_utc IS NOT NULL ORDER BY acceptance_utc",
             (ticker, *forms))], dtype=np.int64)
-        earnings = np.array([r[0] for r in conn.execute(
-            "SELECT acceptance_utc FROM filings WHERE ticker = ? AND "
-            "acceptance_utc IS NOT NULL AND (" +
-            " OR ".join("items LIKE ?" for _ in scheduled_codes) +
-            ") ORDER BY acceptance_utc",
-            (ticker, *[f"%{c}%" for c in scheduled_codes]))], dtype=np.int64)
+        if scheduled_codes:
+            earnings = np.array([r[0] for r in conn.execute(
+                "SELECT acceptance_utc FROM filings WHERE ticker = ? AND "
+                "acceptance_utc IS NOT NULL AND (" +
+                " OR ".join("items LIKE ?" for _ in scheduled_codes) +
+                ") ORDER BY acceptance_utc",
+                (ticker, *[f"%{c}%" for c in scheduled_codes]))], dtype=np.int64)
+        else:
+            # An empty `items.scheduled` means no filing can ever match — the
+            # SQL fragment would otherwise be `AND ()`, a syntax error, for a
+            # config that is a valid (if unusual) choice.
+            earnings = np.array([], dtype=np.int64)
 
         feats = ticker_features(frame, benchmark, filings, earnings, cfg)
         stamps = feats.index.to_numpy()
@@ -375,6 +431,12 @@ def build_matrix(cfg: dict, conn) -> pd.DataFrame:
             block.insert(0, "window_id", e["event_id"])
             out.append(block.reset_index())
 
+    if not out:
+        # Every usable event's window came out empty (e.g. every t0 lands at
+        # or before its ticker's very first bar) — `pd.concat([])` would raise
+        # a raw `ValueError: No objects to concatenate` before the check below
+        # ever ran. Same guard, same message, reached from both routes to it.
+        raise SystemExit("feature matrix is empty — check bar coverage.")
     matrix = pd.concat(out, ignore_index=True)
     if matrix.empty:
         raise SystemExit("feature matrix is empty — check bar coverage.")
@@ -429,6 +491,16 @@ def print_matrix_report(cfg: dict, matrix: pd.DataFrame) -> None:
         elif why is None and col.startswith("ret_"):
             why = f"horizon reaches before the ticker's first bar"
         print(f"  {col:<26}{n:>9,}  ({n/len(matrix):>5.1%})  {why or ''}")
+
+    # NaN is the honest "undefined". +/-inf is not, and `.isna()` above would
+    # never see it (a zero-price bar dividing out to infinity, say) — checked
+    # separately so a builder's missing zero-denominator guard cannot hide in
+    # a report that otherwise reads "every NaN explained".
+    numeric = matrix.select_dtypes(include="number")
+    inf_counts = {col: int(np.isinf(numeric[col].to_numpy(dtype=float)).sum())
+                 for col in numeric.columns}
+    inf_counts = {col: n for col, n in inf_counts.items() if n}
+    assert not inf_counts, f"non-finite values found (a builder's guard is missing): {inf_counts}"
 
     assert (matrix["ts_utc"] < matrix["t0_utc"]).all()
     print(f"\nEvery row is strictly before its t0 — checked, not assumed.")

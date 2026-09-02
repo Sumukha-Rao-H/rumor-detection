@@ -60,11 +60,17 @@ def test_a_spike_is_not_in_its_own_baseline(cfg):
     The baseline behind the spike is ordinary noise, so a 10x hour must score
     far out. If the spike were inside its own window it would inflate the mean
     and standard deviation it is compared against.
+
+    Threshold is 20, not 10: on this exact fixture the leaked version (spike
+    left inside its own baseline) scores ~11.0 — a threshold of 10 would not
+    have caught a deleted `.shift(1)` on its own. 20 sits strictly between the
+    leaked ~11.0 and the correct ~31.8, so this test fails by itself if the
+    shift regresses, without relying on the companion test below.
     """
     n = cfg["features"]["min_baseline_bars"] + 20
     v = list(noisy(n)) + [1e7]
     z = volume_zscore(bars(v), cfg)["volume_z"]
-    assert z.iloc[-1] > 10
+    assert z.iloc[-1] > 20
 
 
 def test_including_the_current_bar_would_damp_the_spike(cfg):

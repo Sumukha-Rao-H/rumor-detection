@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import logging
+from collections import Counter
 from typing import NamedTuple
 
 from src import db
@@ -35,6 +36,15 @@ from src.utils.config import load_config
 log = logging.getLogger(__name__)
 
 HOUR_S = 3600
+
+
+def interval_seconds(interval: str) -> int:
+    """Bar duration in seconds, e.g. '60m' -> 3600, '1d' -> 86400."""
+    unit, n = interval[-1], int(interval[:-1])
+    try:
+        return n * {"m": 60, "h": 3600, "d": 86400}[unit]
+    except KeyError:
+        raise ValueError(f"unrecognized interval: {interval!r}") from None
 
 
 class Move(NamedTuple):
@@ -46,20 +56,46 @@ class Move(NamedTuple):
 
 
 class BarSeries:
-    """Sorted (timestamp, close) for one ticker, with as-of lookups.
+    """Sorted (timestamp, open, close) for one ticker, with as-of lookups.
 
     Loaded once per run: a per-event query over 2.6 million bars would be
     ~15,000 round trips for numbers we already have in memory.
+
+    Bars are keyed by their OPEN time (src/collectors/market.py), each
+    nominally covering [open, open + interval_s). `interval_s` is needed by
+    `at_or_before` to tell a bar that has fully finished trading before `ts`
+    from one that is still live when `ts` happens — see there.
     """
 
-    def __init__(self, rows: list[tuple[int, float]]) -> None:
+    def __init__(self, rows: list[tuple[int, float, float]],
+                interval_s: int) -> None:
         self.ts = [r[0] for r in rows]
-        self.close = [r[1] for r in rows]
+        self.open = [r[1] for r in rows]
+        self.close = [r[2] for r in rows]
+        self.interval_s = interval_s
 
     def at_or_before(self, ts: int) -> float | None:
-        """Close of the last bar at or before `ts` — the pre-news price."""
+        """The pre-news price as of `ts`.
+
+        Two cases, both keyed off the same bar — the last one whose open is
+        at or before `ts` (`bisect_right(self.ts, ts) - 1`):
+
+        - That bar's whole window already finished before `ts`
+          (`open + interval_s <= ts`): its CLOSE is a clean pre-`ts` price.
+        - `ts` falls inside that bar's still-live window, including exactly
+          at its open: the bar's CLOSE reflects trading that happens AFTER
+          `ts` too, so it is not safe to use. Its OPEN is — it is the last
+          price printed at or before the instant `ts` occurs. Using the
+          close here would silently fold part of the real reaction into the
+          "before" side and understate, or erase, the measured move.
+        """
         i = bisect.bisect_right(self.ts, ts)
-        return self.close[i - 1] if i else None
+        if i == 0:
+            return None
+        idx = i - 1
+        if self.ts[idx] + self.interval_s <= ts:
+            return self.close[idx]
+        return self.open[idx]
 
     def at_or_after(self, ts: int) -> float | None:
         """Close of the first bar at or after `ts`.
@@ -73,13 +109,14 @@ class BarSeries:
 
 
 def load_series(conn, interval: str) -> dict[str, BarSeries]:
-    """Every ticker's close series, in one pass over `bars`."""
-    rows: dict[str, list[tuple[int, float]]] = {}
-    for ticker, ts, close in conn.execute(
-            "SELECT ticker, ts_utc, close FROM bars WHERE interval = ? "
+    """Every ticker's open/close series, in one pass over `bars`."""
+    interval_s = interval_seconds(interval)
+    rows: dict[str, list[tuple[int, float, float]]] = {}
+    for ticker, ts, o, close in conn.execute(
+            "SELECT ticker, ts_utc, open, close FROM bars WHERE interval = ? "
             "ORDER BY ticker, ts_utc", (interval,)):
-        rows.setdefault(ticker, []).append((ts, close))
-    return {t: BarSeries(v) for t, v in rows.items()}
+        rows.setdefault(ticker, []).append((ts, o, close))
+    return {t: BarSeries(v, interval_s) for t, v in rows.items()}
 
 
 def measure(cfg: dict, series: dict[str, BarSeries], ticker: str,
@@ -93,6 +130,13 @@ def measure(cfg: dict, series: dict[str, BarSeries], ticker: str,
     bad news on Friday afternoon precisely because the market cannot answer
     until Monday, so deleting that category would be a selection bias, not a
     rounding error.
+
+    Note: there is deliberately no upper bound on how far `at_or_after` may
+    have to look — a multi-week trading halt would silently stretch a "24h"
+    label over however long it takes the market to reopen. Real data tops out
+    at a 4.75-day gap (long weekends/holidays), so this has not bitten in
+    practice; a hard ceiling would need its own exclude_reason and is not
+    implemented here.
     """
     mcfg = cfg["materiality"]
     horizon = t0_utc + mcfg["window_hours"] * HOUR_S
@@ -101,10 +145,10 @@ def measure(cfg: dict, series: dict[str, BarSeries], ticker: str,
     if s is None:
         return Move(None, None, False, "no_bars")
     start = s.at_or_before(t0_utc)
-    if start is None or start <= 0:
+    if start is None or not (start > 0):    # `> 0` also excludes NaN, unlike `<= 0`
         return Move(None, None, False, "no_pre_t0_bar")
     end = s.at_or_after(horizon)
-    if end is None:
+    if end is None or not (end > 0):
         return Move(None, None, False, "no_post_t0_bar")
 
     raw = end / start - 1.0
@@ -114,7 +158,7 @@ def measure(cfg: dict, series: dict[str, BarSeries], ticker: str,
     bench = series.get(cfg["market"]["benchmark"])
     b_start = bench.at_or_before(t0_utc) if bench else None
     b_end = bench.at_or_after(horizon) if bench else None
-    if not b_start or b_end is None:
+    if b_start is None or not (b_start > 0) or b_end is None or not (b_end > 0):
         # Recorded rather than silently treated as adjusted: a raw return
         # labelled benchmark-relative would misstate what was measured.
         return Move(raw, raw, False, None)
@@ -142,7 +186,16 @@ def apply_filter(cfg: dict, conn) -> list[dict]:
 
     out = []
     for r in rows:
-        if r["exclude_reason"]:
+        # The mirror of events.py's owned-vs-preserved rule. A reason from an
+        # UPSTREAM pass (item filtering, coverage, universe) is preserved:
+        # this module is not entitled to overturn it. A reason this module
+        # itself wrote is RE-MEASURED, because the inputs behind it move —
+        # `no_pre_t0_bar` becomes measurable once the market collector
+        # backfills that bar, and `immaterial` flips the moment
+        # `min_abs_return` is retuned. Skipping those re-persisted the first
+        # run's verdict forever, silently freezing the positive count against
+        # data and config that had since changed.
+        if r["exclude_reason"] and r["exclude_reason"] not in _OWNED_REASONS:
             out.append({"event_id": r["event_id"], "abs_return": None,
                         "is_material": 0, "usable": 0,
                         "exclude_reason": r["exclude_reason"]})
@@ -181,21 +234,50 @@ def write_filter(cfg: dict, conn) -> int:
     return usable
 
 
+#: exclude_reasons that `measure()` itself assigns for missing/bad price data,
+#: as opposed to reasons assigned earlier by universe.py/events.py/t0.py. Kept
+#: distinct in `print_report` so "excluded earlier" only ever means the latter.
+_NO_PRICE_REASONS = {"no_bars", "no_pre_t0_bar", "no_post_t0_bar"}
+
+#: Every exclude_reason THIS module writes. `apply_filter` re-measures these
+#: on each run rather than trusting the stored verdict, because both halves
+#: are inputs-dependent: the price reasons resolve when the missing bars are
+#: backfilled, and `immaterial` is a function of `min_abs_return`, a config
+#: knob. Any reason NOT in this set belongs to an earlier pass and is left
+#: exactly as found.
+_OWNED_REASONS = _NO_PRICE_REASONS | {"immaterial"}
+
+
 def print_report(cfg: dict, conn) -> None:
     """The kept/dropped counts the acceptance criterion asks for."""
     mcfg = cfg["materiality"]
     rows = conn.execute(
         "SELECT is_scheduled, usable, abs_return, exclude_reason "
         "FROM events").fetchall()
+    if not rows:
+        raise SystemExit(
+            "no events — run `python -m src.pipeline.t0 --build` and "
+            "`python -m src.pipeline.events` first."
+        )
     usable = [r for r in rows if r["usable"]]
     immaterial = [r for r in rows if r["exclude_reason"] == "immaterial"]
+    no_price = [r for r in rows if r["exclude_reason"] in _NO_PRICE_REASONS]
+    excluded_earlier = [r for r in rows if r["exclude_reason"]
+                        and r["exclude_reason"] not in _NO_PRICE_REASONS
+                        and r["exclude_reason"] != "immaterial"]
 
     print(f"\n=== Materiality ({mcfg['min_abs_return']:.0%} over "
           f"{mcfg['window_hours']}h, "
           f"{'benchmark-relative' if mcfg['benchmark_relative'] else 'raw'}) ===")
     print(f"threshold fixed in config before any model existed — applied as written\n")
-    print(f"events           : {len(rows):,}")
-    print(f"  excluded earlier: {sum(1 for r in rows if r['exclude_reason'] and r['exclude_reason'] != 'immaterial'):,}")
+    print(f"events            : {len(rows):,}")
+    print(f"  excluded earlier: {len(excluded_earlier):,}  "
+          f"(universe/events/t0 gates — decided before this module ran)")
+    print(f"  no price data   : {len(no_price):,}  "
+          f"(this module's own bar lookup found nothing usable)")
+    if no_price:
+        for reason, n in sorted(Counter(r["exclude_reason"] for r in no_price).items()):
+            print(f"    {reason:<15}: {n:,}")
     print(f"  immaterial      : {len(immaterial):,}")
     print(f"  USABLE          : {len(usable):,}  ({len(usable)/len(rows):.1%} of all events)")
 
