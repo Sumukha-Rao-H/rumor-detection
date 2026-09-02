@@ -34,7 +34,15 @@ def ts(iso: str) -> int:
 def window(window_id: str, hours: list[int], t0: int | None,
            flag_at: int | None = None, ticker: str = "AAA",
            is_scheduled=None, item_code=None) -> pd.DataFrame:
-    """One decision window, hand-built so the timestamps are exact."""
+    """One decision window, hand-built so the timestamps are exact.
+
+    `is_scheduled`/`item_code` must be null exactly on quiet windows (the
+    contract enforces this — event metadata only exists when there is an
+    event). So the default here follows `t0`, not a blanket `pd.NA`: a
+    positive window without an explicit override still gets non-null
+    placeholder metadata rather than failing validation.
+    """
+    default_meta = t0 is not None
     return pd.DataFrame({
         "window_id": window_id,
         "ticker": ticker,
@@ -42,8 +50,10 @@ def window(window_id: str, hours: list[int], t0: int | None,
         "t0_utc": pd.NA if t0 is None else t0,
         "score": 0.0,
         "action": [FLAG if h == flag_at else WAIT for h in hours],
-        "is_scheduled": pd.NA if is_scheduled is None else is_scheduled,
-        "item_code": pd.NA if item_code is None else item_code,
+        "is_scheduled": ((False if default_meta else pd.NA)
+                         if is_scheduled is None else is_scheduled),
+        "item_code": (("8.01" if default_meta else pd.NA)
+                      if item_code is None else item_code),
     })
 
 
@@ -70,6 +80,41 @@ def test_overnight_flag_gives_zero_trading_hours(cal) -> None:
     d = detection_delays(df)
     assert d["lead_trading_hours"].iloc[0] == 0.0
     assert d["lead_wall_hours"].iloc[0] == 1.0
+
+
+def test_weekend_gap_matches_hand_computed_trading_hours(cal) -> None:
+    """Independently hand-computed, not just re-derived from the same helper.
+
+    This is exactly the module docstring's own example: flag at 20:00 UTC on
+    an ordinary Friday, t0 at 14:00 UTC the following Monday (no holiday in
+    between). Hand computation using known NYSE regular-session hours in
+    November (EST, UTC-5, so the session runs 14:30-21:00 UTC, no early
+    close that week):
+
+        Friday   20:00 -> 21:00 UTC (close)   = 1.0 trading hour
+        Monday   14:00 UTC is *before* the 14:30 UTC open, so 0 trading
+                 hours have elapsed by t0
+        Saturday, Sunday                       = market shut, 0 hours
+        -----------------------------------------------------------
+        total                                  = 1.0 trading hour
+
+    Wall clock, by hand: Friday 20:00 -> Monday 20:00 is exactly 3 * 24 = 72
+    hours; Monday 14:00 is 6 hours earlier, so 72 - 6 = 66 wall-clock hours.
+
+    2024-11-22 is a Friday and 2024-11-25 the following Monday, an ordinary
+    trading week (Thanksgiving that year is Thursday 2024-11-28, the week
+    after) — confirmed via `cal.is_session` for both dates before relying on
+    them here.
+    """
+    assert cal.is_session("2024-11-22") and cal.is_session("2024-11-25")
+
+    flag_at = ts("2024-11-22 20:00")
+    t0 = ts("2024-11-25 14:00")
+    df = frame(window("w", [flag_at, t0], t0=t0, flag_at=flag_at))
+
+    d = detection_delays(df)
+    assert d["lead_wall_hours"].iloc[0] == pytest.approx(66.0)
+    assert d["lead_trading_hours"].iloc[0] == pytest.approx(1.0)
 
 
 def test_lead_time_matches_trading_hours_between(cal) -> None:

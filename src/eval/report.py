@@ -16,16 +16,30 @@ false alarm is shared across slices rather than belonging to one.
 it would sit at its own operating point, the numbers would not be comparable,
 and a slice where the model is weak would quietly get a looser threshold. One
 live system has one alert budget.
+
+**Alert counts do not sum across the scheduled/unscheduled split — positive
+counts do.** Because a false alarm belongs to no event, `with_quiet` re-attaches
+every quiet window to *both* the `scheduled` and `unscheduled` slices, so a
+false alarm is counted once in each. `n_alerts`, `n_flag_hours`,
+`pct_hours_flagged` and `pct_windows_alerted` for `scheduled` + `unscheduled`
+will therefore generally NOT add up to the pooled `all` row whenever there are
+false alarms. `n_positive` and recall are unaffected — positives are disjoint
+by construction, so `scheduled.n_positive + unscheduled.n_positive ==
+all.n_positive` always holds. Do not sum or weighted-average the alert-count
+columns across this split; read each slice's own precision/recall instead.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 
 import pandas as pd
 
 from src.eval.contract import FLAG, WAIT, actions_from_scores, validate_predictions
 from src.eval.metrics import (
+    ScoresAreNotProbabilities,
+    alert_budget,
     _calibration_summary,
     _delay_summary,
     precision_at_alert_budget,
@@ -33,10 +47,12 @@ from src.eval.metrics import (
 )
 from src.utils.config import load_config
 
+log = logging.getLogger(__name__)
+
 #: Column order the report depends on. Pinned by a test.
 COLUMNS = [
     "slice", "t0_variant", "n_windows", "n_positive", "base_rate",
-    "threshold", "n_alerts", "precision", "recall",
+    "threshold", "n_alerts", "precision", "max_precision", "recall",
     "median_lead_trading_h", "median_lead_wall_h", "n_missed",
     "n_wait_hours", "n_flag_hours", "pct_hours_flagged", "pct_windows_alerted",
     "brier", "brier_skill_score", "ece", "degenerate",
@@ -68,8 +84,20 @@ def slice_frames(df: pd.DataFrame, split_by: list[str] | None = None
 
     See the module docstring: filtering on `is_scheduled` or `item_code`
     directly would delete all the negatives and force precision to 1.0.
+
+    AGENTS.md rule 5 makes the scheduled/unscheduled split non-negotiable —
+    "every number split scheduled vs unscheduled" — so this refuses to run
+    with a `split_by` (from config or passed explicitly) that drops either
+    one, rather than silently emitting a pooled-only report.
     """
     splits = split_by if split_by is not None else load_config()["eval"]["split_by"]
+    missing = {"scheduled", "unscheduled"} - set(splits)
+    if missing:
+        raise ValueError(
+            f"split_by is missing {sorted(missing)} — AGENTS.md rule 5 "
+            "requires every number split scheduled vs unscheduled, so this "
+            "split cannot be dropped. Check config.eval.split_by."
+        )
     quiet = df[df["t0_utc"].isna()]
     positive = df[df["t0_utc"].notna()]
 
@@ -83,10 +111,29 @@ def slice_frames(df: pd.DataFrame, split_by: list[str] | None = None
     if "unscheduled" in splits:
         out["unscheduled"] = with_quiet(positive[positive["is_scheduled"] == False])  # noqa: E712
     if "item_code" in splits:
-        for code in sorted(positive["item_code"].dropna().unique()):
-            out[f"item {code}"] = with_quiet(positive[positive["item_code"] == code])
+        # `item_code` carries a filing's WHOLE item list ("2.02,8.01"), because
+        # an 8-K reports every item it covers. Matching it as one atomic string
+        # gave a multi-item filing its own private bucket ("item 2.02,8.01")
+        # and left it absent from both `item 2.02` and `item 8.01` — and 4,945
+        # of 16,842 events carry more than one code, so that is roughly a
+        # third of the population missing from the per-item breakdown.
+        #
+        # A multi-item filing now contributes to EVERY component item's slice.
+        # Item slices therefore overlap and do not sum to the total, exactly as
+        # the scheduled/unscheduled slices do not once quiet windows are shared
+        # — a per-item breakdown of multi-item filings cannot be a partition.
+        codes = positive["item_code"].dropna().map(_item_codes)
+        for code in sorted({c for row in codes for c in row}):
+            match = codes.map(lambda row, c=code: c in row)
+            out[f"item {code}"] = with_quiet(positive[match.reindex(
+                positive.index, fill_value=False)])
 
     return out
+
+
+def _item_codes(raw: str) -> frozenset[str]:
+    """The individual 8-K item codes inside one stored `item_code` value."""
+    return frozenset(part.strip() for part in str(raw).split(",") if part.strip())
 
 
 def evaluate(df: pd.DataFrame, threshold: float | None = None,
@@ -99,8 +146,7 @@ def evaluate(df: pd.DataFrame, threshold: float | None = None,
     frame = validate_predictions(df)
 
     if threshold is None:
-        budget = precision_at_alert_budget(frame, max_alerts=max_alerts)
-        threshold = budget.threshold
+        threshold = precision_at_alert_budget(frame, max_alerts=max_alerts).threshold
 
     # actions_from_scores only rewrites `action`, and by construction sets at
     # most one FLAG per window, so the result is still contract-valid. From
@@ -116,14 +162,21 @@ def evaluate(df: pd.DataFrame, threshold: float | None = None,
 
     delay = _delay_summary(decided)
     actions = action_distribution(decided)
+    # Sized from the already-validated frame (see `alert_budget`), so the
+    # ceiling costs no extra validation pass. Per-slice on purpose: a slice
+    # with fewer positives has a lower ceiling, and its precision has to be
+    # read against its own.
+    budget_n = alert_budget(frame, max_alerts=max_alerts)
 
     try:
         cal = _calibration_summary(decided)
         brier, skill, ece = cal.brier, cal.brier_skill_score, cal.ece
-    except ValueError:
-        # Scores are not probabilities — a threshold baseline. nan means "not
-        # applicable" here, not "failed"; calibration_summary still refuses
-        # loudly when called directly.
+    except ScoresAreNotProbabilities:
+        # A threshold baseline. nan means "not applicable" here, not "failed";
+        # `_calibration_summary` still refuses loudly when called directly.
+        # Any OTHER error propagates. This used to be a substring match on the
+        # message text, an invisible contract that a reword would have broken
+        # silently; the named type makes it explicit on both sides.
         brier = skill = ece = float("nan")
 
     return {
@@ -133,6 +186,12 @@ def evaluate(df: pd.DataFrame, threshold: float | None = None,
         "threshold": threshold,
         "n_alerts": len(alerted),
         "precision": (tp / len(alerted)) if len(alerted) else float("nan"),
+        # Issue 29, carried beside precision on purpose: the budget is SPENT,
+        # not capped, so when it exceeds the positives available the ceiling
+        # is below 1.0 and precision must be read against it. 15% next to a
+        # 21.2% ceiling is 71% of achievable; 15% alone reads as failure.
+        "max_precision": (min(n_positive, budget_n) / budget_n) if budget_n
+                         else float("nan"),
         "recall": (tp / n_positive) if n_positive else float("nan"),
         "median_lead_trading_h": delay.median_trading_hours,
         "median_lead_wall_h": delay.median_wall_clock_hours,
@@ -167,6 +226,11 @@ def report_table(frames: Mapping[str, pd.DataFrame] | pd.DataFrame,
         threshold = precision_at_alert_budget(frame, max_alerts=max_alerts).threshold
         for name, sliced in slice_frames(frame).items():
             if sliced.empty:
+                log.warning(
+                    "report_table: slice %r (t0_variant=%r) is completely "
+                    "empty (no positives, no quiet windows) — omitting its "
+                    "row rather than reporting on zero data.", name, variant,
+                )
                 continue
             rows.append({"slice": name, "t0_variant": variant,
                          **evaluate(sliced, threshold=threshold)})
@@ -176,13 +240,29 @@ def report_table(frames: Mapping[str, pd.DataFrame] | pd.DataFrame,
 
 def t0_variant_gap(table: pd.DataFrame, metric: str = "median_lead_trading_h",
                    slice_name: str = "all") -> float:
-    """Difference in a metric between the two t0 variants.
+    """Difference in a metric between the two t0 variants: first minus second.
 
     The plan requires both variants and the gap between them to be reported —
     that comparison is itself a small contribution, since it measures how much
-    of the apparent warning was really time the market already knew.
+    of the apparent warning was really time the market already knew. `filing`
+    t0 ignores any news that broke before the filing, so its lead time is the
+    inflated one; `news_adjusted` uses `min(filing, news)` and is the honest
+    figure. The gap is `filing - news_adjusted` so it reads as "how much lead
+    time was fake."
+
+    Which row is "first" and which is "second" is pinned by
+    `config.eval.t0_variants` (its declared order), not by the order rows
+    happen to appear in `table` — that order follows the iteration order of
+    whatever mapping was passed to `report_table`, which is not something a
+    caller should have to control to get a stable sign. If the two variant
+    names in `table` don't match the configured pair, the two names are
+    sorted so the result is still independent of caller/dict ordering — just
+    without the "filing minus news_adjusted" meaning.
     """
-    row = table[table["slice"] == slice_name].set_index("t0_variant")[metric]
-    if len(row) != 2:
+    variants = table[table["slice"] == slice_name].set_index("t0_variant")[metric]
+    if len(variants) != 2:
         return float("nan")
-    return float(row.iloc[0] - row.iloc[1])
+
+    configured = [v for v in load_config()["eval"]["t0_variants"] if v in variants.index]
+    first, second = configured if len(configured) == 2 else sorted(variants.index)
+    return float(variants[first] - variants[second])

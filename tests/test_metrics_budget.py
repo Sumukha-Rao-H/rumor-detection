@@ -105,6 +105,41 @@ def test_budget_exceeding_windows_is_reported_not_hidden() -> None:
     assert r.precision == pytest.approx(r.base_rate)
 
 
+def test_tie_group_at_cutoff_can_overshoot_budget() -> None:
+    """Documented, intentional behavior: ties at the threshold are admitted as
+    a whole group, so `realised_alerts` can exceed `budget_alerts` with no
+    bound. This is not a bug (see the module docstring, `precision_at_alert_budget`),
+    but it was previously untested, so a future change to tie-breaking (e.g.
+    admitting only the first tied window by sort order) could silently change
+    this behavior without any test noticing.
+
+    5 windows, scores [3, 3, 3, 2, 1]; the two positives are the first window
+    (score 3) and the 4th window (score 2). `max_alerts=2` asks for the top 2,
+    but 3 windows tie for the top score, so all 3 are let through:
+
+        budget_alerts   = 2
+        realised_alerts = 3          (the whole 3-way tie at score 3)
+        true_positives  = 1          (only the first tied window is positive)
+        precision       = 1/3
+    """
+    df = pd.DataFrame({
+        "window_id": ["w0", "w1", "w2", "w3", "w4"],
+        "ticker": ["AAA"] * 5,
+        "ts_utc": [1_725_148_800 + i * 3600 for i in range(5)],
+        "t0_utc": [1_725_148_800, pd.NA, pd.NA, 1_725_148_800 + 3 * 3600, pd.NA],
+        "score": [3.0, 3.0, 3.0, 2.0, 1.0],
+        "action": ["WAIT"] * 5,
+        "is_scheduled": [True, pd.NA, pd.NA, True, pd.NA],
+        "item_code": ["8.01", pd.NA, pd.NA, "8.01", pd.NA],
+    })
+    r = precision_at_alert_budget(df, max_alerts=2)
+    assert r.budget_alerts == 2
+    assert r.realised_alerts == 3
+    assert r.true_positives == 1
+    assert r.precision == pytest.approx(1 / 3)
+    assert r.budget_exceeds_windows is False   # this isn't the "budget > n_windows" case
+
+
 def test_zero_budget_raises_no_alerts(frame) -> None:
     """Precision is nan, not 0 — there is nothing to be wrong about."""
     r = precision_at_alert_budget(frame, max_alerts=0)
@@ -180,3 +215,52 @@ def test_base_rate_is_reported_alongside_precision(frame) -> None:
     r = precision_at_alert_budget(frame)
     assert 0 < r.base_rate < 1
     assert r.precision > r.base_rate      # signal_strength=2.0 should beat chance
+
+
+def test_the_ceiling_is_reported_when_the_budget_exceeds_the_positives():
+    """Issue 29, made structural instead of remembered.
+
+    The budget is SPENT, not capped: the top `budget_alerts` windows are
+    flagged, so once the budget exceeds the positives available, every alert
+    beyond the last true positive is a false one by construction and precision
+    cannot reach 1.0 however good the model is. The study's real shape —
+    31,823 alerts against 6,737 positives — puts the ceiling at 21.2%, and a
+    15% result read without it looks like failure rather than 71% of what was
+    achievable.
+
+    Built so the ceiling BITES: 2 positives, a budget of 10.
+    """
+    rows = []
+    for i in range(10):
+        rows.append({
+            "window_id": f"w{i}", "ticker": "AAA", "ts_utc": 1_000 + i,
+            "score": i / 10, "action": "WAIT",
+            "t0_utc": 9_999 if i < 2 else None,
+            "is_scheduled": True if i < 2 else None,
+            "item_code": "8.01" if i < 2 else None,
+        })
+    frame = pd.DataFrame(rows)
+
+    res = precision_at_alert_budget(frame, max_alerts=10)
+
+    assert res.n_positive == 2
+    assert res.budget_alerts == 10
+    # 2 positives / 10 alerts — a flawless detector still scores only 20%.
+    assert res.max_precision == pytest.approx(0.2)
+    assert res.precision <= res.max_precision + 1e-9
+
+
+def test_the_ceiling_is_one_when_positives_outnumber_the_budget():
+    """The other direction: a budget tighter than the positives is not capped
+    by this effect at all, and the ceiling must not spuriously drop below 1."""
+    rows = []
+    for i in range(10):
+        rows.append({
+            "window_id": f"w{i}", "ticker": "AAA", "ts_utc": 1_000 + i,
+            "score": i / 10, "action": "WAIT",
+            "t0_utc": 9_999, "is_scheduled": True, "item_code": "8.01",
+        })
+    res = precision_at_alert_budget(pd.DataFrame(rows), max_alerts=3)
+    assert res.n_positive == 10
+    assert res.budget_alerts == 3
+    assert res.max_precision == pytest.approx(1.0)

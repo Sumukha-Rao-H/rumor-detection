@@ -47,6 +47,7 @@ probabilities.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from src.utils.config import load_config
@@ -95,11 +96,16 @@ def conform(df: pd.DataFrame) -> pd.DataFrame:
     return df.astype(SCHEMA)[list(SCHEMA)]
 
 
+#: Columns that must hold one value per window_id — a window is one episode,
+#: so its t0, ticker and event metadata cannot change hour to hour.
+CONSTANT_PER_WINDOW: tuple[str, ...] = ("t0_utc", "ticker", "is_scheduled", "item_code")
+
+
 def validate_predictions(df: pd.DataFrame) -> pd.DataFrame:
     """Check a prediction frame against the contract. Returns it, conformed.
 
     Raises ValueError naming the offending windows. Beyond dtypes this enforces
-    four project rules, of which the third is the one that matters most:
+    six project rules, of which the third is the one that matters most:
 
     1. every `action` is in `config.decision.actions`
     2. at most one FLAG per window (an episode ends when it flags)
@@ -107,6 +113,11 @@ def validate_predictions(df: pd.DataFrame) -> pd.DataFrame:
        moment when the news was already public, so scoring it is leakage and
        would inflate every lead time
     4. `ts_utc` is unique and sorted within each window
+    5. `t0_utc`, `ticker`, `is_scheduled` and `item_code` are each constant
+       within a window — a window is one episode, so `metrics.py` can safely
+       collapse it to a single label and ticker with `.first()`
+    6. `is_scheduled` and `item_code` are null exactly when `t0_utc` is null
+       (event metadata only exists for positive windows)
     """
     if df.empty:
         raise ValueError("prediction frame is empty — nothing to evaluate")
@@ -117,6 +128,40 @@ def validate_predictions(df: pd.DataFrame) -> pd.DataFrame:
         if out[col].isna().any():
             bad = out.loc[out[col].isna(), "window_id"].unique()[:5]
             raise ValueError(f"{col!r} may not be null; first offending windows: {list(bad)}")
+
+    non_finite = ~np.isfinite(out["score"])
+    if non_finite.any():
+        bad = out.loc[non_finite, "window_id"].unique()[:5]
+        raise ValueError(
+            f"'score' must be finite — +inf/-inf would poison every downstream "
+            f"aggregate (Brier, calibration); first offending windows: {list(bad)}"
+        )
+
+    for col in CONSTANT_PER_WINDOW:
+        nunique = out.groupby("window_id", sort=False)[col].nunique(dropna=False)
+        inconsistent = nunique[nunique > 1]
+        if len(inconsistent):
+            raise ValueError(
+                f"{col!r} must be constant within a window — a window is one "
+                f"episode with one label; offending windows: "
+                f"{list(inconsistent.index[:5])}"
+            )
+
+    mismatched = out["is_scheduled"].isna() != out["t0_utc"].isna()
+    if mismatched.any():
+        bad = out.loc[mismatched, "window_id"].unique()[:5]
+        raise ValueError(
+            f"'is_scheduled' must be null exactly on quiet windows (null "
+            f"t0_utc); first offending windows: {list(bad)}"
+        )
+
+    mismatched = out["item_code"].isna() != out["t0_utc"].isna()
+    if mismatched.any():
+        bad = out.loc[mismatched, "window_id"].unique()[:5]
+        raise ValueError(
+            f"'item_code' must be null exactly on quiet windows (null "
+            f"t0_utc); first offending windows: {list(bad)}"
+        )
 
     allowed = set(allowed_actions())
     unknown = set(out["action"].dropna().unique()) - allowed
@@ -168,13 +213,20 @@ def actions_from_scores(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     there — flagging every subsequent hour too would spend the alert budget
     many times over on one window and make the baseline look far worse than it
     is.
+
+    "First" means first by `ts_utc`, not first by row position — a caller is
+    not required to hand this a frame already sorted within each window, so
+    the crossing is computed on a `ts_utc`-ordered view and the result is
+    reassembled in the caller's original row order.
     """
     out = df.copy()
-    crossed = out["score"] >= threshold
-    first = crossed & ~crossed.groupby(out["window_id"]).cummax().groupby(
-        out["window_id"]
+    chrono = out.sort_values(["window_id", "ts_utc"], kind="stable")
+    crossed = chrono["score"] >= threshold
+    first = crossed & ~crossed.groupby(chrono["window_id"]).cummax().groupby(
+        chrono["window_id"]
     ).shift(1, fill_value=False)
-    out["action"] = pd.Series(
-        [FLAG if f else WAIT for f in first], index=out.index, dtype="string"
+    action = pd.Series(
+        [FLAG if f else WAIT for f in first], index=chrono.index, dtype="string"
     )
+    out["action"] = action.reindex(out.index)
     return out

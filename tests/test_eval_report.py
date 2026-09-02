@@ -79,6 +79,20 @@ def test_sliced_precision_is_not_trivially_one(table) -> None:
         assert p < 1.0, f"{name} precision {p} — the negatives were dropped"
 
 
+def test_scheduled_and_unscheduled_slices_are_not_swapped(frame) -> None:
+    """`test_scheduled_slice_keeps_quiet_windows` is symmetric in `name` and
+    would pass even if the two labels were swapped. This checks content, not
+    just quiet-window counts: the "scheduled" slice's positives must actually
+    be `is_scheduled == True` rows, and "unscheduled" must actually be
+    `is_scheduled == False` rows.
+    """
+    slices = slice_frames(frame)
+    for name, expected in (("scheduled", True), ("unscheduled", False)):
+        positives = slices[name][slices[name]["t0_utc"].notna()]
+        assert len(positives) > 0
+        assert (positives["is_scheduled"] == expected).all(), name
+
+
 def test_naive_slicing_would_give_precision_one(frame) -> None:
     """The wrong implementation, demonstrated.
 
@@ -145,6 +159,26 @@ def test_t0_variant_gap_reports_a_difference() -> None:
     assert not math.isnan(t0_variant_gap(t))
 
 
+def test_t0_variant_gap_sign_is_independent_of_dict_order() -> None:
+    """Same two frames, only the `frames` dict's iteration order differs — the
+    reported gap must have the SAME sign (and value) either way. Regression
+    test for the order-dependent sign bug: `t0_variant_gap` used to read the
+    two variants positionally off however `report_table` happened to append
+    rows, so swapping the caller's dict order flipped the sign.
+    """
+    filing = make_synthetic_predictions(**DENSE, signal_strength=2.0, seed=5)
+    news = make_synthetic_predictions(**DENSE, signal_strength=1.5, seed=5)
+
+    forward = report_table({"filing": filing, "news_adjusted": news})
+    backward = report_table({"news_adjusted": news, "filing": filing})
+
+    gap_forward = t0_variant_gap(forward)
+    gap_backward = t0_variant_gap(backward)
+
+    assert not math.isnan(gap_forward)
+    assert gap_forward == pytest.approx(gap_backward)
+
+
 def test_bare_dataframe_is_treated_as_one_variant(table) -> None:
     assert set(table["t0_variant"]) == {"default"}
 
@@ -209,6 +243,78 @@ def test_split_by_is_read_from_config(frame) -> None:
             assert s in names
 
 
+def test_split_by_without_scheduled_and_unscheduled_is_rejected(frame) -> None:
+    """AGENTS.md rule 5's scheduled/unscheduled split is non-negotiable. If
+    `split_by` (from config, or passed explicitly) drops either name,
+    `slice_frames` must refuse loudly rather than silently emitting a
+    pooled-only report.
+    """
+    with pytest.raises(ValueError, match="scheduled"):
+        slice_frames(frame, split_by=["item_code"])
+    with pytest.raises(ValueError, match="unscheduled"):
+        slice_frames(frame, split_by=["scheduled", "item_code"])
+
+
+def test_report_table_warns_on_a_fully_empty_slice(caplog) -> None:
+    """A slice with zero rows at all (no matching positives, no quiet windows)
+    must be visibly flagged, not silently dropped from the table."""
+    only_scheduled = make_synthetic_predictions(
+        n_positive=6, n_quiet=0, n_tickers=3, span_days=60,
+        signal_strength=2.0, seed=11,
+    ).copy()
+    only_scheduled["is_scheduled"] = True
+
+    with caplog.at_level("WARNING", logger="src.eval.report"):
+        t = report_table(only_scheduled, max_alerts=3)
+
+    assert "unscheduled" not in set(t["slice"])
+    assert any("empty" in r.message for r in caplog.records)
+
+
+def test_all_scheduled_positives_through_report_table() -> None:
+    """All positives scheduled, run through `report_table`'s own per-slice
+    loop (not just `evaluate` directly): the unscheduled slice must reduce to
+    quiet-only (n_positive=0, recall nan), the scheduled slice must match the
+    pooled row.
+    """
+    only_scheduled = make_synthetic_predictions(
+        n_positive=6, n_quiet=200, n_tickers=4, span_days=60,
+        signal_strength=2.0, seed=11,
+    ).copy()
+    only_scheduled["is_scheduled"] = only_scheduled["is_scheduled"].where(
+        only_scheduled["t0_utc"].isna(), True
+    )
+    t = report_table(only_scheduled, max_alerts=3)
+
+    all_row = t[t["slice"] == "all"].iloc[0]
+    sched = t[t["slice"] == "scheduled"].iloc[0]
+    unsched = t[t["slice"] == "unscheduled"].iloc[0]
+
+    assert sched["n_positive"] == all_row["n_positive"]
+    assert unsched["n_positive"] == 0
+    assert math.isnan(unsched["recall"])
+
+
+def test_all_unscheduled_positives_through_report_table() -> None:
+    """Mirror of the all-scheduled case: all positives unscheduled."""
+    only_unscheduled = make_synthetic_predictions(
+        n_positive=6, n_quiet=200, n_tickers=4, span_days=60,
+        signal_strength=2.0, seed=13,
+    ).copy()
+    only_unscheduled["is_scheduled"] = only_unscheduled["is_scheduled"].where(
+        only_unscheduled["t0_utc"].isna(), False
+    )
+    t = report_table(only_unscheduled, max_alerts=3)
+
+    all_row = t[t["slice"] == "all"].iloc[0]
+    sched = t[t["slice"] == "scheduled"].iloc[0]
+    unsched = t[t["slice"] == "unscheduled"].iloc[0]
+
+    assert unsched["n_positive"] == all_row["n_positive"]
+    assert sched["n_positive"] == 0
+    assert math.isnan(sched["recall"])
+
+
 def test_each_slice_is_validated_exactly_once(frame, monkeypatch) -> None:
     """Regression guard for P1-Xb.
 
@@ -261,3 +367,39 @@ def test_public_metric_entry_points_still_validate(frame) -> None:
                reliability_curve, expected_calibration_error, calibration_summary):
         with pytest.raises(ValueError, match="unknown action"):
             fn(bad)
+
+
+def test_a_multi_item_filing_reaches_every_component_item_slice():
+    """An 8-K reports every item it covers, so `item_code` is a LIST.
+
+    Matching that stored string atomically gave "2.02,8.01" its own private
+    bucket and left it out of both `item 2.02` and `item 8.01`. 4,945 of
+    16,842 real events carry more than one code, so roughly a third of the
+    population was missing from the per-item breakdown.
+    """
+    from src.eval.report import slice_frames
+
+    rows = []
+    for wid, code, t0 in (("w-multi", "2.02,8.01", 1_000),
+                          ("w-single", "2.02", 2_000),
+                          ("w-quiet", None, None)):
+        for i in range(3):
+            rows.append({
+                "window_id": wid, "ticker": "AAA", "ts_utc": 100 + i,
+                "score": 0.1 * i, "action": "WAIT",
+                "t0_utc": t0, "is_scheduled": None if t0 is None else True,
+                "item_code": code,
+            })
+    df = pd.DataFrame(rows)
+
+    out = slice_frames(df, split_by=["scheduled", "unscheduled", "item_code"])
+
+    assert "item 2.02" in out and "item 8.01" in out
+    assert "item 2.02,8.01" not in out, "the raw joined string became a bucket"
+
+    def windows(name):
+        f = out[name]
+        return set(f[f["t0_utc"].notna()]["window_id"])
+
+    assert windows("item 2.02") == {"w-multi", "w-single"}
+    assert windows("item 8.01") == {"w-multi"}

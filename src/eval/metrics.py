@@ -27,6 +27,7 @@ flags — so a window alerts if any of its hours crosses the threshold.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, asdict
 
 import numpy as np
@@ -35,6 +36,20 @@ import pandas as pd
 from src.eval.contract import FLAG, validate_predictions
 from src.utils.config import load_config
 from src.utils.timeutils import get_market_calendar, trading_hours_between
+
+
+class ScoresAreNotProbabilities(ValueError):
+    """Calibration was asked for on scores that are not in [0, 1].
+
+    A named type rather than a bare `ValueError`, because `report.py` has to
+    tell this one apart to degrade calibration to nan while still surfacing
+    every other error. It previously did that by matching a substring of the
+    message text — a contract no one could see from either side, which any
+    reword of that message would have silently broken in one direction
+    (crashing every threshold-baseline slice) or the other (swallowing an
+    unrelated ValueError). Subclasses `ValueError` so existing callers that
+    catch that still behave as before.
+    """
 
 
 @dataclass(frozen=True)
@@ -53,6 +68,22 @@ class BudgetResult:
     n_positive: int
     true_positives: int
     precision: float
+    #: What a FLAWLESS detector would score here (issue 29). The budget is
+    #: spent, not capped — the top `budget_alerts` windows are flagged — so
+    #: when the budget exceeds the number of positives, precision cannot reach
+    #: 1.0 no matter how good the model is: every alert beyond the last true
+    #: positive is a false one by construction. On this study 31,823 alerts
+    #: against 6,737 positives puts the ceiling at 21.2%.
+    #:
+    #: Computed rather than remembered. It was a sentence in the tracker
+    #: saying "the report must state the ceiling", which is exactly the kind
+    #: of thing that is true right up until the one run where nobody
+    #: remembers — and then a respectable 15% reads as failure instead of as
+    #: 71% of what was achievable. The budget itself is deliberately NOT
+    #: adjusted to raise it: 2 alerts/stock/month is an operational constraint
+    #: fixed before any model existed, and tuning it now is what the "no
+    #: threshold changes after seeing the result" rule forbids.
+    max_precision: float
     recall: float
     base_rate: float            # reported so precision can be read in context
     budget_exceeds_windows: bool
@@ -102,6 +133,28 @@ def window_summary(df: pd.DataFrame) -> pd.DataFrame:
     })
 
 
+def alert_budget(frame: pd.DataFrame, rate: float | None = None,
+                 max_alerts: int | None = None) -> int:
+    """How many alerts the budget allows on an ALREADY-VALIDATED frame.
+
+    Split out so `report.py` can size the ceiling without paying for a second
+    `validate_predictions` pass over every slice — P1-Xb deliberately
+    validates once per slice, and a test pins that. Duplicating the arithmetic
+    there instead would put the rounding rule below in two files, free to
+    drift apart.
+    """
+    if rate is None:
+        rate = load_config()["eval"]["alert_budget_per_stock_per_month"]
+    # Round-half-up, not Python's round-half-to-even: `round()` would send a
+    # non-default `budget_per_stock_per_month` override of exactly .5 to the
+    # nearest *even* integer (round(4.5) == 4, round(5.5) == 6), which is a
+    # silent trap for a tuning-curve sweep over fractional rates. The default
+    # config rate is an integer, so this never fires on the production path.
+    budget = (int(max_alerts) if max_alerts is not None
+              else int(math.floor(ticker_months(frame) * rate + 0.5)))
+    return max(0, budget)
+
+
 def precision_at_alert_budget(
     df: pd.DataFrame,
     budget_per_stock_per_month: float | None = None,
@@ -125,9 +178,7 @@ def precision_at_alert_budget(
     n_windows = len(windows)
     n_positive = int(windows["is_positive"].sum())
     months = ticker_months(frame)
-
-    budget = int(max_alerts) if max_alerts is not None else int(round(months * rate))
-    budget = max(0, budget)
+    budget = alert_budget(frame, rate, max_alerts)
     exceeds = budget >= n_windows
 
     # Highest peaks first; the allowance buys the top `budget` windows. Ties at
@@ -155,6 +206,12 @@ def precision_at_alert_budget(
         n_windows=n_windows,
         n_positive=n_positive,
         true_positives=tp,
+        # A flawless detector ranks every positive above every negative, so it
+        # catches min(n_positive, budget) of them and still spends the whole
+        # budget. Guarded against a zero budget, which would otherwise make
+        # the ceiling nan and quietly disappear from the report.
+        max_precision=(min(n_positive, budget) / budget) if budget
+                      else float("nan"),
         precision=(tp / realised) if realised else float("nan"),
         recall=(tp / n_positive) if n_positive else float("nan"),
         base_rate=(n_positive / n_windows) if n_windows else float("nan"),
@@ -310,7 +367,7 @@ def _probabilities_and_labels(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarr
     p = frame["score"].to_numpy(dtype=float)
 
     if p.size and (p.min() < 0.0 or p.max() > 1.0):
-        raise ValueError(
+        raise ScoresAreNotProbabilities(
             f"calibration needs probabilities, but scores range "
             f"[{p.min():.3f}, {p.max():.3f}]. A z-score baseline has no "
             f"calibration — that is a statement about its output, not a "
@@ -347,7 +404,7 @@ def reliability_curve(df: pd.DataFrame, n_bins: int | None = None) -> pd.DataFra
 def _reliability_curve(frame: pd.DataFrame, n_bins: int | None = None) -> pd.DataFrame:
     """`reliability_curve` on an already-validated frame."""
     p, y = _probabilities_and_labels(frame)
-    bins = n_bins or load_config()["eval"]["calibration_bins"]
+    bins = n_bins if n_bins is not None else load_config()["eval"]["calibration_bins"]
 
     idx = np.minimum((p * bins).astype(int), bins - 1)
     rows = []
@@ -401,7 +458,7 @@ def _calibration_summary(frame: pd.DataFrame,
                          n_bins: int | None = None) -> CalibrationResult:
     """`calibration_summary` on an already-validated frame."""
     p, y = _probabilities_and_labels(frame)
-    bins = n_bins or load_config()["eval"]["calibration_bins"]
+    bins = n_bins if n_bins is not None else load_config()["eval"]["calibration_bins"]
 
     base = float(y.mean()) if y.size else float("nan")
     brier = float(np.mean((p - y) ** 2)) if p.size else float("nan")

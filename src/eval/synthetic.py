@@ -66,6 +66,15 @@ def make_synthetic_predictions(
     # Every column is built once across all windows and flattened row-major, so
     # each window's hours stay contiguous and ascending. Building one small
     # frame per window and concatenating them cost ~0.8 s at 1,500 windows.
+    # [horizon .. 1] — stops one hour before t0, deliberately: this mirrors
+    # src/pipeline/features.py, whose window is STRICTLY before t0
+    # (test_stricter_than_the_evaluation_contract), so `ts_utc == t0_utc`
+    # never appears in a real feature matrix either. contract.py's leakage
+    # check allows that boundary (`ts_utc <= t0_utc`) for defensiveness, but
+    # nothing production emits reaches it, so this generator does not
+    # manufacture it — doing so would make "shaped exactly like a real one"
+    # false. The boundary is exercised by a hand-mutated row in
+    # test_row_exactly_at_t0_is_allowed instead.
     hours_to_t0 = np.arange(horizon, 0, -1)          # [horizon .. 1]
     ramp = signal_strength * (1.0 - hours_to_t0 / horizon)
 

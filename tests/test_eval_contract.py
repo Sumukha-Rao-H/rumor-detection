@@ -130,6 +130,66 @@ def test_row_scored_after_t0_is_rejected(frame) -> None:
         validate_predictions(df)
 
 
+@pytest.mark.parametrize("column", ["t0_utc", "ticker", "is_scheduled", "item_code"])
+def test_inconsistent_value_within_a_window_is_rejected(frame, column) -> None:
+    """A window is one episode: t0, ticker and event metadata cannot change
+    hour to hour. Corrupts exactly what `metrics.py` collapses with
+    `.first()` per window, so this must be caught here, not there."""
+    df = frame.copy()
+    # a positive window has non-null t0_utc/is_scheduled/item_code to mutate
+    pos_window = df.loc[df["t0_utc"].notna(), "window_id"].iloc[0]
+    idx = df.index[df["window_id"] == pos_window]
+    assert len(idx) >= 2
+
+    if column == "t0_utc":
+        df.loc[idx[0], column] = df.loc[idx[0], column] + HOUR
+    elif column == "ticker":
+        df.loc[idx[0], column] = "SOMEOTHERTICKER"
+    elif column == "is_scheduled":
+        df.loc[idx[0], column] = not bool(df.loc[idx[1], column])
+    elif column == "item_code":
+        df.loc[idx[0], column] = "9.99"
+
+    with pytest.raises(ValueError, match=f"{column!r} must be constant"):
+        validate_predictions(df)
+
+
+def test_is_scheduled_null_on_a_positive_window_is_rejected(frame) -> None:
+    """Event metadata missing on a window that has a t0 — the design doc calls
+    mixed null/non-null `is_scheduled` within one window a bug."""
+    df = frame.copy()
+    pos_window = df.loc[df["t0_utc"].notna(), "window_id"].iloc[0]
+    idx = df.index[df["window_id"] == pos_window]
+    df.loc[idx, "is_scheduled"] = pd.NA
+    with pytest.raises(ValueError, match="'is_scheduled' must be null exactly"):
+        validate_predictions(df)
+
+
+def test_item_code_present_on_a_quiet_window_is_rejected(frame) -> None:
+    """Event metadata present on a window that has no t0 — a quiet window
+    cannot also carry an item code."""
+    df = frame.copy()
+    quiet_window = df.loc[df["t0_utc"].isna(), "window_id"].iloc[0]
+    idx = df.index[df["window_id"] == quiet_window]
+    df.loc[idx, "item_code"] = "5.02"
+    with pytest.raises(ValueError, match="'item_code' must be null exactly"):
+        validate_predictions(df)
+
+
+def test_infinite_score_is_rejected(frame) -> None:
+    """+inf/-inf would poison Brier and calibration aggregates downstream;
+    pd.isna() does not flag it, so it needs its own check."""
+    df = frame.copy()
+    df.loc[df.index[0], "score"] = float("inf")
+    with pytest.raises(ValueError, match="must be finite"):
+        validate_predictions(df)
+
+    df = frame.copy()
+    df.loc[df.index[0], "score"] = float("-inf")
+    with pytest.raises(ValueError, match="must be finite"):
+        validate_predictions(df)
+
+
 def test_row_exactly_at_t0_is_allowed(frame) -> None:
     """t0 itself is the last decidable hour — the boundary is inclusive."""
     df = frame.copy()
@@ -178,6 +238,34 @@ def test_actions_from_scores_flags_first_crossing_only(frame) -> None:
     per_window = out[out["action"] == FLAG].groupby("window_id").size()
     assert (per_window <= 1).all()
     validate_predictions(out)
+
+
+def test_actions_from_scores_flags_the_chronologically_first_crossing(frame) -> None:
+    """The docstring promises the FIRST hour at or above threshold — first by
+    `ts_utc`, not first by row position. A frame whose rows are not already
+    time-sorted (built ticker-major, or reshaped) must still flag the
+    earliest hour, not whichever crossing happens to appear first in the
+    frame."""
+    df = pd.DataFrame({
+        "window_id": ["w1", "w1", "w1"],
+        "ticker": ["TKR000"] * 3,
+        "ts_utc": pd.array([200, 100, 300], dtype="Int64"),  # out of order
+        "t0_utc": pd.array([pd.NA, pd.NA, pd.NA], dtype="Int64"),
+        "score": [5.0, 5.0, 0.0],
+        "action": pd.array([WAIT, WAIT, WAIT], dtype="string"),
+        "is_scheduled": pd.array([pd.NA, pd.NA, pd.NA], dtype="boolean"),
+        "item_code": pd.array([pd.NA, pd.NA, pd.NA], dtype="string"),
+    })
+    out = actions_from_scores(df, threshold=1.0)
+
+    flagged = out.loc[out["action"] == FLAG]
+    assert len(flagged) == 1
+    assert flagged["ts_utc"].iloc[0] == 100, (
+        "ts_utc=100 crosses first chronologically; flagging ts_utc=200 (which "
+        "merely appears first in the frame) would be the row-order bug"
+    )
+    # row order is preserved — actions_from_scores must not reshuffle its input
+    assert list(out["ts_utc"]) == [200, 100, 300]
 
 
 def test_actions_from_scores_flags_nothing_when_threshold_unreachable(frame) -> None:
