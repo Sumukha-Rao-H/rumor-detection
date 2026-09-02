@@ -381,3 +381,307 @@ def test_data_migrations_run_once(tmp_path):
         "SELECT key FROM meta WHERE key LIKE 'migration:%'")]
     assert len(keys) == len(set(keys)) == len(db.DATA_MIGRATIONS)
     conn.close()
+
+
+# --------------------------------------------------------------------------
+# news.url as sole PK — the cross-unit fix, and its migration
+# --------------------------------------------------------------------------
+
+def test_news_url_shared_across_two_tickers_both_stored(conn):
+    """The regression test for the news.url PK bug.
+
+    Before the fix, `news.url` was the sole primary key and `upsert_news`'s
+    `ON CONFLICT(url)` never touched `ticker` — a URL relevant to two tickers
+    (a joint release, a wire story naming both companies) silently kept only
+    whichever ticker got there first. The second ticker's `earliest_news_ts`
+    call saw nothing and t0 quietly fell back to filing time. The PK is now
+    (url, ticker), so both associations are stored.
+    """
+    shared = "https://reuters.com/aapl-msft-joint-venture"
+    db.upsert_news(conn, [_news(shared, ticker="AAPL", published_utc=1_750_000_000)])
+    db.upsert_news(conn, [_news(shared, ticker="MSFT", published_utc=1_750_000_000)])
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM news WHERE url = ?", (shared,)
+    ).fetchone()[0] == 2
+
+    lo, hi = 1_749_000_000, 1_751_000_000
+    assert db.earliest_news_ts(conn, "AAPL", lo, hi) == 1_750_000_000
+    assert db.earliest_news_ts(conn, "MSFT", lo, hi) == 1_750_000_000
+
+
+def test_migration_upgrades_news_to_composite_pk(tmp_path):
+    """An existing DB built under the old url-only-PK schema must be rebuilt
+    to (url, ticker) on connect, without losing the row already stored, and
+    the rebuilt table must actually accept a second ticker for the same url
+    afterward — the whole point of the fix.
+    """
+    import sqlite3
+
+    path = tmp_path / "old_pk.db"
+    raw = sqlite3.connect(path)
+    raw.executescript("""
+        CREATE TABLE news (
+          url TEXT PRIMARY KEY, ticker TEXT, title TEXT, source_domain TEXT,
+          source_name TEXT, source_tier INTEGER, published_utc INTEGER,
+          seen_utc INTEGER, fetched_utc INTEGER, api TEXT
+        );
+        INSERT INTO news VALUES
+          ('https://x/1','AAPL','t',NULL,NULL,1,1700000000,NULL,0,'finnhub');
+    """)
+    raw.commit()
+    raw.close()
+
+    conn = db.get_conn(path)
+    cols = {row[1]: row[5] for row in conn.execute("PRAGMA table_info(news)")}
+    assert cols["ticker"] != 0, "ticker must now be part of the primary key"
+    assert conn.execute("SELECT COUNT(*) FROM news").fetchone()[0] == 1, \
+        "the rebuild must not lose the pre-existing row"
+    row = conn.execute("SELECT ticker, published_utc FROM news").fetchone()
+    assert (row["ticker"], row["published_utc"]) == ("AAPL", 1700000000)
+
+    n = db.upsert_news(conn, [_news("https://x/1", ticker="MSFT",
+                                    published_utc=1700000000)])
+    assert n == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM news WHERE url='https://x/1'"
+    ).fetchone()[0] == 2
+    conn.close()
+
+
+def test_migration_upgrade_of_news_pk_is_idempotent(tmp_path):
+    """Reconnecting to an already-upgraded DB must not try to rebuild again."""
+    import sqlite3
+
+    path = tmp_path / "old_pk2.db"
+    raw = sqlite3.connect(path)
+    raw.executescript("""
+        CREATE TABLE news (
+          url TEXT PRIMARY KEY, ticker TEXT, title TEXT, source_domain TEXT,
+          source_name TEXT, source_tier INTEGER, published_utc INTEGER,
+          seen_utc INTEGER, fetched_utc INTEGER, api TEXT
+        );
+    """)
+    raw.commit()
+    raw.close()
+
+    for _ in range(3):
+        conn = db.get_conn(path)
+        cols = {row[1]: row[5] for row in conn.execute("PRAGMA table_info(news)")}
+        assert cols["ticker"] != 0
+        conn.close()
+
+
+# --------------------------------------------------------------------------
+# get_conn: read-only mode, busy_timeout
+# --------------------------------------------------------------------------
+
+def test_get_conn_readonly_requires_existing_file(tmp_path):
+    """No fabricated decoy DB. This is the exact bug this audit found: passing
+    a `mode=ro` URI straight to the old `get_conn` silently built a brand-new
+    empty database at a bogus path instead of erroring."""
+    missing = tmp_path / "nope.db"
+    with pytest.raises(FileNotFoundError):
+        db.get_conn(missing, readonly=True)
+    assert not missing.exists()
+    assert list(tmp_path.iterdir()) == [], \
+        "readonly must never create the file, a parent dir, or a stray path"
+
+
+def test_get_conn_readonly_reads_existing_data_and_cannot_write(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "ro.db"
+    seed = db.get_conn(path)
+    db.upsert_companies(seed, [make_company()])
+    seed.close()
+
+    ro = db.get_conn(path, readonly=True)
+    assert ro.execute("SELECT COUNT(*) FROM companies").fetchone()[0] == 1
+    with pytest.raises(sqlite3.OperationalError):
+        ro.execute("INSERT INTO meta (key, value, updated_utc) VALUES ('x','y',0)")
+    ro.close()
+
+
+def test_busy_timeout_is_set(conn, tmp_path):
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == db.BUSY_TIMEOUT_MS
+
+    path = tmp_path / "ro3.db"
+    db.get_conn(path).close()
+    ro = db.get_conn(path, readonly=True)
+    assert ro.execute("PRAGMA busy_timeout").fetchone()[0] == db.BUSY_TIMEOUT_MS
+    ro.close()
+
+
+# --------------------------------------------------------------------------
+# transactional upserts — no partial writes surviving a caught failure
+# --------------------------------------------------------------------------
+
+def test_failed_batch_upsert_rolls_back_partial_rows(conn):
+    """Regression for the cross-commit partial-write bug.
+
+    Before the fix, a batch that raised partway through left the rows that
+    had already succeeded sitting in this connection's implicit transaction —
+    invisible until something else on the SAME connection called commit(),
+    at which point they were silently, permanently written even though the
+    whole call had been caught as a failure. Collectors do exactly that:
+    market.py/edgar.py's per-item exception handlers call
+    set_fetch_state(..., "failed", ...) right after, which itself commits.
+    """
+    import sqlite3
+
+    bad_batch = [
+        make_company(cik="1", ticker="BBB"),
+        make_company(cik="2", ticker="CCC"),
+        make_company(cik="3", ticker=None),   # NOT NULL violation
+    ]
+    with pytest.raises(sqlite3.IntegrityError):
+        db.upsert_companies(conn, bad_batch)
+
+    # Exactly what a collector's exception handler does next.
+    db.set_fetch_state(conn, "edgar", "some-key", "failed", error="boom")
+
+    assert conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0] == 0, \
+        "cik 1 and 2 must not have survived a batch that raised on cik 3"
+
+
+# --------------------------------------------------------------------------
+# upsert_bars — return-value contract and overwrite policy
+# --------------------------------------------------------------------------
+
+def test_upsert_bars_return_value_matches_sibling_upserts(conn):
+    """rows_written=0 must mean genuinely nothing new, same as every other
+    upsert — market.py's zero-record guard and fetch_state's own documented
+    contract depend on this."""
+    row = ("TSLA", 1_750_000_000, 1, 2, 0.5, 1.5, 1000, "60m")
+    assert db.upsert_bars(conn, [row]) == 1
+    assert db.upsert_bars(conn, [row]) == 0, \
+        "an unchanged re-fetch must report zero new rows, not the raw rowcount"
+
+
+def test_upsert_bars_overwrites_changed_ohlcv(conn):
+    """Documented, tested policy: unlike companies/news, bars OVERWRITE on
+    conflict. A corrected close/volume from a re-fetch must replace the
+    stored value, not be ignored."""
+    key = ("TSLA", 1_750_000_000)
+    db.upsert_bars(conn, [(*key, 1, 2, 0.5, 1.5, 1000, "60m")])
+    db.upsert_bars(conn, [(*key, 1, 2, 0.5, 1.8, 950, "60m")])
+    row = conn.execute(
+        "SELECT close, volume FROM bars WHERE ticker = ? AND ts_utc = ?", key
+    ).fetchone()
+    assert (row["close"], row["volume"]) == (1.8, 950)
+
+
+# --------------------------------------------------------------------------
+# company_name — deterministic tie-break against predecessor rows
+# --------------------------------------------------------------------------
+
+def test_company_name_prefers_live_row_over_predecessor(conn):
+    db.upsert_companies(conn, [make_company(cik="1", ticker="ZZZ", name="NewCo")])
+    db.upsert_companies(conn, [make_company(cik="2", ticker="ZZZ", name="OldCo",
+                                            successor_cik="1")])
+    assert db.company_name(conn, "ZZZ") == "NewCo"
+
+
+def test_company_name_falls_back_to_predecessor_if_live_row_unnamed(conn):
+    db.upsert_companies(conn, [make_company(cik="1", ticker="ZZZ", name=None)])
+    db.upsert_companies(conn, [make_company(cik="2", ticker="ZZZ", name="OldCo",
+                                            successor_cik="1")])
+    assert db.company_name(conn, "ZZZ") == "OldCo"
+
+
+# --------------------------------------------------------------------------
+# previously untested public functions
+# --------------------------------------------------------------------------
+
+def test_real_company_count_excludes_predecessors(conn):
+    db.upsert_companies(conn, [make_company(cik="1", ticker="AAA")])
+    db.upsert_companies(conn, [make_company(cik="2", ticker="AAA", successor_cik="1")])
+    assert db.real_company_count(conn) == 1
+
+
+def test_candidate_tickers_dedupes_predecessor_rows(conn):
+    db.upsert_companies(conn, [make_company(cik="1", ticker="AAA"),
+                               make_company(cik="3", ticker="BBB")])
+    db.upsert_companies(conn, [make_company(cik="2", ticker="AAA", successor_cik="1")])
+    assert db.candidate_tickers(conn) == ["AAA", "BBB"]
+
+
+def test_companies_for_collection_all_and_subset(conn):
+    db.upsert_companies(conn, [make_company(cik="1", ticker="AAA"),
+                               make_company(cik="2", ticker="BBB")])
+    assert [r["ticker"] for r in db.companies_for_collection(conn)] == ["AAA", "BBB"]
+    assert [r["ticker"] for r in
+            db.companies_for_collection(conn, ["BBB"])] == ["BBB"]
+
+
+def test_clear_and_set_universe_flags(conn):
+    db.upsert_companies(conn, [make_company(cik="1", ticker="AAA", in_universe=1,
+                                            adv_usd=5.0, last_price=9.0,
+                                            universe_as_of=100)])
+    assert db.clear_universe_flags(conn) == 1
+    row = conn.execute(
+        "SELECT in_universe, adv_usd, last_price, universe_as_of FROM companies"
+    ).fetchone()
+    assert tuple(row) == (0, None, None, None)
+
+    n = db.set_universe_flags(conn, [
+        {"ticker": "AAA", "adv_usd": 12.0, "last_price": 20.0, "as_of_utc": 200},
+    ])
+    assert n == 1
+    row = conn.execute("SELECT in_universe, adv_usd FROM companies").fetchone()
+    assert (row["in_universe"], row["adv_usd"]) == (1, 12.0)
+
+
+def test_set_universe_flags_skips_predecessor_rows(conn):
+    db.upsert_companies(conn, [make_company(cik="1", ticker="AAA", in_universe=0)])
+    db.upsert_companies(conn, [make_company(cik="2", ticker="AAA", in_universe=0,
+                                            successor_cik="1")])
+    n = db.set_universe_flags(conn, [
+        {"ticker": "AAA", "adv_usd": 1.0, "last_price": 2.0, "as_of_utc": 3},
+    ])
+    assert n == 1   # only the live row, not the predecessor
+    rows = {r["cik"]: r["in_universe"] for r in
+            conn.execute("SELECT cik, in_universe FROM companies")}
+    assert rows == {"1": 1, "2": 0}
+
+
+def test_tickers_with_filings_before_cutoff(conn):
+    db.upsert_filings(conn, [
+        make_filing(acc="a1", ticker="AAA", form="8-K", acceptance_utc=1000),
+        make_filing(acc="a2", ticker="BBB", form="8-K", acceptance_utc=5000),
+    ])
+    assert db.tickers_with_filings_before(conn, 2000, ["8-K"]) == {"AAA"}
+    assert db.tickers_with_filings_before(conn, 6000, ["8-K"]) == {"AAA", "BBB"}
+
+
+def test_filings_in_window_and_acceptance_times(conn):
+    db.upsert_filings(conn, [
+        make_filing(acc="a1", ticker="AAA", acceptance_utc=1000, items="2.02"),
+        make_filing(acc="a2", ticker="BBB", acceptance_utc=5000, items="1.01"),
+        make_filing(acc="a3", ticker="CCC", acceptance_utc=9000, items="9.01"),
+    ])
+    rows = db.filings_in_window(conn, 500, 6000, ["8-K"])
+    assert [r["accession_no"] for r in rows] == ["a1", "a2"]
+    assert db.filing_acceptance_times(conn, 500, 6000, ["8-K"]) == [
+        ("AAA", 1000), ("BBB", 5000)]
+
+
+def test_bar_coverage_grouped_by_ticker(conn):
+    db.upsert_bars(conn, [
+        ("AAA", 100, 1, 1, 1, 1, 1, "60m"),
+        ("AAA", 300, 1, 1, 1, 1, 1, "60m"),
+        ("BBB", 200, 1, 1, 1, 1, 1, "60m"),
+    ])
+    assert db.bar_coverage(conn, "60m") == {"AAA": (100, 300, 2), "BBB": (200, 200, 1)}
+
+
+def test_fetch_state_status_queries(conn):
+    db.set_fetch_state(conn, "edgar", "k1", "ok", records=3, rows_written=3)
+    db.set_fetch_state(conn, "edgar", "k2", "failed", error="boom")
+    assert db.completed_keys(conn, "edgar") == {"k1"}
+    assert db.keys_with_status(conn, "edgar", "failed") == {"k2"}
+    # re-running with a new outcome overwrites in place, never duplicates
+    db.set_fetch_state(conn, "edgar", "k2", "ok", records=1, rows_written=1)
+    assert db.completed_keys(conn, "edgar") == {"k1", "k2"}
+    assert conn.execute("SELECT COUNT(*) FROM fetch_state").fetchone()[0] == 2

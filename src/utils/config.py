@@ -20,8 +20,18 @@ DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "config.yaml"
 
 @lru_cache(maxsize=4)
 def _read_config(cfg_path: Path) -> dict:
-    """Parse config.yaml once per path. See `load_config` for why."""
-    load_dotenv(REPO_ROOT / ".env")
+    """Parse config.yaml once per path. See `load_config` for why.
+
+    `load_dotenv` runs here as a side effect of the FIRST `load_config()`
+    call anywhere in the process — including from code that only wants
+    `market.calendar` or some other non-secret key — because this is cached
+    to run once. `override=False` is passed explicitly (it is already
+    python-dotenv's default) so this can never clobber a value a test has
+    already set with `monkeypatch.setenv`; a test that instead needs a key to
+    be ABSENT must `monkeypatch.delenv` at test time, since nothing here
+    stops `.env` from having populated it earlier in the process.
+    """
+    load_dotenv(REPO_ROOT / ".env", override=False)
     with open(cfg_path, encoding="utf-8") as fh:
         cfg = yaml.safe_load(fh)
     for key, value in cfg.get("paths", {}).items():

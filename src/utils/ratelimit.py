@@ -31,8 +31,21 @@ class RateLimiter:
 class Backoff:
     """Exponential backoff: 60s, 120s, 240s, ... capped; reset on success."""
 
-    def __init__(self, base_s: float = 60.0, cap_s: float = 3600.0):
+    def __init__(self, base_s: float = 60.0, cap_s: float | None = None):
+        """`cap_s` defaults to `ratelimit.backoff_cap_s` in config.yaml — never
+        a hardcoded ceiling — so callers that just do `Backoff(base_s=...)`
+        (every current one) still get a config-driven cap rather than a bare
+        Python default. Config is imported lazily, matching
+        `timeutils.get_market_calendar`, so importing this module never
+        requires a config file to exist and reading config is never a side
+        effect of an import. Pass `cap_s` explicitly to override it (e.g. in
+        tests) without touching config.
+        """
         self.base_s = base_s
+        if cap_s is None:
+            from src.utils.config import load_config
+
+            cap_s = load_config()["ratelimit"]["backoff_cap_s"]
         self.cap_s = cap_s
         self.failures = 0
 

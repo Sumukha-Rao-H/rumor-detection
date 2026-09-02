@@ -205,7 +205,59 @@ def trading_hours_between(start_ts: int | float, end_ts: int | float,
         if not (cal.first_minute <= t <= cal.last_minute):
             raise _out_of_range(cal, t)
 
-    # minutes_in_range is inclusive at BOTH ends, so querying to `b - 1 minute`
-    # is what makes the span half-open.
-    minutes = len(cal.minutes_in_range(a, b - pd.Timedelta(minutes=1)))
-    return minutes / 60.0
+    # `exchange_calendars` only knows whole trading minutes — it has no notion
+    # of a fraction of a minute. Real timestamps in this project (EDGAR
+    # acceptanceDateTime, news article times) carry seconds, so `a` and `b`
+    # are not, in general, minute-aligned, and the sub-minute remainder at
+    # each end has to be handled by hand rather than handed to the library.
+    #
+    # A previous version asked `minutes_in_range(a, b - 1 minute)` for a
+    # half-open span. That is only a correct way to exclude `b`'s minute when
+    # `a` and `b` are themselves exactly on minute boundaries: internally,
+    # `exchange_calendars` FLOORS any sub-minute timestamp to its containing
+    # minute before comparing (see `calendar_helpers.parse_timestamp`, which
+    # floors because this calendar's `side` is "left"). That floors `b - 1
+    # minute` right back down whenever `b` itself isn't aligned, which can
+    # even push it before `a` and silently return 0 minutes for a span that
+    # was open the whole time — or, the other direction, floors `a` and `b`
+    # to their own minutes and then counts each of those minutes as whole,
+    # overcounting a sub-minute span that merely touches two different
+    # minutes. Neither direction is a rounding error; both are wrong answers.
+    #
+    # The correct decomposition treats `a`'s minute and `b`'s minute as
+    # special and sums three pieces:
+    #   1. the open seconds remaining in `a`'s own minute (from `a` to the
+    #      start of the next minute), counted only if `a`'s minute is itself
+    #      a trading minute;
+    #   2. every whole trading minute strictly between `a`'s minute and `b`'s
+    #      minute — this is exactly what `minutes_in_range` is for, since
+    #      both endpoints here ARE minute-aligned;
+    #   3. the open seconds already elapsed in `b`'s own minute (from the
+    #      start of that minute to `b`), counted only if `b`'s minute is
+    #      itself a trading minute.
+    # When `a` and `b` fall in the same minute, only that one (possibly
+    # partial) minute matters. When `a` and `b` are both exactly minute-
+    # aligned (the case every previous test exercised), this reduces to
+    # exactly the old behaviour: piece 1 contributes a's minute in full,
+    # piece 3 contributes nothing from b's minute, and piece 2 is the whole
+    # minutes strictly in between — the same count as before.
+    one_minute = pd.Timedelta(minutes=1)
+    a_minute = a.floor("min")
+    b_minute = b.floor("min")
+
+    if a_minute == b_minute:
+        seconds = (b - a).total_seconds() if cal.is_trading_minute(a_minute) else 0.0
+        return seconds / 3600.0
+
+    seconds = 0.0
+    if cal.is_trading_minute(a_minute):
+        seconds += (a_minute + one_minute - a).total_seconds()
+    if cal.is_trading_minute(b_minute):
+        seconds += (b - b_minute).total_seconds()
+
+    between_start = a_minute + one_minute
+    between_end = b_minute - one_minute
+    if between_start <= between_end:
+        seconds += len(cal.minutes_in_range(between_start, between_end)) * 60.0
+
+    return seconds / 3600.0

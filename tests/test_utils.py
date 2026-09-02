@@ -7,7 +7,7 @@ import pytest
 
 from src.utils import timeutils
 from src.utils.config import load_config
-from src.utils.ratelimit import RateLimiter
+from src.utils.ratelimit import Backoff, RateLimiter
 
 
 def test_gdelt_roundtrip():
@@ -31,6 +31,57 @@ def test_rate_limiter_enforces_interval():
     assert time.monotonic() - start >= 0.09  # 2 enforced gaps
 
 
+def test_backoff_grows_exponentially(monkeypatch):
+    """60, 120, 240, ... per the docstring — checked against the actual
+    sleep durations requested, not just internal state."""
+    slept = []
+    monkeypatch.setattr("src.utils.ratelimit.time.sleep", slept.append)
+    backoff = Backoff(base_s=60.0, cap_s=1e9)  # cap far out of reach here
+    for _ in range(5):
+        backoff.sleep()
+    assert slept == [60.0, 120.0, 240.0, 480.0, 960.0]
+
+
+def test_backoff_is_capped(monkeypatch):
+    """However many failures pile up, the sleep never exceeds the cap."""
+    slept = []
+    monkeypatch.setattr("src.utils.ratelimit.time.sleep", slept.append)
+    backoff = Backoff(base_s=60.0, cap_s=200.0)
+    for _ in range(6):
+        backoff.sleep()
+    assert slept == [60.0, 120.0, 200.0, 200.0, 200.0, 200.0]
+    assert max(slept) == 200.0
+
+
+def test_backoff_reset_zeroes_failures(monkeypatch):
+    """`reset()` (called on a successful request) must restart the sequence
+    from the base delay, not continue climbing."""
+    slept = []
+    monkeypatch.setattr("src.utils.ratelimit.time.sleep", slept.append)
+    backoff = Backoff(base_s=60.0, cap_s=1e9)
+    backoff.sleep()
+    backoff.sleep()
+    assert backoff.failures == 2
+    backoff.reset()
+    assert backoff.failures == 0
+    backoff.sleep()
+    assert slept[-1] == 60.0  # back to the base delay, not 240
+
+
+def test_backoff_cap_defaults_from_config(monkeypatch):
+    """Project rule: no hardcoded rate limits. The default cap must come from
+    config.yaml's `ratelimit.backoff_cap_s`, not a bare Python default."""
+    monkeypatch.setattr("src.utils.ratelimit.time.sleep", lambda s: None)
+    cfg_cap = load_config()["ratelimit"]["backoff_cap_s"]
+    assert Backoff().cap_s == cfg_cap
+
+
+def test_backoff_cap_still_overridable_explicitly(monkeypatch):
+    """A caller (or a test) can still bypass config and set its own cap."""
+    monkeypatch.setattr("src.utils.ratelimit.time.sleep", lambda s: None)
+    assert Backoff(cap_s=42.0).cap_s == 42.0
+
+
 def test_config_loads_and_resolves_paths():
     cfg = load_config()
     assert cfg["paths"]["db"].endswith("data/db/footprints.db")
@@ -42,3 +93,5 @@ def test_config_loads_and_resolves_paths():
     assert "9.01" in cfg["items"]["exclude"]
     # The headline metric is precision at a fixed alert budget, never accuracy.
     assert cfg["eval"]["alert_budget_per_stock_per_month"] > 0
+    # No hardcoded rate limits (rule 7): the Backoff ceiling comes from here.
+    assert cfg["ratelimit"]["backoff_cap_s"] > 0

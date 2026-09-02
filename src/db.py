@@ -15,6 +15,11 @@ Seven tables:
 
 All timestamps are UTC epoch seconds. All writes are idempotent upserts so
 re-running any collector never duplicates rows. Plain sqlite3, no ORM.
+
+`get_conn(path, readonly=True)` opens the file as-is via SQLite's own
+`mode=ro` URI, skips schema creation/migration entirely, and raises if the
+file does not already exist. Use it for report/audit tools that must never
+create or alter the database. Default (`readonly=False`) is unchanged.
 """
 
 from __future__ import annotations
@@ -22,6 +27,13 @@ from __future__ import annotations
 import sqlite3
 import time
 from pathlib import Path
+
+#: Passed to every connection (read-write or read-only). 30s is generous
+#: enough to ride out a single upsert-and-commit from another process (this
+#: codebase never holds a write transaction open longer than one batch) while
+#: still failing loudly well within a human's patience, rather than hanging
+#: indefinitely the way an unbounded retry would.
+BUSY_TIMEOUT_MS = 30_000
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS companies (
@@ -77,7 +89,7 @@ CREATE TABLE IF NOT EXISTS bars (
 );
 
 CREATE TABLE IF NOT EXISTS news (
-  url TEXT PRIMARY KEY, ticker TEXT, title TEXT,
+  url TEXT, ticker TEXT, title TEXT,
   -- Publisher identity. The two APIs give DIFFERENT kinds of identifier and
   -- they get different columns, so nothing downstream has to consult `api` to
   -- know what it is holding:
@@ -93,9 +105,21 @@ CREATE TABLE IF NOT EXISTS news (
                                  -- Later than publication by an unknown amount,
                                  -- so it is an UPPER BOUND on publication.
   fetched_utc INTEGER,           -- when WE pulled the row. Provenance only.
-  api TEXT                       -- 'finnhub' | 'gdelt'
+  api TEXT,                      -- 'finnhub' | 'gdelt'
+  -- PK is (url, ticker), not url alone (fixed post-audit): the same URL is
+  -- legitimately relevant to more than one ticker (a joint release, a wire
+  -- story naming two companies), and a url-only PK silently dropped the
+  -- second ticker's row -- earliest_news_ts(conn, that_ticker, ...) then saw
+  -- nothing and t0 quietly fell back to filing time. See
+  -- _migrate_news_to_composite_pk for the upgrade path on an existing DB.
+  PRIMARY KEY (url, ticker)
 );
 CREATE INDEX IF NOT EXISTS idx_news_ticker ON news (ticker, seen_utc);
+-- idx_news_ticker_published is NOT created here: on a pre-P1-13 database
+-- `published_utc` doesn't exist yet at the point this script runs (the
+-- column migration runs afterwards), so creating it here would fail on that
+-- one-time upgrade path. It is created in _apply_migrations instead, once
+-- the column is guaranteed to exist.
 
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY, value TEXT, updated_utc INTEGER
@@ -161,37 +185,125 @@ DATA_MIGRATIONS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _news_pk_is_composite(conn: sqlite3.Connection) -> bool:
+    """True once `news`'s primary key covers (url, ticker).
+
+    `PRAGMA table_info` reports a column's 1-based position in the primary
+    key in its `pk` field (0 if the column is not part of it). On the
+    original schema `url` alone was the key, so `ticker`'s `pk` is 0; after
+    the rebuild below it is 2.
+    """
+    rows = {row[1]: row[5] for row in conn.execute("PRAGMA table_info(news)")}
+    return rows.get("ticker", 0) != 0
+
+
+def _migrate_news_to_composite_pk(conn: sqlite3.Connection) -> None:
+    """Rebuild `news` with PRIMARY KEY (url, ticker) instead of (url).
+
+    SQLite cannot ALTER a table's primary key in place, so this recreates the
+    table under a new name, copies every row across, and swaps it in. Safe to
+    run on data collected under the old schema: the old PK guaranteed `url`
+    was already unique there, so every (url, ticker) pair in the copy is
+    trivially unique too -- there is no conflict to resolve, only a widening
+    of the key that lets a FUTURE second ticker for the same url be stored.
+    Runs inside one transaction so a crash mid-rebuild leaves the original
+    table untouched rather than half-renamed.
+    """
+    if _news_pk_is_composite(conn):
+        return
+    # `executescript` does not itself provide all-or-nothing semantics across
+    # the statements it runs, so the transaction control is explicit in the
+    # script text: a crash mid-script rolls back to the original table intact
+    # rather than leaving `news` renamed away or half-copied.
+    conn.executescript(
+        f"""
+        BEGIN;
+        ALTER TABLE news RENAME TO news_pre_composite_pk;
+        CREATE TABLE news (
+          url TEXT, ticker TEXT, title TEXT, source_domain TEXT,
+          source_name TEXT, source_tier INTEGER, published_utc INTEGER,
+          seen_utc INTEGER, fetched_utc INTEGER, api TEXT,
+          PRIMARY KEY (url, ticker)
+        );
+        INSERT INTO news ({", ".join(NEWS_COLUMNS)})
+          SELECT {", ".join(NEWS_COLUMNS)} FROM news_pre_composite_pk;
+        DROP TABLE news_pre_composite_pk;
+        COMMIT;
+        """
+    )
+
+
 def _apply_migrations(conn: sqlite3.Connection) -> None:
-    """Add missing columns, then run any pending data repairs.
+    """Add missing columns, rebuild `news`'s key, then run pending data repairs.
 
     Idempotent — safe on every connect. Column adds check `PRAGMA table_info`;
-    data repairs are guarded by a key in `meta`.
+    the composite-PK rebuild checks the PK itself; data repairs are guarded by
+    a key in `meta`. Order matters: columns must exist before the rebuild
+    copies them, and both must be in place before any data repair runs.
     """
-    for table, column, decl in MIGRATIONS:
-        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-        if column not in existing:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
-    conn.commit()
+    with conn:
+        for table, column, decl in MIGRATIONS:
+            existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
-    for key, sql in DATA_MIGRATIONS:
-        done = conn.execute(
-            "SELECT 1 FROM meta WHERE key = ?", (f"migration:{key}",)
-        ).fetchone()
-        if done:
-            continue
-        cursor = conn.execute(sql)
+    _migrate_news_to_composite_pk(conn)
+
+    with conn:
+        # Deferred from SCHEMA (see the comment there): published_utc is only
+        # guaranteed to exist once the column migrations above have run.
         conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value, updated_utc) VALUES (?, ?, ?)",
-            (f"migration:{key}", str(cursor.rowcount), int(time.time())),
+            "CREATE INDEX IF NOT EXISTS idx_news_ticker_published "
+            "ON news (ticker, published_utc)"
         )
-    conn.commit()
+
+    with conn:
+        for key, sql in DATA_MIGRATIONS:
+            done = conn.execute(
+                "SELECT 1 FROM meta WHERE key = ?", (f"migration:{key}",)
+            ).fetchone()
+            if done:
+                continue
+            cursor = conn.execute(sql)
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value, updated_utc) VALUES (?, ?, ?)",
+                (f"migration:{key}", str(cursor.rowcount), int(time.time())),
+            )
 
 
-def get_conn(db_path: str | Path) -> sqlite3.Connection:
-    """Open (creating if needed) the project DB with the schema applied."""
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+def get_conn(db_path: str | Path, readonly: bool = False) -> sqlite3.Connection:
+    """Open the project DB.
+
+    Default (`readonly=False`, unchanged behaviour): create the parent
+    directory and the file itself if needed, open read-write, and bring the
+    schema/migrations up to date. Every existing caller keeps working exactly
+    as before.
+
+    `readonly=True` is for tools that must never create or alter the
+    database (report/audit CLIs): it opens `db_path` through SQLite's own
+    `mode=ro` URI (`uri=True`, not a hand-rolled query string caller passes
+    to `db_path` itself -- that idiom silently treated the URI text as a
+    literal, mostly-relative filename and fabricated a brand-new empty DB at
+    a bogus path with no error), runs no DDL, and raises `FileNotFoundError`
+    if the file is not already there rather than creating one.
+    """
+    path = Path(db_path)
+
+    if readonly:
+        if not path.exists():
+            raise FileNotFoundError(
+                f"get_conn(readonly=True): {path} does not exist -- "
+                "read-only access cannot create a database"
+            )
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        return conn
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
@@ -214,29 +326,37 @@ def upsert_companies(conn: sqlite3.Connection, rows: list[dict]) -> int:
     if not rows:
         return 0
     before = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
-    conn.executemany(
-        f"""
-        INSERT INTO companies ({", ".join(COMPANY_COLUMNS)})
-        VALUES ({", ".join(":" + c for c in COMPANY_COLUMNS)})
-        ON CONFLICT(cik) DO UPDATE SET
-          ticker = excluded.ticker,
-          name = COALESCE(excluded.name, companies.name),
-          exchange = COALESCE(excluded.exchange, companies.exchange),
-          sic = COALESCE(excluded.sic, companies.sic),
-          -- COALESCE, not a plain overwrite: a collector that has no opinion
-          -- about liquidity passes NULL, and a universe rebuild must not wipe
-          -- the flags the Phase 3 filter set. Same failure as the one P1-14
-          -- fixed in upsert_news — a re-run losing a column another stage
-          -- filled. The filter still writes 0 and 1 explicitly.
-          in_universe = COALESCE(excluded.in_universe, companies.in_universe),
-          adv_usd = COALESCE(excluded.adv_usd, companies.adv_usd),
-          last_price = COALESCE(excluded.last_price, companies.last_price),
-          universe_as_of = COALESCE(excluded.universe_as_of, companies.universe_as_of),
-          successor_cik = COALESCE(excluded.successor_cik, companies.successor_cik)
-        """,
-        [{c: r.get(c) for c in COMPANY_COLUMNS} for r in rows],
-    )
-    conn.commit()
+    # `with conn:` wraps the whole batch in one transaction: if any row in
+    # the batch raises partway through (e.g. a NOT NULL violation), the rows
+    # that already succeeded are rolled back instead of sitting uncommitted
+    # in this connection's implicit transaction, waiting to be swept onto
+    # disk by some later, unrelated commit() -- which is exactly how a
+    # caught-and-logged failure elsewhere on the same connection (collectors
+    # call set_fetch_state(..., "failed", ...) right after, which commits)
+    # used to leave silent partial writes behind.
+    with conn:
+        conn.executemany(
+            f"""
+            INSERT INTO companies ({", ".join(COMPANY_COLUMNS)})
+            VALUES ({", ".join(":" + c for c in COMPANY_COLUMNS)})
+            ON CONFLICT(cik) DO UPDATE SET
+              ticker = excluded.ticker,
+              name = COALESCE(excluded.name, companies.name),
+              exchange = COALESCE(excluded.exchange, companies.exchange),
+              sic = COALESCE(excluded.sic, companies.sic),
+              -- COALESCE, not a plain overwrite: a collector that has no opinion
+              -- about liquidity passes NULL, and a universe rebuild must not wipe
+              -- the flags the Phase 3 filter set. Same failure as the one P1-14
+              -- fixed in upsert_news — a re-run losing a column another stage
+              -- filled. The filter still writes 0 and 1 explicitly.
+              in_universe = COALESCE(excluded.in_universe, companies.in_universe),
+              adv_usd = COALESCE(excluded.adv_usd, companies.adv_usd),
+              last_price = COALESCE(excluded.last_price, companies.last_price),
+              universe_as_of = COALESCE(excluded.universe_as_of, companies.universe_as_of),
+              successor_cik = COALESCE(excluded.successor_cik, companies.successor_cik)
+            """,
+            [{c: r.get(c) for c in COMPANY_COLUMNS} for r in rows],
+        )
     after = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
     return after - before
 
@@ -272,11 +392,11 @@ def clear_universe_flags(conn: sqlite3.Connection) -> int:
     Without this the filter is additive: a company that qualified on an earlier
     run but no longer does would keep its flag and quietly stay in the study.
     """
-    cur = conn.execute(
-        "UPDATE companies SET in_universe = 0, adv_usd = NULL, "
-        "last_price = NULL, universe_as_of = NULL"
-    )
-    conn.commit()
+    with conn:
+        cur = conn.execute(
+            "UPDATE companies SET in_universe = 0, adv_usd = NULL, "
+            "last_price = NULL, universe_as_of = NULL"
+        )
     return cur.rowcount
 
 
@@ -289,20 +409,32 @@ def set_universe_flags(conn: sqlite3.Connection, rows: list[dict]) -> int:
     """
     if not rows:
         return 0
-    cur = conn.executemany(
-        """UPDATE companies
-              SET in_universe = 1, adv_usd = :adv_usd,
-                  last_price = :last_price, universe_as_of = :as_of_utc
-            WHERE ticker = :ticker AND successor_cik IS NULL""",
-        rows,
-    )
-    conn.commit()
+    with conn:
+        cur = conn.executemany(
+            """UPDATE companies
+                  SET in_universe = 1, adv_usd = :adv_usd,
+                      last_price = :last_price, universe_as_of = :as_of_utc
+                WHERE ticker = :ticker AND successor_cik IS NULL""",
+            rows,
+        )
     return cur.rowcount
 
 
 def company_name(conn: sqlite3.Connection, ticker: str) -> str | None:
+    """A ticker's display name, preferring the live company over a predecessor.
+
+    P2-11 links a reorganised company's old CIK to its successor via a
+    `successor_cik`-tagged row that shares the SAME ticker, so a ticker can
+    have two name candidates. `ORDER BY successor_cik IS NULL DESC` picks the
+    live row (successor_cik IS NULL) deterministically when one exists, and
+    only falls back to the predecessor's name in the (currently theoretical)
+    case where the live row itself has no name yet -- without a defined
+    order, SQLite's tie-break was an accident of insertion order, not a
+    guarantee (news.py's GDELT query builder consumes this).
+    """
     row = conn.execute(
-        "SELECT name FROM companies WHERE ticker = ? AND name IS NOT NULL LIMIT 1",
+        "SELECT name FROM companies WHERE ticker = ? AND name IS NOT NULL "
+        "ORDER BY successor_cik IS NULL DESC LIMIT 1",
         (ticker,),
     ).fetchone()
     return row[0] if row else None
@@ -324,12 +456,12 @@ def upsert_filings(conn: sqlite3.Connection, rows: list[dict]) -> int:
     if not rows:
         return 0
     before = conn.execute("SELECT COUNT(*) FROM filings").fetchone()[0]
-    conn.executemany(
-        f"""INSERT OR IGNORE INTO filings ({", ".join(FILING_COLUMNS)})
-            VALUES ({", ".join(":" + c for c in FILING_COLUMNS)})""",
-        [{c: r.get(c) for c in FILING_COLUMNS} for r in rows],
-    )
-    conn.commit()
+    with conn:
+        conn.executemany(
+            f"""INSERT OR IGNORE INTO filings ({", ".join(FILING_COLUMNS)})
+                VALUES ({", ".join(":" + c for c in FILING_COLUMNS)})""",
+            [{c: r.get(c) for c in FILING_COLUMNS} for r in rows],
+        )
     after = conn.execute("SELECT COUNT(*) FROM filings").fetchone()[0]
     return after - before
 
@@ -445,16 +577,16 @@ def upsert_events(conn: sqlite3.Connection, rows: list[dict]) -> int:
         return 0
     before = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     updatable = [c for c in EVENT_COLUMNS if c not in ("event_id", "accession_no")]
-    conn.executemany(
-        f"""
-        INSERT INTO events ({", ".join(EVENT_COLUMNS)})
-        VALUES ({", ".join(":" + c for c in EVENT_COLUMNS)})
-        ON CONFLICT(event_id) DO UPDATE SET
-          {", ".join(f"{c} = excluded.{c}" for c in updatable)}
-        """,
-        [{c: r.get(c) for c in EVENT_COLUMNS} for r in rows],
-    )
-    conn.commit()
+    with conn:
+        conn.executemany(
+            f"""
+            INSERT INTO events ({", ".join(EVENT_COLUMNS)})
+            VALUES ({", ".join(":" + c for c in EVENT_COLUMNS)})
+            ON CONFLICT(event_id) DO UPDATE SET
+              {", ".join(f"{c} = excluded.{c}" for c in updatable)}
+            """,
+            [{c: r.get(c) for c in EVENT_COLUMNS} for r in rows],
+        )
     after = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     return after - before
 
@@ -477,21 +609,41 @@ def usable_events(conn: sqlite3.Connection, scheduled: int | None = None):
 # --------------------------------------------------------------------------
 
 def upsert_bars(conn: sqlite3.Connection, rows: list[tuple]) -> int:
-    """rows: (ticker, ts_utc, open, high, low, close, volume, interval)."""
+    """rows: (ticker, ts_utc, open, high, low, close, volume, interval).
+
+    Returns the number of genuinely NEW bars — a before/after `COUNT(*)`
+    diff, matching every sibling upsert (`upsert_companies`/`upsert_filings`/
+    `upsert_news`) instead of the raw `cursor.rowcount` this used to return,
+    which is >=1 on every call including a pure re-fetch of unchanged bars.
+    `fetch_state` documents its own contract as "rows_written=0 means
+    genuinely nothing new, do not come back" and `market.py` passes this
+    return value straight into `set_fetch_state(..., rows_written=...)`, so
+    the old value could never actually mean that for bars.
+
+    OHLCV columns are overwritten unconditionally on conflict — unlike
+    `companies`/`news`, which COALESCE. That is deliberate, not an oversight:
+    there is exactly one source of bars (yfinance) per
+    (ticker, ts_utc, interval), so there is no "which collector's opinion
+    wins" question the COALESCE pattern exists to answer, and a re-fetch of a
+    bar the vendor has since corrected should replace the stored value rather
+    than defend a stale one.
+    """
     if not rows:
         return 0
-    cur = conn.executemany(
-        """
-        INSERT INTO bars (ticker, ts_utc, open, high, low, close, volume, interval)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(ticker, ts_utc, interval) DO UPDATE SET
-          open=excluded.open, high=excluded.high, low=excluded.low,
-          close=excluded.close, volume=excluded.volume
-        """,
-        rows,
-    )
-    conn.commit()
-    return cur.rowcount
+    before = conn.execute("SELECT COUNT(*) FROM bars").fetchone()[0]
+    with conn:
+        conn.executemany(
+            """
+            INSERT INTO bars (ticker, ts_utc, open, high, low, close, volume, interval)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ticker, ts_utc, interval) DO UPDATE SET
+              open=excluded.open, high=excluded.high, low=excluded.low,
+              close=excluded.close, volume=excluded.volume
+            """,
+            rows,
+        )
+    after = conn.execute("SELECT COUNT(*) FROM bars").fetchone()[0]
+    return after - before
 
 
 def latest_bar_ts(conn: sqlite3.Connection, ticker: str, interval: str) -> int | None:
@@ -542,30 +694,39 @@ def upsert_news(conn: sqlite3.Connection, rows: list[dict]) -> int:
     re-fetch now **fills in** fields that were NULL, instead of skipping the row
     entirely. That was issue #14 — rows collected before a collector fix could
     not be repaired by re-running.
+
+    Conflict target is `(url, ticker)`, not `url` alone: the same URL is
+    legitimately relevant to more than one ticker (a joint release, a wire
+    story naming two companies), and a url-only conflict target used to keep
+    whichever ticker got there first forever — the second ticker's row was
+    silently dropped, and `earliest_news_ts(conn, that_ticker, ...)` could
+    never see that article. `ticker` is part of the key, not the SET list, by
+    design: it is the row's identity now, not a mutable field to fill in.
     """
     if not rows:
         return 0
     before = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
-    conn.executemany(
-        f"""
-        INSERT INTO news ({", ".join(NEWS_COLUMNS)})
-        VALUES ({", ".join(":" + c for c in NEWS_COLUMNS)})
-        -- COALESCE(existing, new): fill gaps, never overwrite. A timestamp
-        -- already recorded must not silently move on a re-fetch — that is the
-        -- kind of drift that makes a result impossible to reproduce. Deliberate
-        -- re-tiering goes through retier_news(), which UPDATEs directly.
-        ON CONFLICT(url) DO UPDATE SET
-          title = COALESCE(news.title, excluded.title),
-          source_domain = COALESCE(news.source_domain, excluded.source_domain),
-          source_name = COALESCE(news.source_name, excluded.source_name),
-          source_tier = COALESCE(news.source_tier, excluded.source_tier),
-          published_utc = COALESCE(news.published_utc, excluded.published_utc),
-          seen_utc = COALESCE(news.seen_utc, excluded.seen_utc),
-          fetched_utc = COALESCE(news.fetched_utc, excluded.fetched_utc)
-        """,
-        [{c: r.get(c) for c in NEWS_COLUMNS} for r in rows],
-    )
-    conn.commit()
+    with conn:
+        conn.executemany(
+            f"""
+            INSERT INTO news ({", ".join(NEWS_COLUMNS)})
+            VALUES ({", ".join(":" + c for c in NEWS_COLUMNS)})
+            -- COALESCE(existing, new): fill gaps, never overwrite. A timestamp
+            -- already recorded must not silently move on a re-fetch — that is the
+            -- kind of drift that makes a result impossible to reproduce. Deliberate
+            -- re-tiering goes through retier_news(), which UPDATEs directly.
+            ON CONFLICT(url, ticker) DO UPDATE SET
+              title = COALESCE(news.title, excluded.title),
+              source_domain = COALESCE(news.source_domain, excluded.source_domain),
+              source_name = COALESCE(news.source_name, excluded.source_name),
+              source_tier = COALESCE(news.source_tier, excluded.source_tier),
+              published_utc = COALESCE(news.published_utc, excluded.published_utc),
+              seen_utc = COALESCE(news.seen_utc, excluded.seen_utc),
+              fetched_utc = COALESCE(news.fetched_utc, excluded.fetched_utc),
+              api = COALESCE(news.api, excluded.api)
+            """,
+            [{c: r.get(c) for c in NEWS_COLUMNS} for r in rows],
+        )
     after = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]
     return after - before
 
@@ -628,15 +789,20 @@ def retier_news(conn: sqlite3.Connection, cfg: dict) -> int:
     from src.collectors.news import tier_of  # local: db must not import collectors at module level
 
     changed = 0
-    for row in conn.execute(
-        "SELECT url, source_domain, source_name, source_tier FROM news"
-    ).fetchall():
-        tier = tier_of(cfg, row["source_domain"], row["source_name"])
-        if tier != row["source_tier"]:
-            conn.execute("UPDATE news SET source_tier = ? WHERE url = ?",
-                         (tier, row["url"]))
-            changed += 1
-    conn.commit()
+    with conn:
+        for row in conn.execute(
+            "SELECT url, ticker, source_domain, source_name, source_tier FROM news"
+        ).fetchall():
+            tier = tier_of(cfg, row["source_domain"], row["source_name"])
+            if tier != row["source_tier"]:
+                # Filter on (url, ticker), the table's actual key now — url
+                # alone can match more than one row (the same article stored
+                # under two tickers) and would have overwritten a row this
+                # loop iteration was never actually looking at.
+                conn.execute(
+                    "UPDATE news SET source_tier = ? WHERE url = ? AND ticker = ?",
+                    (tier, row["url"], row["ticker"]))
+                changed += 1
     return changed
 
 
@@ -656,19 +822,19 @@ def set_fetch_state(conn: sqlite3.Connection, source: str, key: str,
     Committed per item on purpose: state buffered to the end of a run is
     worthless, because surviving a kill is the entire point.
     """
-    conn.execute(
-        """INSERT INTO fetch_state
-             (source, key, status, records, rows_written, error, updated_utc)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(source, key) DO UPDATE SET
-             status = excluded.status,
-             records = excluded.records,
-             rows_written = excluded.rows_written,
-             error = excluded.error,
-             updated_utc = excluded.updated_utc""",
-        (source, key, status, records, rows_written, error, int(time.time())),
-    )
-    conn.commit()
+    with conn:
+        conn.execute(
+            """INSERT INTO fetch_state
+                 (source, key, status, records, rows_written, error, updated_utc)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(source, key) DO UPDATE SET
+                 status = excluded.status,
+                 records = excluded.records,
+                 rows_written = excluded.rows_written,
+                 error = excluded.error,
+                 updated_utc = excluded.updated_utc""",
+            (source, key, status, records, rows_written, error, int(time.time())),
+        )
 
 
 def keys_with_status(conn: sqlite3.Connection, source: str,
@@ -694,13 +860,13 @@ def completed_keys(conn: sqlite3.Connection, source: str) -> set[str]:
 def set_meta(conn: sqlite3.Connection, key: str, value: str, ts_utc: int) -> None:
     """Provenance. Used to stamp the price-snapshot freeze date, because
     yfinance's hourly window rolls and bars silently disappear over time."""
-    conn.execute(
-        """INSERT INTO meta (key, value, updated_utc) VALUES (?, ?, ?)
-           ON CONFLICT(key) DO UPDATE SET value=excluded.value,
-                                          updated_utc=excluded.updated_utc""",
-        (key, value, ts_utc),
-    )
-    conn.commit()
+    with conn:
+        conn.execute(
+            """INSERT INTO meta (key, value, updated_utc) VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                                              updated_utc=excluded.updated_utc""",
+            (key, value, ts_utc),
+        )
 
 
 def get_meta(conn: sqlite3.Connection, key: str) -> str | None:

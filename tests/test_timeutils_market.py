@@ -38,6 +38,17 @@ def ts(iso: str) -> int:
     return dt_to_ts(datetime.strptime(iso, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc))
 
 
+def ts_s(iso: str) -> int:
+    """'2024-11-27 15:00:45' (UTC, WITH seconds) -> epoch seconds.
+
+    Every timestamp `ts()` builds is minute-aligned by construction, which is
+    exactly the shape real EDGAR/news timestamps never have. This helper
+    exists so P1-05b can exercise `trading_hours_between` on inputs that
+    actually look like production data.
+    """
+    return dt_to_ts(datetime.strptime(iso, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc))
+
+
 @pytest.fixture(scope="module")
 def cal():
     return get_market_calendar()
@@ -275,6 +286,106 @@ def test_out_of_range_raises_naming_the_endpoint(cal) -> None:
         trading_hours_between(ts("1990-01-03 15:00"), ts("2024-11-22 15:00"), cal)
     with pytest.raises(ValueError, match=r"outside the XNYS calendar"):
         trading_hours_between(ts("2024-11-22 15:00"), ts("2099-01-04 15:00"), cal)
+
+
+# --------------------------------------------------------------------------
+# P1-05b — sub-minute precision
+#
+# Every test above builds its timestamps through `ts()`, which truncates to
+# whole minutes by construction. Real inputs never look like that: EDGAR's
+# `acceptanceDateTime` and news article times carry seconds, and this is the
+# function that turns them into the project's headline lead-time number. A
+# previous version of this function built its half-open interval as
+# `minutes_in_range(a, b - 1 minute)`, which is only correct when `a` and `b`
+# are themselves minute-aligned — for a real, sub-minute-aligned `b` it
+# floors `b - 1 minute` back down and can even push it before `a`, silently
+# returning 0.0 for a span the market was open through the entire time. Every
+# case below is checked against a hand-computed expected value, in seconds,
+# converted to hours.
+# --------------------------------------------------------------------------
+
+
+def test_span_fully_inside_one_open_minute_is_not_zero(cal) -> None:
+    """45 seconds, entirely inside 10:00-10:01 ET (open the whole time).
+
+    This is the bug in its purest form: the old implementation returned
+    exactly 0.0 hours here — not a rounding error, a completely wrong answer
+    for a span during which the market was continuously open.
+    """
+    hours = trading_hours_between(ts_s("2024-11-27 15:00:00"), ts_s("2024-11-27 15:00:45"), cal)
+    assert hours == pytest.approx(45 / 3600)  # 0.0125h
+
+
+def test_one_second_span_is_not_zero(cal) -> None:
+    """The most extreme case of the same bug: a 1-second span."""
+    hours = trading_hours_between(ts_s("2024-11-27 15:00:30"), ts_s("2024-11-27 15:00:31"), cal)
+    assert hours == pytest.approx(1 / 3600)
+
+
+def test_span_crossing_a_minute_boundary_does_not_round_up(cal) -> None:
+    """90 seconds, 09:59:40-10:01:10 ET, straddling the 10:00/10:01 boundary.
+
+    The old implementation's failure mode was not only "rounds down to zero":
+    for a span whose ends land in two different minutes, it counted BOTH
+    minutes as whole and returned 2 minutes (0.0333h) for a span that only
+    ever spent 90 seconds open — an overcount, not just an undercount.
+    """
+    hours = trading_hours_between(ts_s("2024-11-27 14:30:40"), ts_s("2024-11-27 14:32:10"), cal)
+    assert hours == pytest.approx(90 / 3600)  # 0.025h, NOT 2/60 = 0.0333h
+
+
+def test_span_crossing_the_close_with_seconds(cal) -> None:
+    """20:58:30-21:00:00 UTC (15:58:30-16:00:00 ET): 90 seconds, all before the
+    close, which is excluded under [open, close). Hand-computed: 90s open."""
+    hours = trading_hours_between(ts_s("2024-11-27 20:58:30"), ts_s("2024-11-27 21:00:00"), cal)
+    assert hours == pytest.approx(90 / 3600)
+
+
+def test_span_crossing_the_open_with_seconds(cal) -> None:
+    """14:29:59-14:30:01 UTC (09:29:59-09:30:01 ET): the open falls inside this
+    span. Only the 1 second at/after 14:30:00 is open; the second before is
+    pre-market."""
+    hours = trading_hours_between(ts_s("2024-11-27 14:29:59"), ts_s("2024-11-27 14:30:01"), cal)
+    assert hours == pytest.approx(1 / 3600)
+
+
+def test_t0_style_span_within_one_session(cal) -> None:
+    """09:30:00 (aligned) to a real acceptanceDateTime-shaped 20:30:28 ET
+    close-out time, matching the review's traced example. Hand-computed:
+    5 hours 30 minutes 28 seconds = 5 + 30/60 + 28/3600 hours."""
+    hours = trading_hours_between(ts_s("2024-11-27 15:00:00"), ts_s("2024-11-27 20:30:28"), cal)
+    assert hours == pytest.approx(5 + 30 / 60 + 28 / 3600)  # 5.507777...h
+
+
+def test_multi_day_span_with_seconds_offsets(cal) -> None:
+    """Friday 15:00:17 UTC to Monday 14:00:43 UTC — the weekend-gap test from
+    P1-05, but with sub-minute offsets at both ends so it also exercises the
+    'full minutes strictly between the two boundary minutes' branch.
+
+    Hand-computed: Friday contributes from 15:00:17 to the 21:00:00 close =
+    5h59m43s = 21583s. Monday's session has not opened yet at 14:00:43 UTC
+    (open is 14:30 UTC), so it contributes nothing. Total = 21583s.
+    """
+    hours = trading_hours_between(ts_s("2024-11-22 15:00:17"), ts_s("2024-11-25 14:00:43"), cal)
+    assert hours == pytest.approx(21583 / 3600)
+
+
+def test_half_day_close_boundary_with_seconds(cal) -> None:
+    """2024-12-24 (Christmas Eve, a half day) closes at 18:00:00 UTC exactly.
+    17:59:50-18:00:10 straddles it: only the 10 seconds before the close are
+    open."""
+    hours = trading_hours_between(ts_s("2024-12-24 17:59:50"), ts_s("2024-12-24 18:00:10"), cal)
+    assert hours == pytest.approx(10 / 3600)
+
+
+def test_sub_minute_precision_agrees_with_minute_grid_when_aligned(cal) -> None:
+    """Sanity link back to P1-05: feeding `ts_s` a `:00` second must reproduce
+    exactly what `ts` already gets, so the sub-minute code path is a strict
+    generalisation, not a different function that happens to overlap."""
+    a_min, b_min = ts("2024-11-27 14:30"), ts("2024-11-27 21:00")
+    a_sec, b_sec = ts_s("2024-11-27 14:30:00"), ts_s("2024-11-27 21:00:00")
+    assert a_min == a_sec and b_min == b_sec
+    assert trading_hours_between(a_min, b_min, cal) == trading_hours_between(a_sec, b_sec, cal) == 6.5
 
 
 # --------------------------------------------------------------------------
