@@ -17,8 +17,8 @@ import pytest
 
 from src import db
 from src.collectors.edgar import (
-    EdgarRequestError, is_successor, name_stem, propose_predecessors,
-    verify_predecessor,
+    EdgarRequestError, is_successor, link_predecessors, name_stem,
+    propose_predecessors, verify_predecessor,
 )
 from src.utils.config import load_config
 from src.utils.timeutils import date_str_to_ts, iso_utc_to_ts
@@ -54,14 +54,22 @@ def submissions(forms, *, name="X", sic="2911", tickers=None,
 
 
 class FakeClient:
-    def __init__(self, by_cik):
+    def __init__(self, by_cik, pages=None):
         self.by_cik = by_cik
+        #: page name -> bare parallel-array block, for pagination tests.
+        self.pages = pages or {}
 
     def submissions_url(self, cik) -> str:
         return f"https://data.sec.gov/submissions/CIK{cik}.json"
 
+    def submissions_page_url(self, name) -> str:
+        return f"https://data.sec.gov/submissions/{name}"
+
     def get_json(self, url, force=False):
-        cik = url.rsplit("CIK", 1)[-1].removesuffix(".json")
+        name = url.rsplit("/", 1)[-1]
+        if name in self.pages:
+            return self.pages[name]
+        cik = name.removeprefix("CIK").removesuffix(".json")
         result = self.by_cik[cik]
         if isinstance(result, Exception):
             raise result
@@ -241,3 +249,76 @@ def test_a_predecessor_is_still_collected_like_any_company(conn):
     ])
     ciks = {r["cik"] for r in db.companies_for_collection(conn, ["XOM"])}
     assert ciks == {"0002115436", "0000034088"}
+
+
+# -- pagination: `recent` alone is not a CIK's whole history ---------------
+
+def test_is_successor_checks_files_pages_when_given_a_client(cfg):
+    """An actively-traded successor can file enough Form 4s that its own
+    8-K12B rolls off `recent`. Checking `recent` alone then misses it forever,
+    with no error — a company's whole predecessor link silently never
+    happens."""
+    subs = submissions(["10-Q", "4"])
+    subs["filings"]["files"] = [{"name": "old-page.json"}]
+    pages = {"old-page.json": {
+        "form": ["8-K12B"], "acceptanceDateTime": ["2020-01-02T20:00:00Z"],
+        "accessionNumber": ["old-1"],
+    }}
+    client = FakeClient({}, pages=pages)
+    assert not is_successor(cfg, subs), (
+        "without a client, only `recent` is checked — the historical behaviour")
+    assert is_successor(cfg, subs, client=client), (
+        "with a client, the marker in a `files` page must be found too")
+
+
+def test_verify_predecessor_checks_files_pages_for_prior_8ks(cfg, conn):
+    """The predecessor's only 8-K before the window can likewise sit in a
+    `files` page rather than `recent`."""
+    subs = submissions(["4"])  # nothing in `recent` counts as prior evidence
+    subs["filings"]["files"] = [{"name": "old.json"}]
+    pages = {"old.json": {
+        "form": ["8-K"], "acceptanceDateTime": ["2020-01-02T20:00:00Z"],
+        "accessionNumber": ["old-1"],
+    }}
+    client = FakeClient({"0000099999": subs}, pages=pages)
+    ok, why = verify_predecessor(cfg, conn, client, "0000099999", "2911",
+                                 WINDOW_START)
+    assert ok and "1 8-K" in why
+
+
+# -- link_predecessors: a total EDGAR outage must not look like "nothing to link"
+
+def _no_history_filing(cik, ticker, acceptance_utc):
+    return {"accession_no": f"seed-{cik}", "cik": cik, "ticker": ticker,
+            "form": "8-K", "items": "", "acceptance_utc": acceptance_utc,
+            "filing_date_utc": None, "report_date_utc": None,
+            "primary_doc": None, "fetched_utc": 0}
+
+
+def test_every_candidate_fetch_failing_raises(cfg, conn):
+    """A bare `continue` on every EdgarRequestError made a total outage during
+    `--link-predecessors` look identical to a clean 'nothing to link' run."""
+    db.upsert_companies(conn, [{"cik": "0002115436", "ticker": "XOM",
+                               "name": "ExxonMobil Holdings", "exchange": "NYSE"}])
+    db.upsert_filings(conn, [
+        _no_history_filing("0002115436", "XOM", WINDOW_START + 3600)])
+    client = FakeClient({"0002115436": EdgarRequestError("HTTP 503 from EDGAR")})
+    with pytest.raises(SystemExit, match="EVERY one of 1"):
+        link_predecessors(cfg, conn, client=client)
+
+
+def test_partial_candidate_fetch_failures_are_counted_not_dropped(cfg, conn):
+    db.upsert_companies(conn, [
+        {"cik": "0000000020", "ticker": "AAA", "name": "AAA Corp", "exchange": "NYSE"},
+        {"cik": "0000000021", "ticker": "BBB", "name": "BBB Corp", "exchange": "NYSE"},
+    ])
+    db.upsert_filings(conn, [
+        _no_history_filing("0000000020", "AAA", WINDOW_START + 3600),
+        _no_history_filing("0000000021", "BBB", WINDOW_START + 3600),
+    ])
+    client = FakeClient({"0000000020": EdgarRequestError("HTTP 503"),
+                         "0000000021": submissions(["8-K", "10-Q"])})
+    result = link_predecessors(cfg, conn, client=client)
+    assert result["candidates"] == 2
+    assert result["fetch_failed"] == 1
+    assert result["successors"] == 0, "the reachable candidate filed no marker"

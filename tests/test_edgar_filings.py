@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from src import db
-from src.collectors.edgar import EdgarRequestError, filing_rows, normalise_items
+from src.collectors.edgar import filing_rows, normalise_items
 from src.utils.config import load_config
 
 
@@ -81,9 +81,32 @@ def test_one_point_ten_and_one_point_one_stay_different(cfg, conn):
     assert float("1.10") == float("1.1"), "which is exactly what must not happen"
 
 
-def test_a_numeric_item_code_raises(cfg):
-    with pytest.raises(EdgarRequestError, match="must be strings"):
-        rows(cfg, {**APPLE_8K, "items": 1.01})
+def test_a_numeric_item_code_is_skipped_not_fatal(cfg, caplog):
+    """One malformed record must not discard the whole batch's good rows —
+    a company whose history contains one bad record would otherwise silently
+    produce zero rows for that run, indistinguishable from "filed nothing"."""
+    with caplog.at_level("WARNING"):
+        result = rows(cfg, {**APPLE_8K, "items": 1.01})
+    assert result == []
+    assert "skipped 1 malformed record" in caplog.text
+
+
+def test_a_bad_record_does_not_discard_the_good_ones_in_the_same_batch(cfg, caplog):
+    good = {**APPLE_8K, "accessionNumber": "good-1"}
+    bad = {**APPLE_8K, "accessionNumber": "bad-1", "items": 1.01}
+    with caplog.at_level("WARNING"):
+        result = rows(cfg, good, bad)
+    assert [r["accession_no"] for r in result] == ["good-1"]
+    assert "skipped 1 malformed record" in caplog.text
+
+
+def test_a_malformed_date_is_skipped_not_fatal(cfg):
+    """SEC's older pages are less clean than `recent`; a bad `filingDate`
+    anywhere in a company's history must not throw away every good row."""
+    good = {**APPLE_8K, "accessionNumber": "good-1"}
+    bad = {**APPLE_8K, "accessionNumber": "bad-1", "filingDate": "not-a-date"}
+    result = rows(cfg, good, bad)
+    assert [r["accession_no"] for r in result] == ["good-1"]
 
 
 def test_whitespace_in_items_is_normalised():

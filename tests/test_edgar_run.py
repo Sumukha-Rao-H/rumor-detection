@@ -220,6 +220,65 @@ def test_universe_with_an_empty_companies_table_says_what_to_run(cfg, tmp_path):
     empty_db.close()
 
 
+def test_a_ticker_typo_is_not_reported_as_an_empty_table(cfg, conn):
+    """`companies` holds 3 rows here; a typo'd ticker matching none of them
+    used to raise the exact same 'table is empty' message as a genuinely
+    empty table, sending the user toward `--build-universe` instead of toward
+    their typo."""
+    with pytest.raises(SystemExit) as exc:
+        collect_many(cfg, conn, client=FakeClient({}), tickers=["ZZZZZINVALID"])
+    msg = str(exc.value)
+    assert "table is empty" not in msg, (
+        "table has rows — the error must not claim otherwise")
+    assert "ZZZZZINVALID" in msg
+    assert "3 companies" in msg
+
+
+# -- the total_new guard ----------------------------------------------------
+
+def test_real_data_for_every_company_but_none_of_the_configured_forms_raises(cfg, conn):
+    """A config typo in `edgar.forms` (wrong case, a schema change) can leave
+    every company answering with real, non-empty data while zero of it
+    matches — `total_records` alone would never catch this."""
+    form4 = {"accessionNumber": "x-1", "form": "4", "items": "",
+             "acceptanceDateTime": "2026-01-02T20:00:00.000Z",
+             "filingDate": "2026-01-02", "reportDate": "2026-01-02",
+             "primaryDocument": "f.xml"}
+    client = FakeClient({c: submissions(form4) for c in
+                         ("0000320193", "0000789019", "0001318605")})
+    with pytest.raises(SystemExit, match="ZERO matched"):
+        collect_many(cfg, conn, client=client)
+
+
+def test_the_total_new_guard_respects_the_config_flag(cfg, conn):
+    form4 = {"accessionNumber": "x-1", "form": "4", "items": "",
+             "acceptanceDateTime": "2026-01-02T20:00:00.000Z",
+             "filingDate": "2026-01-02", "reportDate": "2026-01-02",
+             "primaryDocument": "f.xml"}
+    client = FakeClient({c: submissions(form4) for c in
+                         ("0000320193", "0000789019", "0001318605")})
+    assert collect_many(flag_off(cfg), conn, client=client) == 0
+
+
+# -- --force ----------------------------------------------------------------
+
+def test_force_reaches_the_filings_collection_path(cfg, conn):
+    """`--force` was wired only to `--build-universe`; a stuck or corrupted
+    per-company submissions cache had no CLI-level fix. `force` must reach
+    `client.get_json` on the filings path too."""
+    seen_force = []
+
+    class ForceCapturingClient(FakeClient):
+        def get_json(self, url, force=False):
+            seen_force.append(force)
+            return super().get_json(url, force=force)
+
+    client = ForceCapturingClient({"0000320193": submissions(APPLE_8K)})
+    collect_many(cfg, conn, client=client, tickers=["AAPL"], force=True)
+    assert seen_force and all(seen_force), (
+        "force=True on collect_many must reach every client.get_json call")
+
+
 # -- the module has to actually run ----------------------------------------
 
 def test_the_main_guard_is_the_last_thing_in_every_collector():

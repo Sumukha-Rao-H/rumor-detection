@@ -11,7 +11,9 @@ import json
 import pytest
 import requests
 
-from src.collectors.edgar import EdgarClient, EdgarRequestError
+from src.collectors.edgar import (
+    EdgarClient, EdgarRequestError, check_rate_limit_config,
+)
 from src.utils.config import load_config
 
 
@@ -181,3 +183,32 @@ def test_interrupted_write_leaves_no_partial_cache_hit(cfg):
     c.get_bytes(URL)
     leftovers = list(c.cache_path(URL).parent.glob("*.part"))
     assert leftovers == []
+
+
+# -- edgar.max_requests_per_s: decoration made load-bearing -----------------
+#
+# Only `RateLimiter(ecfg["min_interval_s"])` was ever read on the request
+# path, so editing `max_requests_per_s` alone (still SEC-legal) silently
+# changed nothing. Validated at CLI startup (`check_rate_limit_config`, called
+# from `main()`) rather than inside `EdgarClient.__init__` — every test in
+# this file builds an `EdgarClient` with `min_interval_s` deliberately zeroed
+# for speed, which would otherwise trip a strict check on every single test.
+
+def test_the_real_config_satisfies_its_own_rate_limit():
+    check_rate_limit_config(load_config()["edgar"])  # must not raise
+
+
+def test_a_min_interval_faster_than_the_cap_allows_is_rejected():
+    ecfg = {"min_interval_s": 0.05, "max_requests_per_s": 10}
+    with pytest.raises(ValueError, match="disagree"):
+        check_rate_limit_config(ecfg)
+
+
+def test_a_min_interval_at_or_slower_than_the_cap_is_accepted():
+    check_rate_limit_config({"min_interval_s": 0.1, "max_requests_per_s": 10})
+    check_rate_limit_config({"min_interval_s": 1.0, "max_requests_per_s": 10})
+
+
+def test_max_requests_per_s_is_optional():
+    """Only `min_interval_s` is required; the cap is validated when present."""
+    check_rate_limit_config({"min_interval_s": 0.0})

@@ -90,24 +90,56 @@ def df_to_rows(df: pd.DataFrame, ticker: str, interval: str) -> list[tuple]:
         return []
     idx = df.index
     if getattr(idx, "tz", None) is None:
-        idx = idx.tz_localize("UTC")  # daily bars can come back naive
+        # Defensive fallback only — verified against the installed yfinance
+        # 1.5.2 (`yfinance/utils.py::set_df_tz`) that both intervals this
+        # collector actually issues ('1d' and '60m') always come back
+        # tz-aware (localized to the exchange timezone before yfinance ever
+        # hands the frame back), so this branch should not fire in practice.
+        # It is kept rather than removed in case a future yfinance version or
+        # a different feed reintroduces a naive index — but naive here would
+        # represent EXCHANGE-LOCAL time (e.g. NYSE), not UTC, so localizing
+        # it as UTC is a known-wrong guess, not a safe default. Warn loudly
+        # so a silent multi-hour shift doesn't go unnoticed.
+        log.warning("%s [%s]: yfinance returned a tz-naive index — treating "
+                    "it as UTC, but it may actually be exchange-local time. "
+                    "This path is not expected with the installed yfinance; "
+                    "investigate before trusting these bars.", ticker, interval)
+        idx = idx.tz_localize("UTC")
     else:
         idx = idx.tz_convert("UTC")
-    rows = []
+    rows = {}
+    skipped_nan = 0
+    dup = 0
     for ts, row in zip(idx, df.itertuples(index=False)):
-        if pd.isna(row.Close):
+        # A valid Close with a NaN Open/High/Low is a real, if rare, yfinance
+        # shape (illiquid names, bars around halts). Storing it would put NULLs
+        # into columns nothing downstream currently reads (features.py only
+        # reads close/volume) — but the whole point of "every NaN explained" is
+        # not to leave a NULL sitting in `bars` for some future feature to trip
+        # over silently. Drop the whole bar rather than store a partial one.
+        if pd.isna(row.Open) or pd.isna(row.High) or pd.isna(row.Low) or pd.isna(row.Close):
+            skipped_nan += 1
             continue
-        rows.append((
+        key = int(ts.timestamp())
+        if key in rows:
+            dup += 1
+        rows[key] = (
             ticker,
-            int(ts.timestamp()),
+            key,
             float(row.Open),
             float(row.High),
             float(row.Low),
             float(row.Close),
             float(row.Volume) if not pd.isna(row.Volume) else 0.0,
             interval,
-        ))
-    return rows
+        )
+    if skipped_nan:
+        log.warning("%s [%s]: skipped %d bar(s) with NaN in open/high/low/close",
+                    ticker, interval, skipped_nan)
+    if dup:
+        log.warning("%s [%s]: %d duplicate bar timestamp(s) in one fetch — "
+                    "kept the last occurrence of each", ticker, interval, dup)
+    return list(rows.values())
 
 
 def clamp_start(start_ts: int, interval: str, now_ts: int) -> int:
@@ -146,9 +178,13 @@ def assert_not_frozen(cfg: dict, conn, interval: str, requested_start_ts: int,
     if stamp is None:
         raise SystemExit(
             f"market.snapshot_frozen is true but no snapshot_frozen_{interval} "
-            f"stamp exists in `meta`. Either stamp it with --stamp-snapshot or "
-            f"set snapshot_frozen: false — a flag with no evidence behind it is "
-            f"worse than no flag."
+            f"stamp exists in `meta`. This function runs BEFORE --stamp-snapshot "
+            f"ever gets a chance to write that stamp, so passing --stamp-snapshot "
+            f"alone will hit this same error again — pass --force together with "
+            f"--stamp-snapshot to do the initial download and stamp it in one run "
+            f"(there is nothing frozen yet to restate), or set snapshot_frozen: "
+            f"false if you don't want the freeze protection yet — a flag with no "
+            f"evidence behind it is worse than no flag."
         )
     stamp_ts = iso_utc_to_ts(stamp)
     if requested_start_ts < stamp_ts:
@@ -161,20 +197,48 @@ def assert_not_frozen(cfg: dict, conn, interval: str, requested_start_ts: int,
         )
 
 
+def _earliest_bar_ts(conn, ticker: str, interval: str) -> int | None:
+    """MIN(ts_utc) for one ticker/interval — the mirror of `db.latest_bar_ts`.
+
+    Kept local to this module rather than added to `src/db.py` (out of scope
+    for this unit); it is the other half of the incremental-resume check in
+    `collect_ticker` below, needed to tell "the cache reaches back far enough"
+    apart from "the cache merely has SOME bar at or after the requested start".
+    """
+    row = conn.execute(
+        "SELECT MIN(ts_utc) FROM bars WHERE ticker = ? AND interval = ?",
+        (ticker, interval),
+    ).fetchone()
+    return row[0]
+
+
 def collect_ticker(conn, ticker: str, start_ts: int, end_ts: int,
                    interval: str,
-                   limiter: RateLimiter | None = None) -> FetchResult:
+                   limiter: RateLimiter | None = None,
+                   force: bool = False) -> FetchResult:
     """Fetch and upsert bars for one ticker, resuming from the cache.
 
     The rate limiter is waited immediately before the request and not before
     the cache check, so a run that skips thousands of already-cached tickers
     does not also sleep a second for each of them.
+
+    The "already covered" shortcut only fires when the requested start falls
+    INSIDE the cached range (`cached_min <= start_ts <= cached_max`) — not
+    merely when *some* cached bar is at or after `start_ts`. Comparing against
+    `MAX(ts_utc)` alone used to treat a backfill window entirely BEFORE the
+    earliest cached bar as "already covered" (because the latest bar happened
+    to be later than the requested end), silently skipping the fetch. `force`
+    bypasses this cache check entirely, matching its documented purpose of
+    re-downloading even data that looks already covered.
     """
     now = utc_now_ts()
     start_ts = clamp_start(start_ts, interval, now)
-    cached = db.latest_bar_ts(conn, ticker, interval)
-    if cached is not None and cached >= start_ts:
-        start_ts = cached + 1  # incremental: refetch nothing we already have
+    if not force:
+        cached_min = _earliest_bar_ts(conn, ticker, interval)
+        cached_max = db.latest_bar_ts(conn, ticker, interval)
+        if (cached_min is not None and cached_max is not None
+                and cached_min <= start_ts <= cached_max):
+            start_ts = cached_max + 1  # incremental: refetch nothing we already have
     if start_ts >= end_ts:
         log.info("%s [%s]: cache already covers window", ticker, interval)
         return FetchResult(attempted=False, parsed=0, written=0)
@@ -192,7 +256,8 @@ def collect_ticker(conn, ticker: str, start_ts: int, end_ts: int,
 
 
 def collect_many(cfg: dict, conn, tickers: list[str], start_ts: int,
-                 end_ts: int, interval: str, resume: bool = False) -> int:
+                 end_ts: int, interval: str, resume: bool = False,
+                 force: bool = False) -> int:
     """Collect bars for many tickers. Returns rows parsed across the run.
 
     Per-ticker failures are logged and the run continues — one delisted symbol
@@ -201,6 +266,17 @@ def collect_many(cfg: dict, conn, tickers: list[str], start_ts: int,
     `KeyboardInterrupt` is deliberately not caught (`except Exception` does not
     cover it), so Ctrl-C stops the run with everything collected so far saved.
     """
+    if start_ts >= end_ts:
+        # A swapped/typo'd --start/--end used to be indistinguishable from a
+        # legitimate "cache already covers window" no-op: every ticker would
+        # come back attempted=False, which the zero-record guard below also
+        # ignores, so the whole run "succeeded" having fetched nothing, for
+        # every ticker, forever. Fail loudly on the malformed range instead.
+        raise SystemExit(
+            f"--start ({ts_to_iso(start_ts)}) is not before --end "
+            f"({ts_to_iso(end_ts)}) — refusing an inverted or empty date "
+            f"range instead of silently fetching nothing."
+        )
     source = fetch_source(interval)
     skip = db.completed_keys(conn, source) if resume else set()
     if skip:
@@ -221,7 +297,7 @@ def collect_many(cfg: dict, conn, tickers: list[str], start_ts: int,
         guarded = ticker not in known_empty
         try:
             res = collect_ticker(conn, ticker, start_ts, end_ts, interval,
-                                 limiter=limiter)
+                                 limiter=limiter, force=force)
         except Exception as exc:
             failed += 1
             attempted += 1
@@ -363,7 +439,10 @@ def main() -> None:
     parser.add_argument("--start", help="YYYY-MM-DD (default: per interval — "
                                        "daily reaches back min_history_days)")
     parser.add_argument("--end", help="YYYY-MM-DD (default: now)")
-    parser.add_argument("--interval", help="60m (default) or 1d")
+    parser.add_argument("--interval", choices=["60m", "1d"],
+                        help="60m (default) or 1d — the only two intervals "
+                             "this collector fetches or stores (see module "
+                             "docstring: 1m/5m/15m/30m are NOT used)")
     parser.add_argument("--resume", action="store_true",
                         help="skip tickers already collected for this interval")
     parser.add_argument("--report", action="store_true",
@@ -412,8 +491,20 @@ def main() -> None:
         return
 
     assert_not_frozen(cfg, conn, interval, start_ts, force=args.force)
+    if args.force and mcfg["snapshot_frozen"] and len(tickers) > 1:
+        # --force now genuinely bypasses the per-ticker incremental-cache
+        # check (see collect_ticker), not just the frozen-snapshot assertion.
+        # The freeze is whole-run, not per-ticker: --force on a multi-ticker
+        # batch (--universe/--candidates, or a --tickers list mixing new and
+        # already-frozen symbols) will re-download and potentially restate
+        # EVERY ticker in it, not just the new ones. Scope --tickers to just
+        # the new symbols to force-refresh only those.
+        log.warning("--force with %d tickers: every one of them may be "
+                    "re-downloaded and restated, not just new ones. If you "
+                    "only meant to backfill/add specific tickers, re-run with "
+                    "--tickers limited to those symbols.", len(tickers))
     collect_many(cfg, conn, tickers, start_ts, end_ts, interval,
-                 resume=args.resume)
+                 resume=args.resume, force=args.force)
 
     if args.stamp_snapshot:
         stamp = ts_to_iso(utc_now_ts())

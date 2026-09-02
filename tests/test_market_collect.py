@@ -233,15 +233,78 @@ def test_keyboard_interrupt_stops_the_run(cfg, tmp_path, monkeypatch):
 def test_cache_covered_ticker_is_not_refetched(cfg, tmp_path, monkeypatch):
     """The incremental path: a second run with no new days issues no request.
 
-    The seeded frame's last bar is 2024-09-11, so a window ending there is
-    already covered and `collect_ticker` returns without touching the network.
+    The seeded frame's first bar is 2024-09-02 and its last is 2024-09-11, so a
+    window starting no earlier than the first bar and ending no later than the
+    last is already covered and `collect_ticker` returns without touching the
+    network. (A requested start EARLIER than the first cached bar is a
+    backfill, not a cache hit — see test_backfill_before_cached_range_is_still_fetched.)
     """
     conn = fresh_db(tmp_path, "cache.db")
     patch_yf(monkeypatch, FakeYF({t: frame("2024-09-02", 10) for t in TICKERS}))
-    run(cfg, conn, end="2024-09-11")
+    run(cfg, conn, start="2024-09-02", end="2024-09-11")
     second = patch_yf(monkeypatch, FakeYF({}))
-    run(cfg, conn, end="2024-09-11")
+    run(cfg, conn, start="2024-09-02", end="2024-09-11")
     assert second.calls == []
+
+
+def test_backfill_before_cached_range_is_still_fetched(cfg, tmp_path, monkeypatch):
+    """A window entirely BEFORE existing cached bars must not be skipped.
+
+    Regression for the bug where `collect_ticker` only compared the requested
+    start against MAX(ts_utc): a ticker with bars starting 2025-06-01 asked for
+    a 2020 window used to come back attempted=False/'cache already covers
+    window' without ever calling yfinance, silently dropping the backfill.
+    """
+    conn = fresh_db(tmp_path, "backfill.db")
+    db.upsert_bars(conn, [
+        ("TSLA", date_str_to_ts("2025-06-01"), 1.0, 1.0, 1.0, 1.0, 1.0, "1d"),
+    ])
+    fake = patch_yf(monkeypatch, FakeYF({"TSLA": frame("2020-01-01", 5)}))
+
+    res = market.collect_ticker(conn, "TSLA", date_str_to_ts("2020-01-01"),
+                                date_str_to_ts("2020-06-01"), "1d")
+    assert res.attempted and res.written > 0
+    assert fake.calls == ["TSLA"]
+    # the pre-existing later bar must survive alongside the backfilled ones
+    assert conn.execute(
+        "SELECT COUNT(*) FROM bars WHERE ticker = 'TSLA'"
+    ).fetchone()[0] == 1 + 5
+
+
+def test_force_bypasses_the_incremental_cache_check(cfg, tmp_path, monkeypatch):
+    """--force's own help text promises a re-download even though 'covered'.
+
+    Before the fix, `force` only reached `assert_not_frozen`; `collect_ticker`
+    had no way to know about it and would skip a window the cache appeared to
+    already cover, regardless of --force.
+    """
+    conn = fresh_db(tmp_path, "force_cache.db")
+    patch_yf(monkeypatch, FakeYF({"AAPL": frame("2024-09-02", 10)}))
+    start, end = date_str_to_ts("2024-09-02"), date_str_to_ts("2024-09-11")
+    market.collect_ticker(conn, "AAPL", start, end, "1d")  # populate the cache
+
+    # Without force: the cache spans the whole window, so nothing is fetched.
+    fake = patch_yf(monkeypatch, FakeYF({"AAPL": frame("2024-09-02", 10)}))
+    res = market.collect_ticker(conn, "AAPL", start, end, "1d")
+    assert not res.attempted and fake.calls == []
+
+    # With force: the same, already-covered window is fetched regardless.
+    res = market.collect_ticker(conn, "AAPL", start, end, "1d", force=True)
+    assert res.attempted and fake.calls == ["AAPL"]
+
+
+def test_swapped_start_end_fails_loudly(cfg, tmp_path, monkeypatch):
+    """A --start after --end typo must not look like a quiet, successful no-op.
+
+    Before the fix this returned attempted=False for every ticker ('cache
+    already covers window'), which the zero-record guard also ignores, so the
+    whole run exited 0 having fetched nothing.
+    """
+    patch_yf(monkeypatch, FakeYF({}))
+    conn = fresh_db(tmp_path, "swapped.db")
+    with pytest.raises(SystemExit, match="is not before --end"):
+        collect_many(cfg, conn, ["AAPL"], date_str_to_ts("2026-01-01"),
+                    date_str_to_ts("2025-01-01"), "1d")
 
 
 def test_limiter_waits_once_per_request_and_never_for_a_cached_ticker(
@@ -252,7 +315,7 @@ def test_limiter_waits_once_per_request_and_never_for_a_cached_ticker(
     conn = fresh_db(tmp_path, "lim.db")
     patch_yf(monkeypatch, FakeYF({"AAPL": frame("2024-09-02", 10)}))
 
-    start, end = date_str_to_ts("2024-09-01"), date_str_to_ts("2024-09-11")
+    start, end = date_str_to_ts("2024-09-02"), date_str_to_ts("2024-09-11")
     market.collect_ticker(conn, "AAPL", start, end, "1d", limiter=limiter)
     assert len(waits) == 1
     market.collect_ticker(conn, "AAPL", start, end, "1d", limiter=limiter)
@@ -425,7 +488,40 @@ def test_frozen_without_a_stamp_refuses(cfg, tmp_path):
         assert_not_frozen(frozen_cfg(cfg), conn, "1d", date_str_to_ts("2024-09-01"))
 
 
+def test_frozen_without_a_stamp_message_names_the_real_remedy(cfg, tmp_path):
+    """Regression: the error used to say '--stamp-snapshot' alone fixes it.
+
+    `assert_not_frozen` runs before the --stamp-snapshot step ever writes a
+    stamp, so following that literal advice looped on the same SystemExit
+    forever. The only way out on a fresh DB is --force + --stamp-snapshot
+    together; the message must say so.
+    """
+    conn = fresh_db(tmp_path, "nostamp2.db")
+    with pytest.raises(SystemExit, match=r"--force together with --stamp-snapshot"):
+        assert_not_frozen(frozen_cfg(cfg), conn, "1d", date_str_to_ts("2024-09-01"))
+    # and --force does let a fresh bootstrap through, as the message promises
+    assert_not_frozen(frozen_cfg(cfg), conn, "1d", date_str_to_ts("2024-09-01"),
+                      force=True)  # no raise
+
+
 def test_unfrozen_is_unaffected(cfg, tmp_path):
     conn = fresh_db(tmp_path, "unfrozen.db")
     assert_not_frozen(frozen_cfg(cfg, frozen=False), conn, "1d",
                       date_str_to_ts("2024-09-01"))   # no raise
+
+
+# --------------------------------------------------------------------------
+# CLI argument validation
+# --------------------------------------------------------------------------
+
+def test_interval_rejects_an_unsupported_value(monkeypatch):
+    """Only '60m'/'1d' are ever fetched or stored (see module docstring); a
+    typo like '1D' used to sail through and create a disconnected fetch_state
+    namespace instead of failing clearly. argparse rejects it before any
+    config load or network access is attempted."""
+    monkeypatch.setattr(
+        "sys.argv",
+        ["market.py", "--tickers", "AAPL", "--interval", "5m"],
+    )
+    with pytest.raises(SystemExit):
+        market.main()

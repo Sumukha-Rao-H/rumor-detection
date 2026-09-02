@@ -214,8 +214,25 @@ def company_rows(cfg: dict, payload: dict) -> list[dict]:
     built from today has already dropped every company that was acquired or
     delisted, which is exactly the dramatic events this study is about.
     """
+    if not isinstance(payload, dict) or "fields" not in payload:
+        raise EdgarRequestError(
+            f"company_tickers payload missing 'fields' — expected a dict "
+            f"with 'fields' and 'data', got "
+            f"{sorted(payload.keys()) if isinstance(payload, dict) else type(payload).__name__}"
+        )
     fields = [f.lower() for f in payload["fields"]]
-    idx = {name: fields.index(name) for name in ("cik", "name", "ticker", "exchange")}
+    try:
+        idx = {name: fields.index(name) for name in ("cik", "name", "ticker", "exchange")}
+    except ValueError as exc:
+        raise EdgarRequestError(
+            f"company_tickers payload's 'fields' is missing one of "
+            f"('cik', 'name', 'ticker', 'exchange') — got {fields}"
+        ) from exc
+    if "data" not in payload:
+        raise EdgarRequestError(
+            f"company_tickers payload missing 'data' — expected a dict with "
+            f"'fields' and 'data', got top-level keys {sorted(payload.keys())}"
+        )
     keep = set(cfg["universe"]["exchanges"])
     as_of = date_str_to_ts(cfg["study_window"]["start"])
 
@@ -265,6 +282,36 @@ def build_universe(cfg: dict, conn, client: EdgarClient | None = None,
     return len(rows)
 
 
+def check_rate_limit_config(ecfg: dict) -> None:
+    """Make `edgar.max_requests_per_s` load-bearing instead of decorative.
+
+    Only `RateLimiter(ecfg["min_interval_s"])` is ever read on the request
+    path — `max_requests_per_s` was pure documentation, so editing it alone
+    (e.g. bumping it to a still-SEC-legal 10) silently changed nothing. That
+    is fine for tests, which deliberately zero `min_interval_s` for speed and
+    have no real request to pace, but it is exactly the kind of silent no-op
+    rule 7 exists to prevent for a real run — so the pair is validated here,
+    at CLI startup, rather than inside `EdgarClient` where every test
+    constructs one. Wiring it in this way (validating `min_interval_s`
+    against it) is the smaller, safer change over deriving one value from the
+    other outright, which would also have to decide which one wins.
+    """
+    if "max_requests_per_s" not in ecfg:
+        return
+    max_rps = float(ecfg["max_requests_per_s"])
+    if max_rps <= 0:
+        raise ValueError(f"edgar.max_requests_per_s must be > 0, got {max_rps}")
+    implied_min_interval_s = 1.0 / max_rps
+    min_interval_s = float(ecfg["min_interval_s"])
+    if min_interval_s < implied_min_interval_s - 1e-9:
+        raise ValueError(
+            f"config/config.yaml: edgar.min_interval_s ({min_interval_s}) "
+            f"paces faster than edgar.max_requests_per_s ({max_rps}) allows "
+            f"(needs >= {implied_min_interval_s:.6f}s) — the two keys "
+            f"disagree about the request rate"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-universe", action="store_true",
@@ -283,12 +330,15 @@ def main() -> None:
     parser.add_argument("--report", action="store_true",
                         help="print the sanity report on what has been collected")
     parser.add_argument("--force", action="store_true",
-                        help="re-fetch instead of serving from the raw cache")
+                        help="re-fetch instead of serving from the raw cache "
+                             "(applies to --build-universe and to "
+                             "--universe/--tickers alike)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
     cfg = load_config()
+    check_rate_limit_config(cfg["edgar"])
     if not (args.build_universe or args.universe or args.tickers
             or args.report or args.link_predecessors):
         parser.error("nothing to do — pass --build-universe, --universe, "
@@ -300,7 +350,8 @@ def main() -> None:
         return
     if args.link_predecessors:
         result = link_predecessors(cfg, conn, dry_run=args.dry_run)
-        print(f"\ncandidates {result['candidates']}  successors "
+        print(f"\ncandidates {result['candidates']}  fetch_failed "
+              f"{result.get('fetch_failed', 0)}  successors "
               f"{result['successors']}  linked {len(result['linked'])}  "
               f"unresolved {len(result['unresolved'])}")
         for row in result["linked"]:
@@ -317,7 +368,7 @@ def main() -> None:
     if args.universe or args.tickers:
         tickers = ([t.strip().upper() for t in args.tickers.split(",") if t.strip()]
                    if args.tickers else None)
-        collect_many(cfg, conn, tickers=tickers, resume=args.resume)
+        collect_many(cfg, conn, tickers=tickers, resume=args.resume, force=args.force)
 
 
 
@@ -385,25 +436,31 @@ def records_from_block(block: dict) -> list[dict]:
 
 def fetch_company_filings(cfg: dict, client: EdgarClient, cik: str,
                           since_ts: int | None = None,
-                          until_ts: int | None = None) -> list[dict]:
+                          until_ts: int | None = None,
+                          force: bool = False) -> list[dict]:
     """Every filing record for one CIK that could fall inside the window.
 
     Returns raw records — all form types, SEC's own field names and string
     values. The 8-K filter and the type conversions are P2-04, because page
     selection depends on all filings' dates: a page holding one 8-K among
     2,000 Form 4s must still be fetched.
+
+    `force` bypasses the raw cache for this company's submissions file and
+    every older-filings page it reads, so a stuck or corrupted cache entry can
+    be deliberately refreshed instead of requiring someone to delete it from
+    disk by hand.
     """
     since_ts = since_ts if since_ts is not None else date_str_to_ts(
         cfg["study_window"]["start"])
     until_ts = until_ts if until_ts is not None else date_str_to_ts(
         cfg["study_window"]["end"])
 
-    payload = client.get_json(client.submissions_url(cik))
+    payload = client.get_json(client.submissions_url(cik), force=force)
     filings = payload.get("filings", {})
     records = records_from_block(filings.get("recent", {}))
 
     for name in pages_to_fetch(filings.get("files", []), since_ts, until_ts):
-        page = client.get_json(client.submissions_page_url(name))
+        page = client.get_json(client.submissions_page_url(name), force=force)
         records.extend(records_from_block(page))
 
     # Consecutive pages share an edge date, so the same filing can arrive
@@ -455,43 +512,62 @@ def filing_rows(cfg: dict, records: list[dict], cik: str,
     Blank dates become NULL rather than 0. A zero would read as 1 January 1970
     and become the oldest "event" in the study, which nothing downstream would
     flag as odd.
+
+    A record that fails to parse (a malformed date, a missing required field)
+    is skipped and counted rather than raised: SEC's older pages are less
+    clean than `recent`, and one bad row must not throw away every good row
+    already parsed for this company's whole history — that would make a
+    company with 200 real 8-Ks indistinguishable from one that filed nothing.
     """
     keep = set(cfg["edgar"]["forms"])
     fetched = utc_now_ts()
     rows = []
+    skipped = 0
     for record in records:
         if record.get("form") not in keep:
             continue
-        acceptance = record.get("acceptanceDateTime") or None
-        filing_date = record.get("filingDate") or None
-        report_date = record.get("reportDate") or None
-        rows.append({
-            "accession_no": record["accessionNumber"],
-            "cik": cik,
-            "ticker": ticker,
-            "form": record["form"],
-            "items": normalise_items(record.get("items")),
-            # The `Z` on acceptanceDateTime means UTC. Misread as local time,
-            # every t0 in the study moves by four or five hours — and by a
-            # different amount either side of a daylight-saving change.
-            "acceptance_utc": iso_utc_to_ts(acceptance) if acceptance else None,
-            "filing_date_utc": date_str_to_ts(filing_date) if filing_date else None,
-            "report_date_utc": date_str_to_ts(report_date) if report_date else None,
-            "primary_doc": record.get("primaryDocument") or None,
-            "fetched_utc": fetched,
-        })
+        try:
+            acceptance = record.get("acceptanceDateTime") or None
+            filing_date = record.get("filingDate") or None
+            report_date = record.get("reportDate") or None
+            rows.append({
+                "accession_no": record["accessionNumber"],
+                "cik": cik,
+                "ticker": ticker,
+                "form": record["form"],
+                "items": normalise_items(record.get("items")),
+                # The `Z` on acceptanceDateTime means UTC. Misread as local
+                # time, every t0 in the study moves by four or five hours —
+                # and by a different amount either side of a daylight-saving
+                # change.
+                "acceptance_utc": iso_utc_to_ts(acceptance) if acceptance else None,
+                "filing_date_utc": date_str_to_ts(filing_date) if filing_date else None,
+                "report_date_utc": date_str_to_ts(report_date) if report_date else None,
+                "primary_doc": record.get("primaryDocument") or None,
+                "fetched_utc": fetched,
+            })
+        except (ValueError, KeyError, EdgarRequestError) as exc:
+            skipped += 1
+            log.warning(
+                "skipping malformed %s record for %s (%s), accession=%r: %s: %s",
+                record.get("form"), ticker or "?", cik,
+                record.get("accessionNumber", "?"), type(exc).__name__, exc,
+            )
+    if skipped:
+        log.warning("%s (%s): skipped %d malformed record(s), kept %d",
+                     ticker or "?", cik, skipped, len(rows))
     return rows
 
 
 def collect_company(cfg: dict, conn, client: EdgarClient, cik: str,
-                    ticker: str | None) -> tuple[int, int]:
+                    ticker: str | None, force: bool = False) -> tuple[int, int]:
     """Fetch one company's submissions and store its 8-K rows.
 
     Returns `(records fetched, new rows)`. The record count is what the
     run-level guard watches: a company with no 8-Ks is ordinary, but a company
     with no records at all means the endpoint gave us nothing.
     """
-    records = fetch_company_filings(cfg, client, cik)
+    records = fetch_company_filings(cfg, client, cik, force=force)
     rows = filing_rows(cfg, records, cik, ticker)
     new = db.upsert_filings(conn, rows)
     log.info("%s (%s): %d records fetched, %d %s rows, %d new",
@@ -510,7 +586,7 @@ FETCH_SOURCE = "edgar"
 
 def collect_many(cfg: dict, conn, client: EdgarClient | None = None,
                  tickers: list[str] | None = None,
-                 resume: bool = False) -> int:
+                 resume: bool = False, force: bool = False) -> int:
     """Collect filings for many companies. Returns new rows written.
 
     Per-company failures are logged and the run continues — one 404 must not
@@ -528,6 +604,14 @@ def collect_many(cfg: dict, conn, client: EdgarClient | None = None,
     client = client or EdgarClient(cfg)
     companies = db.companies_for_collection(conn, tickers)
     if not companies:
+        if tickers:
+            total = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
+            raise SystemExit(
+                f"no company in `companies` matches --tickers {tickers} "
+                f"(table holds {total} companies) — check for a typo, or "
+                f"that the ticker is actually in `edgar.exchanges`. "
+                f"`--build-universe` will not fix a wrong ticker."
+            )
         raise SystemExit(
             "companies table is empty — run "
             "`python -m src.collectors.edgar --build-universe` first."
@@ -545,7 +629,7 @@ def collect_many(cfg: dict, conn, client: EdgarClient | None = None,
             continue
         attempted += 1
         try:
-            records, new = collect_company(cfg, conn, client, cik, ticker)
+            records, new = collect_company(cfg, conn, client, cik, ticker, force=force)
         except Exception as exc:
             failed += 1
             log.exception("failed to collect %s (%s) — continuing", ticker, cik)
@@ -567,7 +651,12 @@ def collect_many(cfg: dict, conn, client: EdgarClient | None = None,
 
     # The silent-failure guard. A 200 carrying redirect HTML already raises in
     # get_json; this catches the other shape of the same failure — every
-    # response valid JSON, and nothing in any of them.
+    # response valid JSON, and nothing in any of them. `total_records` (every
+    # form fetched) catches a dead endpoint; `total_new` (actual 8-K rows
+    # written) catches the narrower case where EDGAR answers with real data
+    # for every company but none of it matches `edgar.forms` — a config typo
+    # or a schema change would otherwise leave `filings` frozen forever with
+    # every run exiting 0.
     if cfg["logging"]["fail_on_zero_records"]:
         if attempted and failed == attempted:
             raise SystemExit(
@@ -580,9 +669,20 @@ def collect_many(cfg: dict, conn, client: EdgarClient | None = None,
                 f"response carrying nothing usable. Do not treat this run as "
                 f"successful."
             )
+        if attempted and total_records > 0 and total_new == 0:
+            raise SystemExit(
+                f"{total_records} records parsed across {attempted} "
+                f"companies but ZERO matched edgar.forms {cfg['edgar']['forms']} "
+                f"— check that against EDGAR's current schema. Do not treat "
+                f"this run as successful."
+            )
     elif attempted and total_records == 0:
         log.error("ZERO records parsed across %d companies "
                   "(logging.fail_on_zero_records is off)", attempted)
+    elif attempted and total_new == 0:
+        log.error("%d records parsed across %d companies but ZERO matched "
+                  "edgar.forms %s (logging.fail_on_zero_records is off)",
+                  total_records, attempted, cfg["edgar"]["forms"])
     return total_new
 
 
@@ -804,14 +904,64 @@ def name_stem(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", _LEGAL_SUFFIX.sub("", (name or "").lower()))
 
 
-def is_successor(cfg: dict, submissions: dict) -> bool:
+def _submission_records(client: EdgarClient, submissions: dict) -> list[dict]:
+    """Every filing record in an already-fetched submissions payload.
+
+    Includes `filings.files` pages, not just `recent` — the same reason
+    `fetch_company_filings` (P2-03) pages at all: `recent` covers only the
+    most recent 1,000 filings or one year, and for an actively-traded company
+    a marker filing (8-K12B) or a predecessor's prior 8-Ks can have rolled off
+    it. Unlike `fetch_company_filings`, every page is fetched rather than only
+    the ones overlapping the study window: these checks need the CIK's whole
+    history, since a reorganisation or a predecessor's last 8-K can land
+    outside it.
+
+    A page that cannot be fetched is logged and skipped rather than allowed to
+    propagate: an unguarded `get_json` here crashed the whole
+    `--link-predecessors` run on a single transient 503 for one candidate CIK,
+    unlike every sibling fetch in this module. Skipping fails in the SAFE
+    direction — a missing page can only hide a marker, so `is_successor`
+    answers False and the link is merely missed, never wrongly attributed,
+    which is the trade this module explicitly chooses ("a wrong link silently
+    attributes another company's 8-Ks to this ticker, which is worse than the
+    gap it is meant to close").
+    """
+    filings = submissions.get("filings", {})
+    records = records_from_block(filings.get("recent", {}))
+    for page in filings.get("files", []) or []:
+        name = page.get("name")
+        if not name:
+            continue
+        try:
+            block = client.get_json(client.submissions_page_url(name))
+        except EdgarRequestError as exc:
+            log.warning("submissions page %s unavailable (%s) — skipping it; "
+                        "this CIK's filing history is incomplete for this "
+                        "check, so a marker on that page cannot be seen",
+                        name, exc)
+            continue
+        records.extend(records_from_block(block))
+    return records
+
+
+def is_successor(cfg: dict, submissions: dict,
+                 client: EdgarClient | None = None) -> bool:
     """Did this CIK file a form declaring it continues another company?
 
     Form 8-K12B is "registration of securities of successor issuers". It is the
     only unambiguous marker available without reading filing text: of the 423
     CIKs with no history before the window, exactly 11 filed one.
+
+    Pass `client` to also check `filings.files` pages, not just `recent` — for
+    a heavy filer, the marker can have rolled off `recent` since it was filed.
+    Omitting `client` checks `recent` only (the historical, pre-pagination
+    behaviour), which is exact whenever the marker is still within `recent`.
     """
-    forms = set(submissions.get("filings", {}).get("recent", {}).get("form", []))
+    if client is not None:
+        records = _submission_records(client, submissions)
+        forms = {r.get("form") for r in records}
+    else:
+        forms = set(submissions.get("filings", {}).get("recent", {}).get("form", []))
     return bool(forms & set(cfg["edgar"]["successor_forms"]))
 
 
@@ -888,7 +1038,7 @@ def verify_predecessor(cfg: dict, conn, client: EdgarClient, candidate_cik: str,
     if successor_sic and submissions.get("sic") != successor_sic:
         return False, (f"SIC {submissions.get('sic')} != successor's "
                        f"{successor_sic}")
-    records = records_from_block(submissions.get("filings", {}).get("recent", {}))
+    records = _submission_records(client, submissions)
     keep = set(cfg["edgar"]["forms"])
     prior = [r for r in records
              if r.get("form") in keep and r.get("acceptanceDateTime")
@@ -911,20 +1061,37 @@ def link_predecessors(cfg: dict, conn, client: EdgarClient | None = None,
 
     candidates = ciks_with_no_history_before_the_window(conn, window_start)
     successors, unresolved, linked = [], [], []
+    fetch_failed = 0
     for row in candidates:
         try:
             submissions = client.get_json(client.submissions_url(row["cik"]))
-        except EdgarRequestError:
+        except EdgarRequestError as exc:
+            # A bare `continue` here made a total EDGAR outage during this run
+            # look identical to "no reorganised companies" — same "successors
+            # 0" line, exit 0, no signal anywhere. Count and log it instead,
+            # consistent with how `collect_many` reports per-company failures.
+            fetch_failed += 1
+            log.warning("could not fetch submissions for candidate CIK %s "
+                        "(%s): %s", row["cik"], row["ticker"], exc)
             continue
-        if is_successor(cfg, submissions):
+        if is_successor(cfg, submissions, client=client):
             successors.append((row, submissions))
 
-    log.info("%d candidate CIK(s) with no prior history; %d filed %s",
-             len(candidates), len(successors),
+    log.info("%d candidate CIK(s) with no prior history; %d fetch failure(s); "
+             "%d filed %s", len(candidates), fetch_failed, len(successors),
              "/".join(cfg["edgar"]["successor_forms"]))
+    if candidates and fetch_failed == len(candidates):
+        # Every single candidate fetch failed — EDGAR is not answering, not
+        # "nothing to link this run". Same class of guard as `collect_many`'s
+        # "EVERY one of N companies failed".
+        raise SystemExit(
+            f"EVERY one of {len(candidates)} candidate CIK fetch(es) failed "
+            f"— EDGAR is not answering. Do not treat this run's "
+            f"'successors 0' as a real result."
+        )
     if not successors:
         return {"candidates": len(candidates), "successors": 0,
-                "linked": [], "unresolved": []}
+                "fetch_failed": fetch_failed, "linked": [], "unresolved": []}
 
     lookup = load_cik_lookup(cfg, client)
     for row, submissions in successors:
@@ -960,7 +1127,7 @@ def link_predecessors(cfg: dict, conn, client: EdgarClient | None = None,
                         "verification — reported, not guessed",
                         row["ticker"], row["cik"], name, len(accepted))
     return {"candidates": len(candidates), "successors": len(successors),
-            "linked": linked, "unresolved": unresolved}
+            "fetch_failed": fetch_failed, "linked": linked, "unresolved": unresolved}
 
 
 if __name__ == "__main__":

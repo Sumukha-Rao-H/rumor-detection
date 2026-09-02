@@ -13,8 +13,9 @@ rate-limited and unreliable under load — treat it as optional, never as a
 blocking dependency. Never scrape Reuters/Bloomberg directly; an aggregator's
 headline plus timestamp is all the t0 correction needs.
 
-The credibility whitelist (config `news.whitelist`) is applied at t0-resolution
-time, not here — the collector stores everything it sees, deduped by URL.
+The credibility whitelist (config `news.whitelist_tier1` / `whitelist_tier2`)
+is applied at t0-resolution time, not here — the collector stores everything
+it sees, deduped by URL.
 
 Usage:
   python -m src.collectors.news --ticker TSLA --start 2025-01-01 --end 2025-01-08
@@ -135,29 +136,42 @@ def finnhub_items_to_rows(cfg: dict, items: list[dict], ticker: str) -> list[tup
     Its `datetime` field is the PUBLICATION time, which is exactly what t0
     needs, so it goes in `published_utc`. `seen_utc` (crawl time) is left NULL:
     this API does not report one.
+
+    One record with an unparseable `datetime` skips only that record — it used
+    to be `int(ts)` with no guard, so a single bad record in a batch raised and
+    dropped every other article in the same response, not just the bad one.
     """
     fetched = utc_now_ts()
     rows = []
+    skipped = 0
     for item in items:
         url, ts = item.get("url"), item.get("datetime")
-        if not url or not ts:
+        if not url or ts is None:
+            continue
+        try:
+            published_utc = int(ts)
+        except (TypeError, ValueError):
+            skipped += 1
             continue
         name = (item.get("source") or "").strip() or None
         rows.append({
             "url": url, "ticker": ticker, "title": item.get("headline") or "",
             "source_domain": None, "source_name": name,
             "source_tier": tier_of(cfg, None, name),
-            "published_utc": int(ts),       # Finnhub's `datetime` IS publication
+            "published_utc": published_utc,  # Finnhub's `datetime` IS publication
             "seen_utc": None,               # no crawl time from this API
             "fetched_utc": fetched, "api": "finnhub",
         })
+    if skipped:
+        log.warning("Finnhub %s: skipped %d record(s) with an unparseable "
+                    "timestamp", ticker, skipped)
     return rows
 
 
 def fetch_gdelt(cfg: dict, session: requests.Session, query: str,
                 start_ts: int, end_ts: int) -> list[dict]:
     ncfg = cfg["news"]
-    backoff = Backoff(base_s=15)
+    backoff = Backoff(base_s=ncfg["backoff_base_s"])
     for _ in range(5):
         try:
             resp = session.get(ncfg["gdelt_base"], params={
@@ -186,15 +200,57 @@ def fetch_gdelt(cfg: dict, session: requests.Session, query: str,
 
 def fetch_finnhub(cfg: dict, session: requests.Session, api_key: str,
                   ticker: str, start_ts: int, end_ts: int) -> list[dict]:
-    base = cfg["news"]["finnhub_base"]
-    resp = session.get(f"{base}/company-news", params={
+    """Fetch one ticker's `/company-news` window, with GDELT-grade error handling.
+
+    Finnhub's `from`/`to` are calendar dates, both inclusive — but `end_ts` is
+    the EXCLUSIVE end of a half-open window (see `date_windows`), so the date
+    is taken one second before it. Without this, the boundary day gets counted
+    in both this window's `to` and the following window's `from`, doubling one
+    day's worth of requests at every `max_window_days` seam. `max(start_ts, ...)`
+    keeps a zero-length window's `to` from landing before its `from`.
+
+    Retries 429/503 and request errors with exponential backoff, same as
+    `fetch_gdelt` — Finnhub previously had none, so one transient rate-limit
+    blip cost the whole (ticker, window) pair instead of self-healing. Also
+    guards against the same two "looks like 200 OK, isn't" shapes GDELT already
+    guards against: a non-JSON body (redirect HTML) and a body that parses but
+    isn't the expected list (Finnhub's documented error shape is a `{"error":
+    ...}` dict, which would otherwise reach `finnhub_items_to_rows` and crash
+    on `.get()` against a string).
+    """
+    ncfg = cfg["news"]
+    base = ncfg["finnhub_base"]
+    inclusive_end = max(start_ts, end_ts - 1)
+    params = {
         "symbol": ticker,
         "from": ts_to_dt(start_ts).strftime("%Y-%m-%d"),
-        "to": ts_to_dt(end_ts).strftime("%Y-%m-%d"),
+        "to": ts_to_dt(inclusive_end).strftime("%Y-%m-%d"),
         "token": api_key,
-    }, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+    }
+    backoff = Backoff(base_s=ncfg["backoff_base_s"])
+    for _ in range(5):
+        try:
+            resp = session.get(f"{base}/company-news", params=params, timeout=30)
+            if resp.status_code in (429, 503):
+                backoff.sleep(f"HTTP {resp.status_code} from Finnhub")
+                continue
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            backoff.sleep(f"Finnhub request failed: {exc}")
+            continue
+        try:
+            data = resp.json()
+        except ValueError:  # Finnhub returns HTML on some redirect/error paths
+            log.error("Finnhub non-JSON response for %s: %s",
+                      ticker, resp.text[:200])
+            return []
+        if not isinstance(data, list):
+            log.error("Finnhub unexpected response shape for %s: %r",
+                      ticker, data)
+            return []
+        return data
+    log.error("Finnhub: giving up after repeated failures for %s", ticker)
+    return []
 
 
 def default_gdelt_query(conn, ticker: str) -> str:
@@ -230,6 +286,22 @@ def date_windows(cfg: dict, start_ts: int, end_ts: int) -> list[tuple[int, int]]
 #: Namespace for the backfill's rows in `fetch_state`. Keyed per
 #: (ticker, window) pair, because a 15-hour run cannot restart from the top.
 FETCH_SOURCE = "news:backfill"
+
+
+def _require_credentials(apis: list[str]) -> None:
+    """Fail fast, before the per-(ticker, window) loop, on a missing API key.
+
+    `require_env` already raises a clear, actionable `RuntimeError`. But
+    `collect()` only calls it lazily, on the first Finnhub request, and both
+    `collect_many` and `collect_targets` wrap every per-ticker/per-window call
+    in a broad `except Exception: log.exception(...); continue`. That swallows
+    the real cause into a per-item traceback and lets the run limp on to a
+    misleading "ZERO records parsed... the endpoint is broken" exit — on
+    exactly the most common day-one setup mistake. Checking once, up front,
+    lets the RuntimeError propagate uncaught with its real message instead.
+    """
+    if "finnhub" in apis:
+        require_env("FINNHUB_API_KEY")
 
 
 def window_grid(cfg: dict) -> list[tuple[int, int]]:
@@ -312,6 +384,7 @@ def collect_targets(cfg: dict, conn, targets: list[tuple[str, int, int, int]],
     `KeyboardInterrupt` is deliberately not caught, so Ctrl-C stops the run
     with every pair collected so far already committed.
     """
+    _require_credentials(apis)
     ncfg = cfg["news"]
     gdelt_limiter = RateLimiter(ncfg["gdelt_min_interval_s"])
     finnhub_limiter = RateLimiter(ncfg["finnhub_min_interval_s"])
@@ -372,6 +445,40 @@ def universe_tickers_for_news(conn) -> list[str]:
         "SELECT ticker FROM companies WHERE ticker IS NOT NULL ORDER BY ticker")]
 
 
+def _log_cross_ticker_articles(conn, rows: list[dict]) -> None:
+    """Note, at debug level, a URL already on record under a DIFFERENT ticker.
+
+    This began life as a WARNING, when `news.url` was the sole PRIMARY KEY and
+    `upsert_news`'s `ON CONFLICT(url)` never updated `ticker` — the second
+    ticker's article really did end up with no row
+    `db.earliest_news_ts(conn, that_ticker, ...)` could ever see, silently
+    costing that ticker its t0 correction.
+
+    `src/db.py` now keys `news` on `PRIMARY KEY (url, ticker)`, so both
+    associations are stored and both tickers see the article. A shared wire
+    story across two covered companies is ordinary and frequent — one run
+    logged thousands of them — so warning about it is noise that actively
+    misleads anyone reading the log while debugging a missing t0. Kept at
+    debug level only, because "which articles are shared between tickers" is
+    still occasionally worth being able to see.
+    """
+    urls = [r["url"] for r in rows]
+    if not urls or not log.isEnabledFor(logging.DEBUG):
+        return
+    placeholders = ",".join("?" for _ in urls)
+    existing: dict[str, set[str]] = {}
+    for url, ticker in conn.execute(
+        f"SELECT url, ticker FROM news WHERE url IN ({placeholders})", urls
+    ):
+        existing.setdefault(url, set()).add(ticker)
+    for row in rows:
+        others = existing.get(row["url"], set()) - {row["ticker"]}
+        if others:
+            log.debug("news url %r is shared with ticker(s) %s; storing it "
+                      "under %r as an additional association",
+                      row["url"], sorted(others), row["ticker"])
+
+
 def collect(cfg: dict, conn, ticker: str, query: str | None,
             start_ts: int, end_ts: int, apis: list[str],
             gdelt_limiter: RateLimiter | None = None,
@@ -395,6 +502,7 @@ def collect(cfg: dict, conn, ticker: str, query: str | None,
         items = fetch_finnhub(cfg, session, api_key, ticker, start_ts, end_ts)
         rows = finnhub_items_to_rows(cfg, items, ticker)
         parsed += len(rows)
+        _log_cross_ticker_articles(conn, rows)
         n = db.upsert_news(conn, rows)
         log.info("Finnhub %s: %d items, %d new", ticker, len(items), n)
 
@@ -404,6 +512,7 @@ def collect(cfg: dict, conn, ticker: str, query: str | None,
         articles = fetch_gdelt(cfg, session, q, start_ts, end_ts)
         rows = gdelt_articles_to_rows(cfg, articles, ticker)
         parsed += len(rows)
+        _log_cross_ticker_articles(conn, rows)
         n = db.upsert_news(conn, rows)
         log.info("GDELT %r: %d articles, %d new", q, len(articles), n)
 
@@ -431,6 +540,7 @@ def collect_many(cfg: dict, conn, tickers: list[str], start_ts: int, end_ts: int
     writes nothing for days, and a process that exits 0 lets a scheduler report
     success.
     """
+    _require_credentials(apis)
     ncfg = cfg["news"]
     gdelt_limiter = RateLimiter(ncfg["gdelt_min_interval_s"])
     finnhub_limiter = RateLimiter(ncfg["finnhub_min_interval_s"])
@@ -494,9 +604,20 @@ def main() -> None:
     parser.add_argument("--query", help="GDELT query override, e.g. '\"Tesla\"'")
     parser.add_argument("--start", help="YYYY-MM-DD")
     parser.add_argument("--end", help="YYYY-MM-DD (default: now)")
-    parser.add_argument("--apis", default="finnhub,gdelt",
-                        help="comma-separated subset of finnhub,gdelt")
+    parser.add_argument("--apis", default=None,
+                        help="comma-separated subset of finnhub,gdelt. If "
+                             "omitted: both for a plain run, finnhub only for "
+                             "--backfill/--full-coverage (GDELT has been "
+                             "unreachable at every attempt).")
     args = parser.parse_args()
+    # None means "--apis was not passed" -- distinct from the user typing text
+    # that happens to match some default. The old check compared args.apis to
+    # parser.get_default("apis") by STRING, so `--apis finnhub,gdelt` (naming
+    # both explicitly) was indistinguishable from not passing --apis at all,
+    # while `--apis gdelt,finnhub` (the same two APIs, different order) was
+    # treated as explicit purely because the string didn't match.
+    explicit_apis = ([a.strip() for a in args.apis.split(",")]
+                     if args.apis is not None else None)
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] %(message)s")
@@ -523,8 +644,7 @@ def main() -> None:
                     "`python -m src.collectors.edgar --universe` first.")
         # GDELT is 5 s between requests and has been unreachable at every
         # attempt (issue 13); including it would take a 15-hour run to 66.
-        apis = ([a.strip() for a in args.apis.split(",")]
-                if args.apis != parser.get_default("apis") else ["finnhub"])
+        apis = explicit_apis if explicit_apis is not None else ["finnhub"]
         log.info("Backfill: %d (ticker, window) pair(s) across %d week(s) "
                  "via %s", len(targets), len(window_grid(cfg)), apis)
         collect_targets(cfg, conn, targets, apis, resume=args.resume)
@@ -558,7 +678,7 @@ def main() -> None:
         cfg, conn, tickers,
         start_ts=start_ts,
         end_ts=end_ts,
-        apis=[a.strip() for a in args.apis.split(",")],
+        apis=explicit_apis if explicit_apis is not None else ["finnhub", "gdelt"],
         query=args.query,
     )
     total = conn.execute("SELECT COUNT(*) FROM news").fetchone()[0]

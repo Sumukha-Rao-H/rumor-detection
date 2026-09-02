@@ -12,7 +12,9 @@ import copy
 import pytest
 
 from src import db
-from src.collectors.edgar import build_universe, company_rows, pick_primary_ticker
+from src.collectors.edgar import (
+    EdgarRequestError, build_universe, company_rows, pick_primary_ticker,
+)
 from src.utils.config import load_config
 from src.utils.timeutils import date_str_to_ts
 
@@ -167,3 +169,20 @@ def test_everything_filtered_out_also_raises(cfg, conn):
                 "data": [[999001, "Shell", "SHEL", "OTC"]]}
     with pytest.raises(RuntimeError, match="ZERO companies"):
         build_universe(cfg, conn, client=FakeClient(otc_only))
+
+
+# -- an unexpectedly shaped payload names what was expected, not a bare KeyError
+
+def test_a_payload_missing_fields_names_the_problem(cfg):
+    with pytest.raises(EdgarRequestError, match="missing 'fields'"):
+        company_rows(cfg, {"data": []})
+
+
+def test_a_payload_missing_data_names_the_problem(cfg):
+    with pytest.raises(EdgarRequestError, match="missing 'data'"):
+        company_rows(cfg, {"fields": PAYLOAD["fields"]})
+
+
+def test_a_payload_missing_an_expected_field_names_the_problem(cfg):
+    with pytest.raises(EdgarRequestError, match="cik.*name.*ticker.*exchange"):
+        company_rows(cfg, {"fields": ["name", "ticker", "exchange"], "data": []})

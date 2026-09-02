@@ -373,3 +373,322 @@ def test_universe_narrows_once_phase_3_sets_the_flag(tmp_path):
 def test_seed_watchlist_is_still_configured(cfg):
     """The P1-15 path stays usable for a quick single-company check."""
     assert len(cfg["news"]["seed_watchlist"]) >= 5
+
+
+# --------------------------------------------------------------------------
+# Fixer pass (audit findings) — HTTP-layer error handling, the --apis CLI
+# ambiguity, the swallowed missing-API-key error, and the Finnhub date-window
+# overlap. All HTTP is mocked with a fake `requests.Session`-shaped object;
+# nothing here ever calls out.
+# --------------------------------------------------------------------------
+
+import requests
+
+from src.collectors.news import fetch_finnhub
+from src.utils import ratelimit as _ratelimit
+
+
+class _FakeResponse:
+    """Just enough of a `requests.Response` for `fetch_finnhub`."""
+
+    def __init__(self, status_code=200, json_data=None, json_exc=None, text=""):
+        self.status_code = status_code
+        self._json_data = json_data
+        self._json_exc = json_exc
+        self.text = text
+
+    def raise_for_status(self):
+        if self.status_code >= 400 and self.status_code not in (429, 503):
+            raise requests.HTTPError(f"{self.status_code} error")
+
+    def json(self):
+        if self._json_exc is not None:
+            raise self._json_exc
+        return self._json_data
+
+
+def test_finnhub_malformed_timestamp_skips_only_that_record(cfg):
+    """Regression: one bad `datetime` used to raise out of the list
+    comprehension and drop every OTHER article in the same response too, not
+    just the bad one."""
+    items = [
+        {"url": "https://x/1", "headline": "a", "datetime": 100, "source": "CNBC"},
+        {"url": "https://x/2", "headline": "b", "datetime": "not-a-number",
+         "source": "CNBC"},
+        {"url": "https://x/3", "headline": "c", "datetime": -100, "source": "CNBC"},
+    ]
+    rows = finnhub_items_to_rows(cfg, items, "TSLA")
+    assert [r["url"] for r in rows] == ["https://x/1", "https://x/3"], (
+        "the good records on either side of the bad one must survive")
+
+
+def test_finnhub_zero_timestamp_is_not_treated_as_missing(cfg):
+    """`0` is a falsy but VALID int; `not ts` used to drop it exactly like a
+    genuinely absent field."""
+    items = [{"url": "https://x/1", "headline": "a", "datetime": 0,
+              "source": "CNBC"}]
+    rows = finnhub_items_to_rows(cfg, items, "TSLA")
+    assert len(rows) == 1
+    assert rows[0]["published_utc"] == 0
+
+
+def test_fetch_finnhub_retries_429_then_succeeds(cfg, monkeypatch):
+    """Regression: Finnhub had no retry/backoff on 429 at all, unlike GDELT."""
+    sleeps = []
+    monkeypatch.setattr(_ratelimit.time, "sleep", lambda s: sleeps.append(s))
+
+    responses = [
+        _FakeResponse(status_code=429),
+        _FakeResponse(status_code=200, json_data=[
+            {"url": "https://x/1", "headline": "h", "datetime": 1,
+             "source": "CNBC"}]),
+    ]
+
+    class FakeSession:
+        def get(self, url, params=None, timeout=None):
+            return responses.pop(0)
+
+    result = fetch_finnhub(cfg, FakeSession(), "KEY", "TSLA", 0, 100)
+    assert result == [{"url": "https://x/1", "headline": "h", "datetime": 1,
+                       "source": "CNBC"}]
+    assert sleeps == [cfg["news"]["backoff_base_s"]], (
+        "the retry delay must come from config, not a hardcoded constant")
+
+
+def test_fetch_finnhub_gives_up_after_repeated_429(cfg, monkeypatch):
+    monkeypatch.setattr(_ratelimit.time, "sleep", lambda s: None)
+
+    class FakeSession:
+        def get(self, *a, **k):
+            return _FakeResponse(status_code=429)
+
+    assert fetch_finnhub(cfg, FakeSession(), "KEY", "TSLA", 0, 100) == []
+
+
+def test_fetch_finnhub_non_json_response_does_not_crash(cfg):
+    """The exact failure AGENTS.md rule 8 names: HTTP 200 carrying a
+    redirect-HTML body. GDELT already guards this; Finnhub did not."""
+    class FakeSession:
+        def get(self, *a, **k):
+            return _FakeResponse(status_code=200,
+                                 json_exc=ValueError("Expecting value"),
+                                 text="<html>redirect</html>")
+
+    assert fetch_finnhub(cfg, FakeSession(), "KEY", "TSLA", 0, 100) == []
+
+
+def test_fetch_finnhub_error_dict_response_does_not_crash(cfg):
+    """Finnhub's documented error shape is `{"error": "..."}`, not a list.
+    Iterating a dict in `finnhub_items_to_rows` would hit `.get()` on a bare
+    string and crash — this must be caught here instead."""
+    class FakeSession:
+        def get(self, *a, **k):
+            return _FakeResponse(status_code=200,
+                                 json_data={"error": "invalid api key"})
+
+    assert fetch_finnhub(cfg, FakeSession(), "BAD", "TSLA", 0, 100) == []
+
+
+def test_fetch_finnhub_window_end_is_treated_as_exclusive(cfg):
+    """Regression for the boundary-day double-request bug.
+
+    `end_ts` is the EXCLUSIVE end of a half-open window, but Finnhub's `to` is
+    an inclusive calendar date. Passing `end_ts` straight through made the
+    boundary day identical to the next window's `from` date.
+    """
+    captured = {}
+
+    class FakeSession:
+        def get(self, url, params=None, timeout=None):
+            captured.update(params)
+            return _FakeResponse(status_code=200, json_data=[])
+
+    start, end = date_str_to_ts("2025-01-01"), date_str_to_ts("2025-01-08")
+    fetch_finnhub(cfg, FakeSession(), "KEY", "TSLA", start, end)
+    assert captured["from"] == "2025-01-01"
+    assert captured["to"] == "2025-01-07", (
+        "2025-01-08 belongs to the NEXT window's `from` only")
+
+
+def test_finnhub_adjacent_windows_never_request_the_same_day_twice(cfg):
+    start, end = date_str_to_ts("2025-01-01"), date_str_to_ts("2025-01-15")
+    windows = date_windows(cfg, start, end)
+    assert len(windows) == 2
+
+    seen = []
+
+    class FakeSession:
+        def get(self, url, params=None, timeout=None):
+            seen.append((params["from"], params["to"]))
+            return _FakeResponse(status_code=200, json_data=[])
+
+    session = FakeSession()
+    for w_start, w_end in windows:
+        fetch_finnhub(cfg, session, "KEY", "TSLA", w_start, w_end)
+    (_, to1), (from2, _) = seen
+    assert to1 != from2, "the boundary day was requested by both windows"
+
+
+def test_missing_finnhub_api_key_fails_fast_in_collect_many(cfg, tmp_path,
+                                                             monkeypatch):
+    """Regression: `require_env`'s RuntimeError used to be reachable only from
+    inside `collect()`, itself called under `collect_many`'s per-ticker
+    `except Exception: log.exception(...); continue` — so the operator's real
+    error (a missing .env key) was buried in a traceback, and the run instead
+    exited claiming 'the endpoint is broken'. It must now propagate before any
+    ticker is even attempted."""
+    from src.collectors import news
+
+    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
+    monkeypatch.setattr(requests.Session, "get",
+                        lambda *a, **k: pytest.fail("no HTTP call should happen"))
+
+    conn = db.get_conn(tmp_path / "missing_key.db")
+    with pytest.raises(RuntimeError, match="FINNHUB_API_KEY"):
+        news.collect_many(cfg, conn, ["AAPL", "MSFT"], 0, 1, ["finnhub"])
+    conn.close()
+
+
+def test_missing_finnhub_api_key_fails_fast_in_collect_targets(cfg, tmp_path,
+                                                                monkeypatch):
+    from src.collectors import news
+
+    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
+    monkeypatch.setattr(requests.Session, "get",
+                        lambda *a, **k: pytest.fail("no HTTP call should happen"))
+
+    conn = db.get_conn(tmp_path / "missing_key2.db")
+    with pytest.raises(RuntimeError, match="FINNHUB_API_KEY"):
+        news.collect_targets(cfg, conn, [("AAPL", 0, 0, 1)], ["finnhub"])
+    conn.close()
+
+
+def test_missing_finnhub_api_key_does_not_block_gdelt_only_runs(cfg, tmp_path,
+                                                                 monkeypatch):
+    """The fail-fast check must be specific to the apis actually requested."""
+    from src.collectors import news
+
+    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
+    monkeypatch.setattr(news, "collect",
+                        lambda *a, **k: 3)  # pretend GDELT found something
+    conn = db.get_conn(tmp_path / "gdelt_only.db")
+    assert news.collect_many(cfg, conn, ["AAPL"], 0, 1, ["gdelt"]) == 3
+    conn.close()
+
+
+def _cli_scaffold(monkeypatch, cfg, tmp_path, argv, target_ticker="AAPL"):
+    """Common mocking for a `main()` regression test: no real DB, no real
+    network, no real backfill-target computation. Returns the dict that
+    `collect_targets`/`collect_many` will be recorded into under key 'apis'.
+    """
+    import sys
+    from src.collectors import news
+
+    captured = {}
+    monkeypatch.setattr(news, "load_config", lambda: cfg)
+    fake_conn = db.get_conn(tmp_path / "cli.db")
+    monkeypatch.setattr(news.db, "get_conn", lambda *_a, **_k: fake_conn)
+    monkeypatch.setattr(requests.Session, "get",
+                        lambda *a, **k: pytest.fail("no HTTP call should happen"))
+    monkeypatch.setattr(news, "backfill_targets",
+                        lambda *_a, **_k: [(target_ticker, 0, 0, 1)])
+
+    def fake_collect_targets(cfg, conn, targets, apis, resume=False):
+        captured["apis"] = apis
+        return 1
+
+    def fake_collect_many(cfg, conn, tickers, start_ts, end_ts, apis,
+                          query=None):
+        captured["apis"] = apis
+        return 1
+
+    monkeypatch.setattr(news, "collect_targets", fake_collect_targets)
+    monkeypatch.setattr(news, "collect_many", fake_collect_many)
+    monkeypatch.setattr(sys, "argv", ["news.py"] + argv)
+    return captured
+
+
+def test_apis_explicit_default_text_keeps_both_for_backfill(cfg, tmp_path,
+                                                             monkeypatch):
+    """Regression for the string-equality-with-the-default bug.
+
+    Explicitly naming both APIs, in the same order as the argparse default,
+    used to be silently indistinguishable from not passing --apis at all and
+    got downgraded to finnhub-only.
+    """
+    from src.collectors import news
+
+    captured = _cli_scaffold(monkeypatch, cfg, tmp_path,
+                             ["--backfill", "--apis", "finnhub,gdelt"])
+    news.main()
+    assert captured["apis"] == ["finnhub", "gdelt"]
+
+
+def test_apis_explicit_reordered_text_also_keeps_both_for_backfill(
+        cfg, tmp_path, monkeypatch):
+    """Same two APIs, different order — must behave identically to the
+    default-order case above, not depend on string equality."""
+    from src.collectors import news
+
+    captured = _cli_scaffold(monkeypatch, cfg, tmp_path,
+                             ["--backfill", "--apis", "gdelt,finnhub"])
+    news.main()
+    assert captured["apis"] == ["gdelt", "finnhub"]
+
+
+def test_apis_omitted_still_narrows_to_finnhub_for_backfill(cfg, tmp_path,
+                                                             monkeypatch):
+    """The documented, intentional behaviour when --apis is genuinely
+    omitted must be preserved."""
+    from src.collectors import news
+
+    captured = _cli_scaffold(monkeypatch, cfg, tmp_path, ["--backfill"])
+    news.main()
+    assert captured["apis"] == ["finnhub"]
+
+
+def test_apis_omitted_uses_both_for_a_plain_run(cfg, tmp_path, monkeypatch):
+    from src.collectors import news
+
+    captured = _cli_scaffold(monkeypatch, cfg, tmp_path,
+                             ["--ticker", "AAPL"])
+    news.main()
+    assert captured["apis"] == ["finnhub", "gdelt"]
+
+
+def test_an_article_shared_by_two_tickers_is_visible_to_both(cfg, tmp_path, caplog):
+    """The behaviour the composite `(url, ticker)` PRIMARY KEY exists for.
+
+    A joint press release is fetched under both tickers. Before the schema
+    fix, `news.url` alone was the key and the second ticker's row was silently
+    discarded, so `earliest_news_ts` could never see it and that ticker
+    quietly lost its t0 correction. Asserting the DATA outcome, not the log
+    line: this is what actually has to keep working.
+
+    The shared-article note itself is debug-level now — at WARNING it fired on
+    every shared wire story (thousands per run) and claimed a data loss that
+    no longer happens.
+    """
+    from src.collectors.news import _log_cross_ticker_articles
+
+    url = "https://example.com/joint-venture"
+    row = {"url": url, "title": "t", "source_domain": None,
+           "source_name": "CNBC", "source_tier": 2, "published_utc": 1000,
+           "seen_utc": None, "fetched_utc": 1, "api": "finnhub"}
+
+    conn = db.get_conn(tmp_path / "collision.db")
+    db.upsert_news(conn, [{**row, "ticker": "AAPL"}])
+    with caplog.at_level("DEBUG"):
+        _log_cross_ticker_articles(conn, [{**row, "ticker": "MSFT"}])
+    db.upsert_news(conn, [{**row, "ticker": "MSFT"}])
+
+    # Both associations stored, and each ticker can independently find it.
+    assert db.earliest_news_ts(conn, "AAPL", 0, 2000) == 1000
+    assert db.earliest_news_ts(conn, "MSFT", 0, 2000) == 1000
+    stored = {r[0] for r in conn.execute(
+        "SELECT ticker FROM news WHERE url = ?", (url,))}
+    assert stored == {"AAPL", "MSFT"}
+
+    assert any("is shared with ticker(s)" in r.message for r in caplog.records)
+    assert not any(r.levelname == "WARNING" for r in caplog.records)
+    conn.close()
