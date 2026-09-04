@@ -5,8 +5,9 @@ that the pieces compose, that the extremes survive, and that the plan's
 "metric before model" requirement actually held.
 
 That last one is usually an unverifiable promise about the order someone worked
-in. Here it is checkable: the model packages are empty, and `src/eval/` imports
-nothing from them.
+in. It was checkable by emptiness until Phase 5 filled the model packages; it is
+now carried by git history plus the permanent import invariant below. See
+`test_the_metric_predates_every_model` for the full account.
 """
 
 from __future__ import annotations
@@ -63,36 +64,41 @@ def test_full_chain_runs_and_renders(frame) -> None:
 # --- proving "metric before model" ---------------------------------------
 
 
-def test_no_model_exists_yet() -> None:
-    """Phase-bound, and deliberately so.
+def test_the_metric_predates_every_model() -> None:
+    """RETIRED as an emptiness check on 2026-09-04, exactly as planned.
 
-    The plan requires the evaluation code to be written before the first model,
-    so the headline metric cannot be chosen after seeing which one flatters a
-    result. Right now that is literally true. Phase 5 will fill these packages
-    and this assertion will be retired — the git history is what preserves the
-    claim afterwards.
+    This assertion used to require `src/baselines/` and `src/rl/` to be empty —
+    machine-checked proof that the whole evaluation block was written before any
+    model existed, so the headline metric could not be chosen after seeing which
+    one flattered a result. Its own docstring anticipated the end: *"Phase 5 will
+    fill these packages and this assertion will be retired — the git history is
+    what preserves the claim afterwards."*
 
-    `pipeline` was dropped from this list in P3-02 (2026-08-30), when
-    `universe.py` became the first module in it. The claim being protected is
-    "no MODEL existed when the metric was chosen"; `src/pipeline/` holds the
-    liquidity filter, t0 correction and feature builder, none of which is a
-    model and all of which Phases 3-4 are meant to fill. The permanent
-    invariant — that `src/eval/` never imports `src.pipeline` — is unchanged
-    and still enforced by the test below, which is what actually stops
-    evaluation code reaching back into the pipeline.
+    It was retired in three steps, each recorded:
 
-    `baselines` was dropped in P5-01 (2026-09-04), when `base.py` became the
-    first module in it — the retirement this docstring anticipated. The whole
-    evaluation block (P1-07 through P1-12) was committed before it, and git
-    history is now what carries the claim: `src/eval/metrics.py` predates
-    `src/baselines/base.py` by every commit between them. `rl` is still empty
-    and stays asserted, so the same guarantee remains machine-checked for the
-    learned policy in Phase 6 — which is the model the claim most matters for.
+    * `pipeline` dropped in P3-02 (2026-08-30), when `universe.py` landed. The
+      pipeline holds the liquidity filter, t0 correction and feature builder —
+      none of them a model.
+    * `baselines` dropped in P5-01 (2026-09-04), when `base.py` landed.
+    * `rl` dropped in P6-01 (2026-09-04), when `env.py` landed. That is the last
+      one, so the emptiness form of this test is gone for good.
+
+    **What now carries the claim is git history**, and it is checkable: every
+    commit adding `src/eval/` predates every commit adding `src/baselines/` or
+    `src/rl/`. `metrics.py` and `precision_at_alert_budget` were committed in
+    Phase 1, the first baseline in Phase 5, the first policy in Phase 6.
+
+    What remains machine-checked is the permanent invariant, in the test below:
+    `src/eval/` never imports a model, the pipeline, the database or the
+    network. That is the property that actually stops evaluation code being
+    shaped around a model, and it keeps holding for the rest of the project.
+
+    This test is kept rather than deleted so the reasoning survives where a
+    reader will look for it.
     """
-    for package in ("rl",):
-        modules = [p for p in (REPO / "src" / package).glob("*.py")
-                   if p.name != "__init__.py"]
-        assert modules == [], f"src/{package} is no longer empty: {modules}"
+    eval_dir = REPO / "src" / "eval"
+    assert (eval_dir / "metrics.py").exists()
+    assert (eval_dir / "contract.py").exists()
 
 
 def test_eval_does_not_import_models_network_or_db() -> None:

@@ -449,6 +449,19 @@ baselines:
     exclude_features: [days_since_last_8k, days_since_last_earnings]
 
 # ------------------------------------------------------------
+# Reinforcement learning (Phase 6) — the stopping policy
+# ------------------------------------------------------------
+rl:
+  # Episode order and every stochastic component. Recorded so a run can be
+  # reproduced from the seed alone, which P6-03's done-when requires.
+  seed: 42
+  # Observations are z-scores and returns, so they are centred but unbounded:
+  # the frozen snapshot holds bars whose volume_z runs to tens of sigma. A
+  # single such bar should not destabilise a network's first layer. Applied
+  # AFTER NaN->0, so the neutral sentinel is never clipped away.
+  obs_clip: 10.0
+
+# ------------------------------------------------------------
 # Evaluation — decide the headline metric FIRST (review §7.4)
 # ------------------------------------------------------------
 eval:
