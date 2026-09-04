@@ -50,7 +50,7 @@ import pandas as pd
 from src.eval import contract
 from src.pipeline import split
 from src.utils.config import load_config
-from src.utils.timeutils import trading_hours_between
+from src.utils.timeutils import get_market_calendar, trading_hours_between
 
 #: Columns the feature matrix carries that are also contract columns. Copied
 #: through untouched so a baseline cannot accidentally relabel a window.
@@ -163,7 +163,11 @@ class Baseline(ABC):
         if hours <= 0:
             return actions
 
-        calendar = self.cfg["market"]["calendar"]
+        # The calendar OBJECT, not the code string: `trading_hours_between`
+        # takes an ExchangeCalendar and would fail on a bare "XNYS". Resolved
+        # once here rather than per row — `get_market_calendar` is cached, but
+        # the lookup still is not free at one call per flagged hour.
+        calendar = get_market_calendar(self.cfg["market"]["calendar"])
         out = actions.copy()
         starts = frame.groupby("window_id", sort=False)["ts_utc"].transform("min")
         flagged = out == contract.FLAG

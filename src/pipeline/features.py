@@ -356,6 +356,106 @@ def ticker_features(frame: pd.DataFrame, benchmark: pd.DataFrame,
     ], axis=1)
 
 
+def _event_times(conn, cfg: dict, ticker: str) -> tuple[np.ndarray, np.ndarray]:
+    """(all filing times, scheduled-filing times) for one ticker.
+
+    Shared by the positive and quiet builders so the two cannot drift: a quiet
+    window whose `days_since_last_8k` were computed from a different filing set
+    than a positive's would be distinguishable by something other than its
+    label, which is precisely what `sampling.py` forbids.
+    """
+    forms = cfg["edgar"]["forms"]
+    scheduled_codes = cfg["items"]["scheduled"]
+    marks = ",".join("?" * len(forms))
+    filings = np.array([r[0] for r in conn.execute(
+        f"SELECT acceptance_utc FROM filings WHERE ticker = ? AND form IN "
+        f"({marks}) AND acceptance_utc IS NOT NULL ORDER BY acceptance_utc",
+        (ticker, *forms))], dtype=np.int64)
+    if scheduled_codes:
+        earnings = np.array([r[0] for r in conn.execute(
+            "SELECT acceptance_utc FROM filings WHERE ticker = ? AND "
+            "acceptance_utc IS NOT NULL AND (" +
+            " OR ".join("items LIKE ?" for _ in scheduled_codes) +
+            ") ORDER BY acceptance_utc",
+            (ticker, *[f"%{c}%" for c in scheduled_codes]))], dtype=np.int64)
+    else:
+        # An empty `items.scheduled` means no filing can ever match — the SQL
+        # fragment would otherwise be `AND ()`, a syntax error, for a config
+        # that is a valid (if unusual) choice.
+        earnings = np.array([], dtype=np.int64)
+    return filings, earnings
+
+
+def build_quiet_matrix(cfg: dict, conn,
+                       pairs: list[tuple[str, int]]) -> pd.DataFrame:
+    """One row per (quiet window, hour), in the positives' exact shape.
+
+    `pairs` are the `(ticker, anchor)` tuples `sampling.draw()` returns.
+
+    `sampling.py` fixes the shape and the reason for it: *"Quiet windows are
+    built in the same shape as positives — 48 bars ending strictly before an
+    anchor — so nothing distinguishes the two except the label. Any structural
+    difference would be something a model could learn instead of the market."*
+    So this shares `_event_times`, `ticker_features` and the same
+    `searchsorted(..., side="left")` boundary as `build_matrix`, rather than
+    reimplementing them alongside.
+
+    `t0_utc`, `is_scheduled` and `item_code` are null — the contract requires
+    those three to be null together, and null `t0_utc` IS the negative label.
+
+    Window ids are prefixed `quiet:` so a negative can never collide with an
+    `event_id` when the two matrices are concatenated.
+
+    Returns an empty frame (not a raise) when `pairs` is empty: drawing zero
+    negatives is a legitimate configuration, unlike an events table with no
+    usable rows.
+    """
+    from src import db  # local: keeps the builders importable without the DB
+
+    horizon = cfg["decision"]["horizon_hours"]
+    interval = cfg["market"]["interval"]
+    if not pairs:
+        return pd.DataFrame()
+
+    benchmark = _ticker_frame(conn, cfg["market"]["benchmark"], interval)
+    by_ticker: dict[str, list[int]] = {}
+    for ticker, anchor in pairs:
+        by_ticker.setdefault(ticker, []).append(int(anchor))
+
+    out, skipped = [], 0
+    for ticker, anchors in by_ticker.items():
+        frame = _ticker_frame(conn, ticker, interval)
+        if frame.empty:
+            skipped += len(anchors)
+            continue
+        filings, earnings = _event_times(conn, cfg, ticker)
+        feats = ticker_features(frame, benchmark, filings, earnings, cfg)
+        stamps = feats.index.to_numpy()
+
+        for anchor in sorted(anchors):
+            end = np.searchsorted(stamps, anchor, side="left")  # strictly before
+            window = feats.iloc[max(end - horizon, 0):end]
+            if window.empty:
+                skipped += 1
+                continue
+            block = window.copy()
+            block.insert(0, "item_code", None)
+            block.insert(0, "is_scheduled", None)
+            block.insert(0, "t0_utc", None)
+            block.insert(0, "ticker", ticker)
+            block.insert(0, "window_id", f"quiet:{ticker}:{anchor}")
+            out.append(block.reset_index())
+
+    if skipped:
+        # Reported, never silent: a shortfall that goes unmentioned turns a
+        # 3:1 sample into some other ratio while still calling itself 3:1.
+        print(f"build_quiet_matrix: {skipped} of {len(pairs)} quiet windows "
+              f"skipped (no bars, or the anchor precedes the ticker's history)")
+    if not out:
+        return pd.DataFrame()
+    return pd.concat(out, ignore_index=True)
+
+
 def build_matrix(cfg: dict, conn) -> pd.DataFrame:
     """One row per (usable event, hour) over the decision window.
 
@@ -374,8 +474,6 @@ def build_matrix(cfg: dict, conn) -> pd.DataFrame:
 
     horizon = cfg["decision"]["horizon_hours"]
     interval = cfg["market"]["interval"]
-    forms = cfg["edgar"]["forms"]
-    scheduled_codes = cfg["items"]["scheduled"]
 
     events = conn.execute(
         "SELECT event_id, ticker, items, t0_utc, is_scheduled FROM events "
@@ -391,28 +489,12 @@ def build_matrix(cfg: dict, conn) -> pd.DataFrame:
     for e in events:
         by_ticker.setdefault(e["ticker"], []).append(e)
 
-    marks = ",".join("?" * len(forms))
     out = []
     for ticker, ticker_events in by_ticker.items():
         frame = _ticker_frame(conn, ticker, interval)
         if frame.empty:
             continue
-        filings = np.array([r[0] for r in conn.execute(
-            f"SELECT acceptance_utc FROM filings WHERE ticker = ? AND form IN "
-            f"({marks}) AND acceptance_utc IS NOT NULL ORDER BY acceptance_utc",
-            (ticker, *forms))], dtype=np.int64)
-        if scheduled_codes:
-            earnings = np.array([r[0] for r in conn.execute(
-                "SELECT acceptance_utc FROM filings WHERE ticker = ? AND "
-                "acceptance_utc IS NOT NULL AND (" +
-                " OR ".join("items LIKE ?" for _ in scheduled_codes) +
-                ") ORDER BY acceptance_utc",
-                (ticker, *[f"%{c}%" for c in scheduled_codes]))], dtype=np.int64)
-        else:
-            # An empty `items.scheduled` means no filing can ever match — the
-            # SQL fragment would otherwise be `AND ()`, a syntax error, for a
-            # config that is a valid (if unusual) choice.
-            earnings = np.array([], dtype=np.int64)
+        filings, earnings = _event_times(conn, cfg, ticker)
 
         feats = ticker_features(frame, benchmark, filings, earnings, cfg)
         stamps = feats.index.to_numpy()
