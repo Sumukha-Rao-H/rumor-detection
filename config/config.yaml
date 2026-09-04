@@ -461,6 +461,32 @@ rl:
   # AFTER NaN->0, so the neutral sentinel is never clipped away.
   obs_clip: 10.0
 
+  # --- training (P6-03) ---
+  algo: PPO                 # discrete two-action space, short episodes, a
+                            # terminal-dominated reward — PPO's shape. DQN was
+                            # rejected on REPRODUCIBILITY grounds, not
+                            # performance: its replay buffer and epsilon
+                            # schedule add two more stateful things to seed and
+                            # record. See impl/P6-03.
+  total_timesteps: 300000
+  n_envs: 4
+  net_arch: [64, 64]        # 11 inputs; deeper buys nothing here
+  learning_rate: 0.0003
+  n_steps: 512
+  batch_size: 256
+  # 1.0, NOT the usual 0.99. Over a 48-step episode 0.99 multiplies a terminal
+  # reward by 0.62, making an early flag worth more than a late one — a second,
+  # UNSTATED preference for flagging early, stacked on top of r_early_bonus
+  # which already says exactly that and is visible where it can be argued with.
+  # Episodes are short and finite, so undiscounted returns are well defined and
+  # there is no convergence reason to discount.
+  gamma: 1.0
+  # The observation is 11 floats and the net is two small layers; at that size
+  # GPU kernel-launch overhead dominates and CPU is usually faster, which SB3
+  # warns about directly. Set to "cuda" on a machine that can see the card.
+  device: cpu
+  runs_dir: data/runs
+
 # ------------------------------------------------------------
 # Evaluation — decide the headline metric FIRST (review §7.4)
 # ------------------------------------------------------------

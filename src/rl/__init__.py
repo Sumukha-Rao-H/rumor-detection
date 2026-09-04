@@ -6,6 +6,8 @@ to the z-score threshold is a finding rather than a disappointment.
 """
 
 from src.rl.env import FLAG, WAIT, FootprintEnv, episodes_from_frame, observation_features
+from src.rl.train import data_fingerprint, train, write_manifest
 
-__all__ = ["FLAG", "WAIT", "FootprintEnv", "episodes_from_frame",
-           "observation_features"]
+__all__ = ["FLAG", "WAIT", "FootprintEnv", "data_fingerprint",
+           "episodes_from_frame", "observation_features", "train",
+           "write_manifest"]
