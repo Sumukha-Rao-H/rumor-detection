@@ -366,7 +366,13 @@ baselines:
     # genuinely early. volume_zscore.min_wait_hours overrides this per baseline
     # where P5-03's tuning calls for it.
     min_wait_hours: 0
-  always_quiet: {}
+  always_quiet:
+    # The constant every hour is scored. The VALUE is arbitrary by
+    # construction: a constant ranker is uninformative at any level, so
+    # precision at budget comes out equal to the base rate whatever this is.
+    # It lives here only to keep a bare literal out of src/; changing it must
+    # not change any reported number, and a test pins exactly that.
+    score: 0.0
   volume_zscore:
     threshold: 2.5
     min_wait_hours: 1
