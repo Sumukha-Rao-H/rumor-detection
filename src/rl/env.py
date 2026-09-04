@@ -49,6 +49,28 @@ from src.baselines.gradient_boosting import FEATURES
 WAIT, FLAG = 0, 1
 
 
+def clean_observations(rows: np.ndarray, obs_clip: float) -> np.ndarray:
+    """NaN to 0.0, then clip. The one definition, shared by env and evaluation.
+
+    Every surviving feature is a centred quantity — z-scores and returns sit
+    near zero — so 0.0 is the neutral reading rather than a fabricated
+    observation. No imputer is fitted, which also avoids the leakage route the
+    standards name: an imputer fitted across splits carries validation
+    statistics into training.
+
+    Clipping comes after, so the zero sentinel is never clipped away.
+
+    Module-level rather than a method because P6-05 scores the trained policy
+    OUTSIDE the env, row by row, and it must see exactly what it saw during
+    training. Two copies of this arithmetic that drifted apart would change the
+    policy's inputs between training and evaluation without any error — a
+    silent version of the leakage this project spends so much effort on.
+    """
+    cleaned = np.nan_to_num(np.asarray(rows, dtype="float64"),
+                            nan=0.0, posinf=0.0, neginf=0.0)
+    return np.clip(cleaned, -obs_clip, obs_clip).astype(np.float32)
+
+
 def observation_features(cfg: dict) -> tuple[str, ...]:
     """The columns the agent sees, after the P5-05 exclusion.
 
@@ -146,19 +168,8 @@ class FootprintEnv(gym.Env):
 
     # -- observations ----------------------------------------------------
     def _clean(self, row: np.ndarray) -> np.ndarray:
-        """NaN to 0.0, then clip.
-
-        Every surviving feature is a centred quantity — z-scores and returns
-        sit near zero — so 0.0 is the neutral reading rather than a fabricated
-        observation. No imputer is fitted, which also avoids the leakage route
-        the standards name: an imputer fitted across splits carries validation
-        statistics into training.
-
-        Clipping comes after, so the zero sentinel is never clipped away.
-        """
-        cleaned = np.nan_to_num(row, nan=0.0, posinf=0.0, neginf=0.0)
-        return np.clip(cleaned, -self.obs_clip,
-                       self.obs_clip).astype(np.float32)
+        """See `clean_observations` — shared so evaluation cannot drift."""
+        return clean_observations(row, self.obs_clip)
 
     def _observe(self) -> np.ndarray:
         return self._clean(self._episode["obs"][self._step])
@@ -207,9 +218,11 @@ class FootprintEnv(gym.Env):
         rt = self.reward_table
         length = len(self._episode["obs"])
         positive = self._episode["is_positive"]
-        info = self._info()
 
         if int(action) == FLAG:
+            # Describes the hour the decision was made at, which is the hour
+            # still being observed.
+            info = self._info()
             if positive:
                 # Share of the window still ahead. Step index IS trading hours
                 # here (see the module docstring), so this is a trading-hours
@@ -228,12 +241,18 @@ class FootprintEnv(gym.Env):
         if self._step >= length:
             # The window ran out. A positive was missed; restraint on a quiet
             # window is the baseline, not an achievement, so it pays nothing.
-            reward = float(rt["r_missed"]) if positive else 0.0
+            self._step = length - 1          # stay on the last real bar
+            info = self._info()
             info["outcome"] = "missed" if positive else "correct_wait"
             info["step"] = length
-            last = self._clean(self._episode["obs"][length - 1])
-            return last, reward, True, False, info
+            reward = float(rt["r_missed"]) if positive else 0.0
+            return self._observe(), reward, True, False, info
 
+        # Rebuilt AFTER advancing, so `info` describes the observation being
+        # returned. Computing it before the increment made ts_utc name the
+        # previous hour while the observation was the new one — harmless for
+        # SB3, which ignores info, but wrong for anything that reads it, and
+        # `test_row_scoring_matches_what_the_policy_does_in_the_env` caught it.
+        info = self._info()
         info["outcome"] = "wait"
-        info["step"] = self._step
         return self._observe(), float(rt["r_wait"]), False, False, info

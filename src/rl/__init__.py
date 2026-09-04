@@ -5,9 +5,11 @@ policy scoring 0.09 here is a comparison rather than a bare figure, and a loss
 to the z-score threshold is a finding rather than a disappointment.
 """
 
-from src.rl.env import FLAG, WAIT, FootprintEnv, episodes_from_frame, observation_features
+from src.rl.env import (FLAG, WAIT, FootprintEnv, clean_observations,
+                        episodes_from_frame, observation_features)
+from src.rl.policy_baseline import PolicyBaseline, load_policy
 from src.rl.train import data_fingerprint, train, write_manifest
 
-__all__ = ["FLAG", "WAIT", "FootprintEnv", "data_fingerprint",
-           "episodes_from_frame", "observation_features", "train",
-           "write_manifest"]
+__all__ = ["FLAG", "WAIT", "FootprintEnv", "PolicyBaseline",
+           "clean_observations", "data_fingerprint", "episodes_from_frame",
+           "load_policy", "observation_features", "train", "write_manifest"]
