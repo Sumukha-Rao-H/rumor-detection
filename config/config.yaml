@@ -420,9 +420,33 @@ baselines:
     # 2.0 -> 0.0853, 3.0 -> 0.0817. Now bracketed on both sides.
     threshold_grid: [0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0]
   gradient_boosting:
+    # Gets the WHOLE feature matrix, unlike volume_zscore and cusum which read
+    # one column. That is the honest reading of "identical features": the same
+    # inputs are available to all four, and each method uses what it uses. The
+    # rule bars smuggling in extra data (news features are Phase 8's ablation),
+    # not using the matrix a model is meant to use. `is_scheduled` and
+    # `item_code` are excluded as label leaks — both describe the event being
+    # predicted and are known only once it has happened.
     n_estimators: 400
     max_depth: 4
     learning_rate: 0.05
+    # Fixed so a rerun reproduces the reported number exactly; a test asserts
+    # two fits on the same data give identical scores.
+    random_state: 42
+    n_jobs: 4
+    # CONTAMINATED BY THE NEGATIVE-SAMPLING DESIGN — measured, not suspected.
+    # sampling.quiet_gap_hours is 168 h, so a training negative is by
+    # construction never within 7 days of a filing: 0.1% of train negatives
+    # have an 8-K in the last week, against 18.9% of train positives. "Recent
+    # 8-K" therefore separates the TRAINING classes almost perfectly. At
+    # evaluation, where negatives are every quiet bar, 31.5% of them have an
+    # 8-K in the last week — so the learned rule is not merely useless there,
+    # it is inverted. The model was learning the sampler, not the market.
+    # Dropping these two nearly doubles validation precision (0.0257 -> 0.0493,
+    # 5.6x -> 10.7x). Both numbers are reported; see work-log entry 54.
+    # Only gradient boosting is affected: the other baselines read volume only.
+    # Set to [] to reproduce the contaminated result.
+    exclude_features: [days_since_last_8k, days_since_last_earnings]
 
 # ------------------------------------------------------------
 # Evaluation — decide the headline metric FIRST (review §7.4)
