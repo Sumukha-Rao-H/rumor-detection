@@ -58,19 +58,37 @@ from src.utils.timeutils import date_str_to_ts, ts_to_iso
 LABEL_COLS = ("window_id", "ticker", "t0_utc", "is_scheduled", "item_code")
 
 
-def _positive_windows(conn, cfg: dict, ticker: str,
-                      lo: int, hi: int) -> list[dict]:
-    """Usable events for one ticker whose t0 falls in [lo, hi)."""
+#: The two t0 definitions the plan requires reporting side by side.
+#: `t0_utc` is the corrected instant, min(acceptance, earliest matched news);
+#: `t0_filing_utc` is the uncorrected acceptance time. Evaluating both answers
+#: "what does the news correction actually buy?" — which is this project's
+#: headline contribution, so it must be measurable, not asserted.
+T0_COLUMNS = {"news_adjusted": "t0_utc", "filing": "t0_filing_utc"}
+
+
+def _positive_windows(conn, cfg: dict, ticker: str, lo: int, hi: int,
+                      t0_column: str = "t0_utc") -> list[dict]:
+    """Usable events for one ticker whose t0 falls in [lo, hi).
+
+    `t0_column` selects the variant. The chosen column is aliased to `t0_utc`
+    so everything downstream — the contract, the metrics, this module — stays
+    single-purpose, exactly as `contract.py` describes: "t0_utc means the
+    variant currently being evaluated and the whole evaluation is run twice".
+    """
+    if t0_column not in set(T0_COLUMNS.values()):
+        raise SystemExit(f"unknown t0 column {t0_column!r}; expected one of "
+                         f"{sorted(set(T0_COLUMNS.values()))}")
     rows = conn.execute(
-        "SELECT event_id, items, t0_utc, is_scheduled FROM events "
-        "WHERE usable = 1 AND ticker = ? AND t0_utc >= ? AND t0_utc < ? "
-        "ORDER BY t0_utc", (ticker, lo, hi)).fetchall()
+        f"SELECT event_id, items, {t0_column} AS t0_utc, is_scheduled FROM events "
+        f"WHERE usable = 1 AND ticker = ? AND {t0_column} >= ? AND {t0_column} < ? "
+        f"ORDER BY {t0_column}", (ticker, lo, hi)).fetchall()
     return [dict(r) for r in rows]
 
 
 def build_eval_frame(cfg: dict, conn, lo: int, hi: int,
                      tickers: list[str] | None = None,
-                     progress_every: int = 250) -> pd.DataFrame:
+                     progress_every: int = 250,
+                     t0_variant: str = "news_adjusted") -> pd.DataFrame:
     """Every decision point in [lo, hi), positives as episodes.
 
     Returns a frame in the feature matrix's shape, ready to hand to a
@@ -80,7 +98,15 @@ def build_eval_frame(cfg: dict, conn, lo: int, hi: int,
     `lo`/`hi` are UTC epoch seconds. Nothing here filters by split — pass the
     boundaries you mean, and note that `Baseline.predict` refuses the sealed
     test range independently.
+
+    `t0_variant` picks which t0 definition labels the positives — see
+    `T0_COLUMNS`. The whole evaluation is run once per variant, which is how
+    the plan requires the news correction to be reported.
     """
+    if t0_variant not in T0_COLUMNS:
+        raise SystemExit(f"unknown t0_variant {t0_variant!r}; expected one of "
+                         f"{sorted(T0_COLUMNS)}")
+    t0_column = T0_COLUMNS[t0_variant]
     horizon = cfg["decision"]["horizon_hours"]
     interval = cfg["market"]["interval"]
     benchmark = _ticker_frame(conn, cfg["market"]["benchmark"], interval)
@@ -107,7 +133,7 @@ def build_eval_frame(cfg: dict, conn, lo: int, hi: int,
         # negative pool. A bar cannot be both its own decision point and part
         # of an episode — it would be counted twice by every metric.
         claimed = np.zeros(len(stamps), dtype=bool)
-        for event in _positive_windows(conn, cfg, ticker, lo, hi):
+        for event in _positive_windows(conn, cfg, ticker, lo, hi, t0_column):
             end = np.searchsorted(stamps, event["t0_utc"], side="left")
             start = max(end - horizon, 0)
             if end <= start:
