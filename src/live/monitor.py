@@ -255,6 +255,8 @@ def main() -> None:
     ap.add_argument("--limit-tickers", type=int, default=None)
     ap.add_argument("--as-of", type=int, default=None,
                     help="score as if it were this UTC epoch second")
+    ap.add_argument("--no-log", action="store_true",
+                    help="print alerts without appending them to the log")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -287,6 +289,14 @@ def main() -> None:
     for a in alerts:
         print(f"  {ts_to_iso(a.ts_utc)}  {a.ticker:6s}  {a.detector:18s} "
               f"score {a.score:8.4f} (cut {a.threshold})")
+
+    if not args.no_log:
+        from src.live.alertlog import append
+        # Already-logged alerts are skipped, not restated: the first write
+        # wins, so re-running over the same hours is a no-op by design.
+        new = append(conn, alerts)
+        print(f"\nlogged {new} new alert(s); "
+              f"{len(alerts) - new} already on record")
 
 
 if __name__ == "__main__":

@@ -141,6 +141,52 @@ CREATE TABLE IF NOT EXISTS fetch_state (
   updated_utc INTEGER,
   PRIMARY KEY (source, key)
 );
+
+-- P7-02. The live alert log: APPEND-ONLY, and the only table in this schema
+-- that is. Everywhere else a re-run upserts and the last write wins, which is
+-- what makes the collectors idempotent. Here the FIRST write wins and nothing
+-- is ever updated, because this table is evidence: an alert that could be
+-- rewritten after the outcome was known would prove nothing about what the
+-- detector actually said at the time.
+--
+-- Outcomes therefore live in a SEPARATE table (alert_outcomes) rather than as
+-- columns here. P7-03 backfills them; this stays untouched.
+--
+-- prev_sha/row_sha chain each row to the one before it, per detector, so a
+-- later edit or deletion is DETECTABLE. It does not prevent tampering — a
+-- SQLite file is writable by anyone who has it — but it makes "never edited
+-- after the fact" a checkable claim rather than a promise. See
+-- src/live/alertlog.py:verify_chain.
+CREATE TABLE IF NOT EXISTS alerts (
+  alert_id TEXT PRIMARY KEY,     -- sha256 of (detector, ticker, ts_utc), truncated
+  ts_utc INTEGER NOT NULL,       -- the BAR the alert fired on
+  raised_utc INTEGER NOT NULL,   -- when the monitor actually noticed
+  ticker TEXT NOT NULL,
+  detector TEXT NOT NULL,        -- 'cusum', 'volume_zscore', 'rl_policy[s43]'
+  score REAL NOT NULL,
+  threshold REAL NOT NULL,       -- the tuned cut it was judged against
+  features TEXT NOT NULL,        -- JSON: the values that triggered it
+  seq INTEGER NOT NULL,          -- position in this detector's chain
+  prev_sha TEXT,                 -- previous row_sha for this detector
+  row_sha TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts (ts_utc);
+CREATE INDEX IF NOT EXISTS idx_alerts_detector ON alerts (detector, seq);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_natural
+  ON alerts (detector, ticker, ts_utc);
+
+-- P7-03 writes here. Separate from `alerts` so the log itself stays immutable:
+-- what the detector said and what happened afterwards are different facts,
+-- learned at different times.
+CREATE TABLE IF NOT EXISTS alert_outcomes (
+  alert_id TEXT PRIMARY KEY REFERENCES alerts(alert_id) ON DELETE CASCADE,
+  checked_utc INTEGER NOT NULL,  -- when the backfill ran
+  filed INTEGER,                 -- 1 if an 8-K landed inside the window
+  accession_no TEXT,             -- which filing, if any
+  item_code TEXT,
+  t0_utc INTEGER,                -- the filing's t0, for lead-time arithmetic
+  lead_trading_h REAL            -- trading hours from alert to t0
+);
 """
 
 
