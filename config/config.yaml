@@ -391,9 +391,34 @@ baselines:
   cusum:
     # Classical quickest-change-detection. Built BEFORE the learned agent so
     # there is a real number to beat, and so a null result means something.
-    drift: 0.5                     # k — the slack parameter
-    threshold: 5.0                 # h — decision boundary
+    # OUTPUTS of P5-04's 42-point sweep on validation 2026-09-04 (work-log 53):
+    # precision 0.08616 vs a 0.00461 floor = 18.7x, recall 0.532, median lead
+    # 23.6 trading hours. Both are interior maxima of their bracketed grids.
+    drift: 1.5                     # k — the slack parameter
+    threshold: 1.0                 # h — decision boundary; with reset_after_alarm
+                                   # on, this is part of the ESTIMATOR, not just
+                                   # an alarm rule, because crossing it zeroes S
     reset_after_alarm: true
+    # Swept as a 2-D grid on validation. BOTH matter here, unlike P5-03 where
+    # the threshold provably could not move precision: reset_after_alarm
+    # couples h back into the estimator, so crossing it zeroes S and changes
+    # every later value the metric ranks on.
+    # k around 0.5 is the textbook choice for detecting a one-sigma shift and
+    # the grid brackets it. h is bounded below by k (a boundary under the slack
+    # alarms constantly) and above by what 48 bars can plausibly accumulate.
+    # EXTENDED UPWARD 2026-09-04 for the same reason as threshold_grid: the
+    # winner (1.5) sat on the old edge. Probing above confirms a true interior
+    # maximum — 1.0 -> 0.0838, 1.5 -> 0.0862, 2.0 -> 0.0847, 2.5 -> 0.0836 —
+    # and at k >= 3.0 CUSUM collapses exactly onto the always-quiet floor
+    # (precision 0.00462, recall 1.0): slack exceeding all evidence leaves the
+    # statistic at zero, so every window ties. A useful coherence check.
+    drift_grid: [0.25, 0.5, 1.0, 1.5, 2.0, 2.5]
+    # EXTENDED DOWNWARD 2026-09-04. The first grid started at 2.0 and the sweep
+    # picked it — the winner sat on the grid's edge, which means the grid, not
+    # the data, chose it. Probing below found the real peak at 1.5, with a
+    # clean interior maximum: 0.5 -> 0.0839, 1.0 -> 0.0850, 1.5 -> 0.0859,
+    # 2.0 -> 0.0853, 3.0 -> 0.0817. Now bracketed on both sides.
+    threshold_grid: [0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0]
   gradient_boosting:
     n_estimators: 400
     max_depth: 4
