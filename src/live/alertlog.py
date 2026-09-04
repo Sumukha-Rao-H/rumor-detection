@@ -184,6 +184,71 @@ def summary(conn) -> dict:
                             "last_utc": int(r["hi"])} for r in rows}
 
 
+#: The CSV column order for the exported log. Fixed so a diff between two
+#: exports is a diff in the data, not in the serialisation.
+CSV_COLUMNS = ("alert_id", "ts_utc", "raised_utc", "ticker", "detector",
+               "score", "threshold", "features", "seq", "prev_sha", "row_sha")
+
+
+def export_csv(conn, path) -> int:
+    """Write the whole log to CSV. Returns rows written.
+
+    The database is a cache — it can be rebuilt from yfinance, whose hourly
+    history persists about two years. **This file is the durable record**, and
+    it is committed to the repository, which gives the log a second and
+    independent history: git's own timestamps and hashes, kept by a service
+    nobody in this project controls.
+
+    That matters for the same reason the row hashes do. The chain proves
+    internal consistency; git proves *when* each row appeared. Together they
+    make "this alert was recorded before the outcome was known" checkable by
+    someone who does not trust the author.
+    """
+    import csv
+    from pathlib import Path
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = conn.execute(
+        f"SELECT {', '.join(CSV_COLUMNS)} FROM alerts "
+        f"ORDER BY detector, seq").fetchall()
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh, lineterminator="\n")
+        writer.writerow(CSV_COLUMNS)
+        for r in rows:
+            writer.writerow([r[c] for c in CSV_COLUMNS])
+    return len(rows)
+
+
+def import_csv(conn, path) -> int:
+    """Restore a log from CSV. Returns rows inserted (existing ones skipped).
+
+    The recovery path for a lost or rebuilt database. Rows are inserted exactly
+    as exported — hashes included, never recomputed — so `verify_chain` after
+    an import checks the *restored* data against the hashes it was written
+    with. Recomputing them would make any corruption verify perfectly, which is
+    the one thing the chain exists to prevent.
+    """
+    import csv
+    from pathlib import Path
+
+    with Path(path).open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+
+    inserted = 0
+    for r in rows:
+        cur = conn.execute(
+            "INSERT INTO alerts (alert_id, ts_utc, raised_utc, ticker, "
+            "detector, score, threshold, features, seq, prev_sha, row_sha) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+            (r["alert_id"], int(r["ts_utc"]), int(r["raised_utc"]), r["ticker"],
+             r["detector"], float(r["score"]), float(r["threshold"]),
+             r["features"], int(r["seq"]), r["prev_sha"] or None, r["row_sha"]))
+        inserted += cur.rowcount
+    conn.commit()
+    return inserted
+
+
 def main() -> None:
     from src import db
 

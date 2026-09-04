@@ -1,0 +1,148 @@
+# The scheduled live monitor (P7-04).
+#
+# Runs after the US close on each trading day, fetches the bars that appeared
+# since the last run, scores them with the tuned detectors, appends any alerts
+# to the log, backfills outcomes for alerts whose window has now elapsed, and
+# commits the log back to this repository.
+#
+# WHY DAILY, NOT HOURLY
+# This repository is private, so GitHub Actions bills against the 2,000
+# free minutes a month. The market collector paces itself at one request a
+# second, so a full 1,500-ticker pass costs about 25 minutes. Daily is roughly
+# 550 minutes a month and fits; hourly would be about 3,850 and would not.
+# Nothing is lost by running daily: yfinance serves roughly two years of hourly
+# history, so a run picks up every hour since the last one. The alert log
+# records the BAR time and the moment the monitor noticed it in separate
+# columns, so a catch-up run is self-describing.
+#
+# WHAT THIS IS EVIDENCE OF
+# Not live alerting, and the report should not claim it is. It is a
+# pre-registered out-of-sample test: the detectors, their thresholds and this
+# workflow were committed before these bars existed, and git's timestamps make
+# that ordering checkable by someone who does not trust the author.
+#
+# ONE-TIME SETUP
+#   1. .venv/bin/python scripts/build_slim_db.py --out bootstrap.db
+#   2. gzip bootstrap.db   (about 31 MB)
+#   3. Attach bootstrap.db.gz to a GitHub release in this repository.
+#   4. Set the BOOTSTRAP_DB_URL secret to that asset's download URL.
+#      A release asset in a private repo needs a token; the simplest route is
+#      `gh release upload` and a URL of the form
+#      https://api.github.com/repos/OWNER/REPO/releases/assets/ID
+#      fetched with the Accept: application/octet-stream header, as below.
+#   5. Optionally set FINNHUB_API_KEY if news collection is ever added here.
+
+name: live-monitor
+
+on:
+  schedule:
+    # 21:30 UTC, Monday to Friday — about 90 minutes after the US close
+    # (20:00 UTC during EDT, 21:00 during EST), so the day's final hourly bar
+    # has settled before the run.
+    - cron: "30 21 * * 1-5"
+  workflow_dispatch:            # so it can be run by hand without waiting
+
+# Two runs writing the alert log at once would race on the commit.
+concurrency:
+  group: live-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: write               # to commit the alert log back
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        # Only what the monitor needs. The RL and dashboard stacks are heavy
+        # and are not on this path.
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas pyarrow numpy pyyaml requests yfinance \
+                      "exchange-calendars==4.13.2" python-dotenv
+
+      # The database is a CACHE. Everything in it can be rebuilt: bars from
+      # yfinance, filings from EDGAR. The alert log is the one thing that
+      # cannot, and it lives in git, restored below.
+      - name: Restore the database cache
+        id: dbcache
+        uses: actions/cache@v4
+        with:
+          path: data/db/footprints.db
+          key: monitor-db-${{ github.run_id }}
+          restore-keys: |
+            monitor-db-
+
+      - name: Bootstrap the database on a cache miss
+        if: steps.dbcache.outputs.cache-matched-key == ''
+        env:
+          BOOTSTRAP_DB_URL: ${{ secrets.BOOTSTRAP_DB_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$BOOTSTRAP_DB_URL" ]; then
+            echo "::error::No cached database and BOOTSTRAP_DB_URL is unset."
+            echo "Run scripts/build_slim_db.py, attach the gzipped file to a"
+            echo "release, and set the secret. See the header of this workflow."
+            exit 1
+          fi
+          mkdir -p data/db
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+               -H "Accept: application/octet-stream" \
+               "$BOOTSTRAP_DB_URL" -o bootstrap.db.gz
+          gunzip -c bootstrap.db.gz > data/db/footprints.db
+          rm bootstrap.db.gz
+
+      # git is the durable record; the cache is only a speed-up. Importing is
+      # a no-op when the cached database already holds these rows, and it
+      # never recomputes a hash — a restored row is checked against the hash it
+      # was written with, or corruption would verify perfectly.
+      - name: Restore the alert log from git
+        run: |
+          if [ -f live-log/alerts.csv ]; then
+            python -c "
+          from src import db
+          from src.live import import_csv
+          from src.utils.config import load_config
+          cfg = load_config(); conn = db.get_conn(cfg['paths']['db'])
+          print('restored', import_csv(conn, 'live-log/alerts.csv'), 'alert rows')
+          "
+          fi
+
+      - name: Run the monitor
+        env:
+          PYTHONPATH: .
+        # --max-tickers caps the run inside the minute budget. Raise it once
+        # the actual cost per run is known from a few real runs.
+        run: python -m src.live.catchup --max-tickers 400 | tee run.log
+
+      - name: Commit the alert log
+        run: |
+          git config user.name  "live-monitor"
+          git config user.email "live-monitor@users.noreply.github.com"
+          git add live-log/alerts.csv
+          if git diff --cached --quiet; then
+            echo "no new alerts to commit"
+          else
+            git commit -m "chore(live): alert log $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push
+          fi
+
+      # Uploaded whatever happened, so a failed run can be diagnosed without
+      # re-running it — the failure may not reproduce.
+      - name: Upload the run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-log-${{ github.run_id }}
+          path: run.log
+          retention-days: 30
