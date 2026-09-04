@@ -48,6 +48,15 @@ META_SEALED_AT = "split:sealed_at_utc"
 META_UNSEAL_REASON = "split:unseal_reason"
 
 TRAIN, VAL, TEST = "train", "val", "test"
+#: Anything after the study window. Not a split — the study never covered it.
+#: Introduced 2026-09-04 for P7-01: `split_of` used to return TEST for every
+#: timestamp at or after `val_end`, unbounded above, so today's bars were
+#: classified as sealed test data and `assert_not_test` refused them. That
+#: would have blocked the live monitor entirely. `boundaries()` already
+#: documented the test period as bounded — "test is [val_end, end]" — so this
+#: makes the code agree with its own docstring. The sealed period itself is
+#: unchanged: every timestamp inside [val_end, study_end) is still refused.
+LIVE = "live"
 
 
 def boundaries(cfg: dict) -> tuple[int, int]:
@@ -81,11 +90,18 @@ def boundaries(cfg: dict) -> tuple[int, int]:
 
 
 def split_of(cfg: dict, ts_utc: int) -> str:
-    """Which split one timestamp belongs to."""
+    """Which split one timestamp belongs to.
+
+    Returns `LIVE` for anything at or after the study window's end. That data
+    was never part of the study, so calling it TEST would both misdescribe it
+    and — through `assert_not_test` — refuse the live monitor its own inputs.
+    """
     train_end, val_end = boundaries(cfg)
     if ts_utc < train_end:
         return TRAIN
-    return VAL if ts_utc < val_end else TEST
+    if ts_utc < val_end:
+        return VAL
+    return TEST if ts_utc < date_str_to_ts(cfg["study_window"]["end"]) else LIVE
 
 
 def is_sealed(conn) -> bool:
@@ -109,10 +125,19 @@ def assert_not_test(cfg: dict, conn, timestamps, context: str = "") -> None:
     if not is_sealed(conn):
         return
     _, val_end = boundaries(cfg)
+    # Bounded ABOVE by the study window's end. Data after it was never in any
+    # split, so refusing it would block Phase 7's live monitor while protecting
+    # nothing — the sealed period is [val_end, study_end), exactly what
+    # `boundaries()` documents.
+    study_end = date_str_to_ts(cfg["study_window"]["end"])
+
+    def sealed(t: int) -> bool:
+        return val_end <= t < study_end
+
     try:
-        offenders = [int(t) for t in timestamps if int(t) >= val_end]
+        offenders = [int(t) for t in timestamps if sealed(int(t))]
     except TypeError:                       # a single timestamp
-        offenders = [int(timestamps)] if int(timestamps) >= val_end else []
+        offenders = [int(timestamps)] if sealed(int(timestamps)) else []
     if offenders:
         where = f" in {context}" if context else ""
         raise SystemExit(

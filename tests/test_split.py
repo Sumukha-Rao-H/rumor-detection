@@ -9,7 +9,7 @@ import pytest
 
 from src import db
 from src.pipeline.split import (
-    META_SEALED, TEST, TRAIN, VAL, assert_not_test, boundaries, counts,
+    LIVE, META_SEALED, TEST, TRAIN, VAL, assert_not_test, boundaries, counts,
     is_sealed, seal, split_of, unseal,
 )
 from src.utils.config import load_config
@@ -141,3 +141,37 @@ def test_counts_report_every_split_and_lose_no_events(cfg, conn):
     assert c[VAL]["events"] == 1
     assert c[TEST]["events"] == 1
     assert sum(c[n]["events"] for n in (TRAIN, VAL, TEST)) == 3
+
+
+# --- the seal is bounded ABOVE too (P7-01) --------------------------------
+
+
+def test_data_after_the_study_window_is_live_not_test(cfg):
+    """`split_of` used to return TEST for everything at or after val_end,
+    unbounded, so today's bars counted as sealed test data. `boundaries()`
+    already documented the test period as bounded — "test is [val_end, end]" —
+    and the live monitor needs that to be true in the code as well."""
+    hi = date_str_to_ts(cfg["study_window"]["end"])
+    assert split_of(cfg, hi - HOUR) == TEST
+    assert split_of(cfg, hi) == LIVE
+    assert split_of(cfg, hi + 30 * 24 * HOUR) == LIVE
+
+
+def test_the_guard_still_refuses_the_whole_test_period(cfg, conn):
+    """Narrowing the upper bound must not open the actual test set."""
+    seal(cfg, conn)
+    _, val_end = boundaries(cfg)
+    hi = date_str_to_ts(cfg["study_window"]["end"])
+
+    with pytest.raises(SystemExit, match="SEALED TEST SET"):
+        assert_not_test(cfg, conn, [val_end])
+    with pytest.raises(SystemExit, match="SEALED TEST SET"):
+        assert_not_test(cfg, conn, [hi - HOUR])
+
+
+def test_the_guard_permits_data_after_the_study_window(cfg, conn):
+    """What P7-01 needs: the live monitor scores bars that postdate the study
+    entirely, and refusing them would protect nothing."""
+    seal(cfg, conn)
+    hi = date_str_to_ts(cfg["study_window"]["end"])
+    assert_not_test(cfg, conn, [hi, hi + 7 * 24 * HOUR])
