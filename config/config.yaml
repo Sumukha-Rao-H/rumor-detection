@@ -466,6 +466,18 @@ baselines:
     exclude_features: [days_since_last_8k, days_since_last_earnings]
 
 # ------------------------------------------------------------
+# The live monitor (Phase 7)
+# ------------------------------------------------------------
+live:
+  # WALL-CLOCK hours after an alert in which a filing counts as following it.
+  # NOT decision.horizon_hours, which is also 48 but measured in BARS — a
+  # different quantity that happens to share the number. A company can file
+  # overnight or at a weekend, so "did a filing follow within two days" is a
+  # question about elapsed time. The LEAD TIME recorded is still in trading
+  # hours, per rule 3, so both clocks appear and neither is guessed at.
+  outcome_window_hours: 48
+
+# ------------------------------------------------------------
 # Reinforcement learning (Phase 6) — the stopping policy
 # ------------------------------------------------------------
 rl:
