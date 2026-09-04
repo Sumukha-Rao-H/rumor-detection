@@ -80,8 +80,16 @@ def test_no_model_exists_yet() -> None:
     invariant — that `src/eval/` never imports `src.pipeline` — is unchanged
     and still enforced by the test below, which is what actually stops
     evaluation code reaching back into the pipeline.
+
+    `baselines` was dropped in P5-01 (2026-09-04), when `base.py` became the
+    first module in it — the retirement this docstring anticipated. The whole
+    evaluation block (P1-07 through P1-12) was committed before it, and git
+    history is now what carries the claim: `src/eval/metrics.py` predates
+    `src/baselines/base.py` by every commit between them. `rl` is still empty
+    and stays asserted, so the same guarantee remains machine-checked for the
+    learned policy in Phase 6 — which is the model the claim most matters for.
     """
-    for package in ("baselines", "rl"):
+    for package in ("rl",):
         modules = [p for p in (REPO / "src" / package).glob("*.py")
                    if p.name != "__init__.py"]
         assert modules == [], f"src/{package} is no longer empty: {modules}"

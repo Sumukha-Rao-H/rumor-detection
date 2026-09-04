@@ -346,6 +346,26 @@ reward:
 # Baselines — all four must be genuinely tuned (context.md §4)
 # ------------------------------------------------------------
 baselines:
+  # Knobs shared by every baseline, read by src/baselines/base.py. They live
+  # here rather than being repeated per baseline because they govern the
+  # comparison itself, not any one detector.
+  common:
+    # What to do with a window no baseline feature can score — issue 32's 234
+    # positive windows are all-NaN on volume_z, having fewer than
+    # features.min_baseline_bars bars behind them.
+    #   rank_last — score it below every real score, keep it in the denominator
+    #   error     — raise, for a baseline that ought to score everything
+    # rank_last is the default because dropping such windows would raise
+    # precision without detecting anything, and would leave volume z-score
+    # scored on a smaller window set than always-quiet, so the two rows of the
+    # P5-06 table would not be about the same task.
+    unscoreable: rank_last
+    # Trading hours at the start of a window during which a FLAG is refused.
+    # 0 = no restriction, the default: the alert budget already prices a false
+    # alarm, so suppressing early flags outright would hide a detector that is
+    # genuinely early. volume_zscore.min_wait_hours overrides this per baseline
+    # where P5-03's tuning calls for it.
+    min_wait_hours: 0
   always_quiet: {}
   volume_zscore:
     threshold: 2.5
