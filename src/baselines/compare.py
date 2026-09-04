@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from pathlib import Path
 
 import pandas as pd
 
@@ -95,12 +96,18 @@ def build_training_frame(cfg: dict, conn) -> pd.DataFrame:
 
 def run_baselines(cfg: dict, conn, frame: pd.DataFrame,
                   skip_gb: bool = False,
-                  fitted_gb: "GradientBoosting | None" = None
+                  fitted_gb: "GradientBoosting | None" = None,
+                  policy_runs: list[str] | None = None
                   ) -> dict[str, pd.DataFrame]:
-    """Every baseline's prediction frame, from one evaluation frame.
+    """Every detector's prediction frame, from one evaluation frame.
 
-    Each is scored through `Baseline.predict`, so all four get the same
+    Each is scored through `Baseline.predict`, so all of them get the same
     contract validation, the same unscoreable handling and the same seal check.
+
+    `policy_runs` are P6-03 run directories. Each becomes its **own row**
+    rather than being averaged into one, because P6-05's finding is that the
+    policy's score is dominated by its seed — a mean would hide exactly the
+    thing the reader needs to see.
     """
     models: list = [AlwaysQuiet(cfg), VolumeZScore(cfg), CUSUM(cfg)]
     if not skip_gb:
@@ -114,12 +121,18 @@ def run_baselines(cfg: dict, conn, frame: pd.DataFrame,
             gb.fit(build_training_frame(cfg, conn), conn=conn)
         models.append(gb)
 
+    named: list[tuple[str, object]] = [(m.name, m) for m in models]
+    for run in (policy_runs or []):
+        from src.rl import load_policy
+        label = f"rl_policy[{Path(run).name.split('-')[-1]}]"
+        named.append((label, load_policy(cfg, run)))
+
     out = {}
-    for model in models:
+    for label, model in named:
         # A finite placeholder: precision at the budget is rank-based, and
         # `evaluate` re-derives the operating point from the frame anyway.
-        out[model.name] = model.predict(frame, threshold=float("inf"),
-                                        conn=conn, context=f"compare/{model.name}")
+        out[label] = model.predict(frame, threshold=float("inf"),
+                                   conn=conn, context=f"compare/{label}")
     return out
 
 
@@ -187,6 +200,11 @@ def main() -> None:
     ap.add_argument("--skip-gb", action="store_true",
                     help="omit gradient boosting (skips fitting a model)")
     ap.add_argument("--out", default=None, help="write the full table as CSV")
+    ap.add_argument("--policy-run", action="append", default=None,
+                    dest="policy_runs",
+                    help="a P6-03 run directory; repeatable. Each seed gets "
+                         "its own row — P6-05 found the policy's score is "
+                         "dominated by the seed, and a mean would hide it.")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -204,7 +222,7 @@ def main() -> None:
             print("  fitting gradient boosting on the train split...")
             gb.fit(build_training_frame(cfg, conn), conn=conn)
         predictions = run_baselines(cfg, conn, frame, skip_gb=args.skip_gb,
-                                    fitted_gb=gb)
+                                    fitted_gb=gb, policy_runs=args.policy_runs)
         table = comparison_table(cfg, predictions, variant)
         tables.append(table)
         print(render(table))
