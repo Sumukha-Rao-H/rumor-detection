@@ -374,11 +374,16 @@ baselines:
     # not change any reported number, and a test pins exactly that.
     score: 0.0
   volume_zscore:
-    # Both of these are OUTPUTS of P5-03's tuning, kept here as the documented
-    # default and overwritten by what validation chose. See the work log for
-    # the run that set them.
-    threshold: 2.5
-    min_wait_hours: 1
+    # OUTPUTS of P5-03's tuning on validation 2026-09-04, not guesses. The run
+    # is in work-log entry 52: 314,694-window eval frame, precision 0.0845
+    # against a 0.0046 floor (18.3x), median lead 22.3 trading hours.
+    # The threshold is the budget-implied cut, not a searched value — precision
+    # at the alert budget is rank-based and does not move with it.
+    # Notably close to the 2.5 that was originally guessed.
+    threshold: 2.648
+    # 0 won the sweep: the alert budget already prices a false alarm, so
+    # suppressing early flags only cost precision here.
+    min_wait_hours: 0
     # Swept on validation. Bounded by the 48-bar decision horizon: waiting
     # longer than the window is identical to never flagging, which
     # always_quiet already measures as the floor.
