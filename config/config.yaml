@@ -339,7 +339,24 @@ reward:
   r_correct_flag: 1.0
   r_early_bonus: 0.5               # scaled by remaining trading hours to t0
   r_false_alarm: -2.0
-  r_wait: -0.02
+  # CHANGED -0.02 -> -0.005 on 2026-09-04 (P6-04), after the first real training
+  # run flagged on 94% of steps. Not a tuning tweak — the old value flattened
+  # the reward landscape, which `python -m src.rl.monitor --sweep` shows:
+  #
+  #   r_wait   wait/window   always-FLAG   always-WAIT     gap
+  #   -0.020       -0.960       -1.1250       -1.0850    0.0400   <- flat
+  #   -0.005       -0.240       -1.1250       -0.3650    0.7600
+  #
+  # At -0.02, sitting out a 48-bar window cost -0.96 against a -2.0 false
+  # alarm: 48% of being wrong. The two degenerate strategies then paid within
+  # 0.04 of each other — less than PPO's batch-to-batch noise — so an agent
+  # that cannot yet discriminate is INDIFFERENT between flagging everything and
+  # flagging nothing, and drifts to whichever its parameters happen to favour.
+  # At a 0.46% evaluation base rate the default when uncertain must be WAIT.
+  # -0.005 costs an eighth of a false alarm per window: waiting is not free,
+  # and it is clearly cheaper than being wrong. Derived, not guessed —
+  # `suggest_r_wait` states the criterion and a test pins that config follows it.
+  r_wait: -0.005
   r_missed: -0.5
 
 # ------------------------------------------------------------
