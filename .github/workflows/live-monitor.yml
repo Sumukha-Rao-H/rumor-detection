@@ -1,9 +1,22 @@
 # The scheduled live monitor (P7-04).
 #
-# Runs after the US close on each trading day, fetches the bars that appeared
-# since the last run, scores them with the tuned detectors, appends any alerts
-# to the log, backfills outcomes for alerts whose window has now elapsed, and
-# commits the log back to this repository.
+# Runs after the US close on each trading day and, in one pass:
+#   1. fetches the price bars that appeared since the last run (yfinance),
+#   2. fetches 8-K filings accepted since the last one on record (SEC EDGAR),
+#   3. scores the new bars with the tuned detectors,
+#   4. appends any alerts to the log,
+#   5. backfills outcomes for alerts whose 48-hour window has now elapsed,
+#   6. commits the log back to this repository.
+#
+# Step 2 is not optional. `backfill` can only answer an alert whose whole
+# window falls at or before the newest filing held locally, so without a fresh
+# filing fetch the horizon never moves and every alert the monitor raises sits
+# deferred for ever — it would run for weeks and learn nothing. It also feeds
+# the days_since_last_8k feature, which reads the same table.
+#
+# EDGAR needs no API key, only the descriptive User-Agent already in
+# config.http.user_agent, and costs about 0.125s per company — negligible
+# beside the bar fetch.
 #
 # WHY DAILY, NOT HOURLY
 # This repository is private, so GitHub Actions bills against the 2,000

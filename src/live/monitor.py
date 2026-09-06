@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -49,6 +50,8 @@ from src.utils.timeutils import ts_to_iso, utc_now_ts
 #: whole point: nobody knows yet whether news is coming, which is why the label
 #: columns are null and `is_positive` is unknowable until P7-03 backfills it.
 LABEL_COLS = ("window_id", "ticker", "t0_utc", "is_scheduled", "item_code")
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -242,6 +245,84 @@ def fetch_latest(cfg: dict, conn, tickers: list[str] | None = None,
         return 0
     return market.collect_many(cfg, conn, tickers, start + 1, now_ts,
                                interval, resume=True)
+
+
+def fetch_recent_filings(cfg: dict, conn, tickers: list[str] | None = None,
+                         since_ts: int | None = None,
+                         now_ts: int | None = None,
+                         client=None) -> dict:
+    """Append 8-Ks filed since the last one on record. The other half of live.
+
+    Without this the monitor collects alerts it can never score. `backfill`
+    only answers an alert whose whole 48-hour window falls at or before the
+    newest filing held locally, so a filing horizon that never moves means
+    every new alert sits deferred forever — the monitor would run for weeks,
+    raise hundreds of alerts, and never learn whether one of them was right.
+    That was the state of P7-04 until this was added.
+
+    Three details carry the weight:
+
+    **`force=True`.** `EdgarClient` is cache-first by design (P2-01), which is
+    exactly right for rebuilding a fixed historical window and exactly wrong
+    here: the cached submissions file would be returned unchanged and no new
+    filing would ever appear. The cache is bypassed and refreshed on purpose.
+
+    **The window starts BEFORE the horizon.** `live.filing_overlap_hours` of
+    deliberate overlap, because SEC acceptance times are not strictly ordered
+    against when a record becomes visible, and amendments arrive late. Re-reading
+    a filing costs nothing — the upsert is idempotent — while missing one at the
+    boundary would silently cost an outcome.
+
+    **Only `recent` is read.** `pages_to_fetch` selects the older paginated
+    files by date overlap, and a window that starts days ago overlaps none of
+    them, so this is one request per company rather than a full history walk.
+    """
+    from src.collectors.edgar import (EdgarClient, fetch_company_filings,
+                                      filing_rows)
+    from src import db as _db
+
+    now_ts = int(now_ts if now_ts is not None else utc_now_ts())
+    if since_ts is None:
+        row = conn.execute("SELECT MAX(acceptance_utc) FROM filings "
+                           "WHERE acceptance_utc IS NOT NULL").fetchone()
+        if row is None or row[0] is None:
+            raise SystemExit(
+                "no filings stored at all — run the Phase 2 collector before "
+                "the monitor; this appends to a history, it does not build one.")
+        overlap = int((cfg.get("live") or {}).get("filing_overlap_hours", 72))
+        since_ts = int(row[0]) - overlap * 3600
+
+    companies = _db.companies_for_collection(conn, tickers)
+    if not companies:
+        raise SystemExit("no companies to collect filings for.")
+
+    client = client or EdgarClient(cfg)
+    records = new_rows = failed = 0
+    for company in companies:
+        try:
+            fetched = fetch_company_filings(cfg, client, company["cik"],
+                                            since_ts=since_ts, until_ts=now_ts,
+                                            force=True)
+            rows = filing_rows(cfg, fetched, company["cik"], company["ticker"])
+            records += len(fetched)
+            new_rows += _db.upsert_filings(conn, rows)
+        except Exception as exc:                  # one 404 must not cost the rest
+            failed += 1
+            log.warning("filings: %s (%s) failed: %s: %s", company["ticker"],
+                        company["cik"], type(exc).__name__, exc)
+    conn.commit()
+
+    # Run-level, exactly as the Phase 2 collector reasons about it: a company
+    # with no new 8-K is ordinary, but zero RECORDS across every company means
+    # the endpoint returned nothing and the run must not report success.
+    if companies and records == 0:
+        raise SystemExit(
+            f"EDGAR returned zero records across all {len(companies)} "
+            f"companies — refusing to report success. The endpoint is "
+            f"unreachable, throttling, or the User-Agent was rejected.")
+
+    return {"companies": len(companies), "records": records,
+            "new_filings": new_rows, "failed": failed, "since_utc": since_ts}
 
 
 def main() -> None:

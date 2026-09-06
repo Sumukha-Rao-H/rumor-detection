@@ -61,7 +61,7 @@ def run(cfg: dict, conn, max_tickers: int | None = None,
     """
     from src.live.alertlog import append, export_csv, summary, verify_chain
     from src.live.monitor import (build_detectors, conform, fetch_latest,
-                                  latest_bar_frame)
+                                  fetch_recent_filings, latest_bar_frame)
     from src.live.outcomes import backfill
 
     started = time.time()
@@ -75,8 +75,17 @@ def run(cfg: dict, conn, max_tickers: int | None = None,
 
     if fetch:
         result["bars_appended"] = fetch_latest(cfg, conn, tickers=tickers)
+        # Filings BEFORE the frame is built, for two separate reasons. One
+        # feature — days_since_last_8k — reads this table, so a stale filings
+        # table would score today's bars against yesterday's idea of when the
+        # company last filed. And `backfill` below can only answer an alert
+        # whose window ends at or before the newest filing on record, so
+        # without this the horizon never advances and every alert the monitor
+        # ever raises stays deferred forever.
+        result["filings"] = fetch_recent_filings(cfg, conn, tickers=tickers)
     else:
         result["bars_appended"] = 0
+        result["filings"] = None
 
     frame = conform(latest_bar_frame(cfg, conn, tickers, as_of=as_of))
     result["bars_scored"] = len(frame)
@@ -110,8 +119,13 @@ def scan_alerts(cfg: dict, conn, frame):
 
 def render(result: dict) -> str:
     """A summary an unattended run can be read from, days later."""
+    f = result.get("filings")
     lines = [
         f"bars appended : {result['bars_appended']:,}",
+        (f"filings       : {f['new_filings']:,} new from {f['records']:,} "
+         f"records across {f['companies']:,} companies"
+         + (f", {f['failed']} failed" if f["failed"] else "")
+         if f else "filings       : skipped (--no-fetch)"),
         f"bars scored   : {result['bars_scored']:,} "
         f"across {result['tickers']:,} tickers",
         f"newest bar    : {ts_to_iso(result['newest_bar_utc'])}",

@@ -476,6 +476,13 @@ live:
   # question about elapsed time. The LEAD TIME recorded is still in trading
   # hours, per rule 3, so both clocks appear and neither is guessed at.
   outcome_window_hours: 48
+  # How far BEFORE the newest stored filing to restart the live filing fetch.
+  # SEC acceptance times are not strictly ordered against when a record becomes
+  # visible, and amendments arrive late, so the fetch deliberately overlaps
+  # what it already holds. Re-reading a filing costs nothing — the upsert is
+  # idempotent — while missing one at the boundary silently costs an outcome,
+  # which is the whole point of the live run.
+  filing_overlap_hours: 72
 
 # ------------------------------------------------------------
 # Reinforcement learning (Phase 6) — the stopping policy
