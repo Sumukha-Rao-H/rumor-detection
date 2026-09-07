@@ -165,18 +165,30 @@ jobs:
           restore-keys: |
             monitor-db-
 
+      # The miss is detected by looking for the FILE, not by reading a step
+      # output. `actions/cache@v4` publishes only `cache-hit`; `cache-matched-key`
+      # belongs to `actions/cache/restore`, so the old condition read an output
+      # that does not exist, was therefore always '', and bootstrapped on every
+      # run — overwriting the very database the cache had just restored. Three
+      # runs re-fetched from the April snapshot because of it. `cache-hit` is no
+      # use here either: the primary key carries `github.run_id`, so it is unique
+      # per run and never an exact hit by construction. The file is the fact.
       - name: Bootstrap the database on a cache miss
-        if: steps.dbcache.outputs.cache-matched-key == ''
         env:
           BOOTSTRAP_DB_URL: ${{ secrets.BOOTSTRAP_DB_URL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          if [ -s data/db/footprints.db ]; then
+            echo "cache restored $(du -h data/db/footprints.db | cut -f1) of database — skipping bootstrap"
+            exit 0
+          fi
           if [ -z "$BOOTSTRAP_DB_URL" ]; then
             echo "::error::No cached database and BOOTSTRAP_DB_URL is unset."
             echo "Run scripts/build_slim_db.py, attach the gzipped file to a"
             echo "release, and set the secret. See the header of this workflow."
             exit 1
           fi
+          echo "no cached database — seeding from the bootstrap release"
           mkdir -p data/db
           curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
                -H "Accept: application/octet-stream" \
