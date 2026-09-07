@@ -43,3 +43,10 @@ tensorboard/
 .DS_Store
 .idea/
 .vscode/
+
+# Scratch exports from scripts/ (e.g. the dataset browser's --out). These are
+# extracts of the local database; the repository is public and the data is not
+# committed, so an accidental `git add` of one should not be possible.
+out.csv
+/*.csv
+!live-log/*.csv

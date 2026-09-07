@@ -19,14 +19,35 @@
 # beside the bar fetch.
 #
 # WHY DAILY, NOT HOURLY
-# This repository is private, so GitHub Actions bills against the 2,000
-# free minutes a month. The market collector paces itself at one request a
-# second, so a full 1,500-ticker pass costs about 25 minutes. Daily is roughly
-# 550 minutes a month and fits; hourly would be about 3,850 and would not.
+# Daily is now a deliberate choice rather than a budget limit. While this
+# repository was private, Actions billed against 2,000 free minutes a month:
+# the market collector paces itself at one request a second, so a full
+# 1,500-ticker pass costs about 25 minutes, daily came to roughly 550 minutes
+# and fitted, hourly to about 3,850 and did not.
+#
+# The repository is now PUBLIC, and public repositories get unlimited minutes
+# on GitHub-hosted standard runners, so that constraint is gone. The cadence
+# is kept at daily anyway, on purpose: this workflow, the detectors and their
+# thresholds were committed BEFORE the bars they are scored on existed, and
+# that pre-registration is the whole evidential value of the exercise.
+# Changing the sampling cadence part-way through changes the experiment, so it
+# is a decision to take deliberately and record, not a free upgrade to take
+# because it is now free. The same goes for --max-tickers below.
+#
 # Nothing is lost by running daily: yfinance serves roughly two years of hourly
 # history, so a run picks up every hour since the last one. The alert log
 # records the BAR time and the moment the monitor noticed it in separate
 # columns, so a catch-up run is self-describing.
+#
+# TWO PUBLIC-REPOSITORY BEHAVIOURS THAT AFFECT THIS CRON
+#   * GitHub disables scheduled workflows in a public repository after 60 days
+#     with no repository activity, and commits pushed by GITHUB_TOKEN (such as
+#     the alert-log commit below) do not reset that clock. If the log ever
+#     stops growing, check the Actions tab for a disabled schedule before
+#     suspecting the code — a silent gap would damage the out-of-sample record.
+#   * Forks have scheduled workflows disabled by default, which is the
+#     behaviour we want: a fork must not run this cron and hit the SEC while
+#     identifying itself with our contact address.
 #
 # WHAT THIS IS EVIDENCE OF
 # Not live alerting, and the report should not claim it is. It is a
@@ -38,12 +59,18 @@
 #   1. .venv/bin/python scripts/build_slim_db.py --out bootstrap.db
 #   2. gzip bootstrap.db   (about 31 MB)
 #   3. Attach bootstrap.db.gz to a GitHub release in this repository.
-#   4. Set the BOOTSTRAP_DB_URL secret to that asset's download URL.
-#      A release asset in a private repo needs a token; the simplest route is
-#      `gh release upload` and a URL of the form
-#      https://api.github.com/repos/OWNER/REPO/releases/assets/ID
-#      fetched with the Accept: application/octet-stream header, as below.
-#   5. Optionally set FINNHUB_API_KEY if news collection is ever added here.
+#   4. Set the BOOTSTRAP_DB_URL secret to that asset's download URL. Now that
+#      the repository is public, a release asset is downloadable anonymously,
+#      so the plain browser_download_url of the form
+#      https://github.com/OWNER/REPO/releases/download/TAG/bootstrap.db.gz
+#      works on its own. The Authorization header is still sent below, which
+#      is harmless for a public asset and keeps this working unchanged if the
+#      repository is ever made private again.
+#      The asset holds companies, bars, filings and events — SEC filings and
+#      price bars only. It carries no news articles and no API keys.
+#   5. Set the SEC_USER_AGENT secret (see below). Without it the run fails
+#      fast, by design, rather than identifying itself to the SEC as nobody.
+#   6. Optionally set FINNHUB_API_KEY if news collection is ever added here.
 
 name: live-monitor
 
@@ -68,8 +95,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
+    # The SEC contact address is a secret because this repository is public —
+    # config.yaml ships only a placeholder, which the EDGAR client refuses.
+    # Job-level so every step that touches EDGAR sees it, including the alert
+    # log restore, which imports code that builds a client.
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+
     steps:
       - uses: actions/checkout@v4
+
+      # Cheap, before pip and a 31 MB download, so a missing secret costs
+      # seconds rather than failing deep in the run.
+      - name: Check the SEC contact address is configured
+        run: |
+          if [ -z "${SEC_USER_AGENT}" ]; then
+            echo "::error::SEC_USER_AGENT is unset. The SEC requires a contact"
+            echo "address and blocks requests without one; this repository is"
+            echo "public so the address is not committed. Add it under"
+            echo "Settings > Secrets and variables > Actions, for example:"
+            echo "    SEC_USER_AGENT = Your Project Name (you@example.com)"
+            exit 1
+          fi
 
       - uses: actions/setup-python@v5
         with:
