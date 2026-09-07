@@ -246,3 +246,76 @@ def test_fetching_without_a_snapshot_is_refused(cfg, tmp_path):
     empty = db.get_conn(tmp_path / "empty.db")
     with pytest.raises(SystemExit, match="no bars stored"):
         fetch_latest(cfg, empty, tickers=["AAA"])
+
+
+# --------------------------------------------------------------------------
+# Two ways the live fetch went quiet without erroring (found 2026-09-07)
+# --------------------------------------------------------------------------
+def test_a_warm_fetch_state_does_not_silence_the_fetch(cfg, conn, monkeypatch):
+    """`resume=True` would have skipped every ticker on the first warm-cache run.
+
+    `fetch_state` rows are keyed on the ticker alone and carry no window, so
+    once a run marked a ticker 'ok', a resuming run skipped it for ever. Every
+    run so far began from the bootstrap, whose `fetch_state` is empty, which is
+    the only reason this never fired.
+    """
+    from src.collectors import market
+    from src.live.monitor import fetch_latest, latest_stored_bar
+
+    interval = cfg["market"]["interval"]
+    db.set_fetch_state(conn, f"market:{interval}", "AAA", "ok",
+                       records=1, rows_written=1)
+
+    seen: list[bool] = []
+
+    def spy(cfg_, conn_, tickers, start_ts, end_ts, iv, resume=False, force=False):
+        seen.append(resume)
+        return 0
+
+    monkeypatch.setattr(market, "collect_many", spy)
+    fetch_latest(cfg, conn, tickers=["AAA"],
+                 now_ts=latest_stored_bar(conn, interval) + 10 * HOUR)
+
+    assert seen, "collect_many was never called"
+    assert not any(seen), (
+        "the live fetch must not resume: a warm fetch_state would skip every "
+        "ticker and append nothing while reporting success")
+
+
+def test_the_benchmark_is_fetched_even_though_it_is_not_in_the_universe(cfg, conn,
+                                                                       monkeypatch):
+    """Otherwise every ret_rel_* feature decays to NaN as the universe moves on.
+
+    The benchmark is not `in_universe`, so it never appears in the ticker list,
+    and it is fetched from ITS OWN newest bar — starting from the universe's
+    would step over the gap that has already opened and never close it.
+    """
+    from src.collectors import market
+    from src.live.monitor import fetch_latest, latest_stored_bar
+
+    interval = cfg["market"]["interval"]
+    benchmark = cfg["market"]["benchmark"]
+    universe_newest = latest_stored_bar(conn, interval)
+
+    # Make the benchmark lag the universe by ten bars, which is the production
+    # state: it is not in_universe, so the live fetch never advanced it.
+    bench_newest = universe_newest - 10 * HOUR
+    conn.execute("DELETE FROM bars WHERE ticker = ? AND interval = ? AND ts_utc > ?",
+                 (benchmark, interval, bench_newest))
+    conn.commit()
+    assert latest_stored_bar(conn, interval, ticker=benchmark) == bench_newest
+
+    calls: list[tuple] = []
+
+    def spy(cfg_, conn_, tickers, start_ts, end_ts, iv, resume=False, force=False):
+        calls.append((tuple(tickers), start_ts))
+        return 0
+
+    monkeypatch.setattr(market, "collect_many", spy)
+    fetch_latest(cfg, conn, tickers=["AAA"], now_ts=universe_newest + 10 * HOUR)
+
+    bench_calls = [c for c in calls if c[0] == (benchmark,)]
+    assert bench_calls, f"{benchmark} was never fetched; ret_rel_* would go NaN"
+    assert bench_calls[0][1] == bench_newest + 1, (
+        "the benchmark must resume from its own newest bar, or the gap between "
+        "it and the universe is stepped over and never filled")

@@ -208,10 +208,20 @@ def default_thresholds(cfg: dict) -> dict:
             "default": 0.5}          # policies emit P(FLAG)
 
 
-def latest_stored_bar(conn, interval: str) -> int | None:
-    """The newest bar already stored, so a fetch asks only for what is missing."""
-    row = conn.execute("SELECT MAX(ts_utc) FROM bars WHERE interval = ?",
-                       (interval,)).fetchone()
+def latest_stored_bar(conn, interval: str, ticker: str | None = None) -> int | None:
+    """The newest bar already stored, so a fetch asks only for what is missing.
+
+    `ticker` narrows it to one symbol. That matters for the benchmark, which is
+    not `in_universe` and so falls behind the universe's own newest bar: asking
+    globally would start the fetch after the gap and never close it.
+    """
+    if ticker is None:
+        row = conn.execute("SELECT MAX(ts_utc) FROM bars WHERE interval = ?",
+                           (interval,)).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT MAX(ts_utc) FROM bars WHERE interval = ? AND ticker = ?",
+            (interval, ticker)).fetchone()
     return None if row is None or row[0] is None else int(row[0])
 
 
@@ -241,10 +251,33 @@ def fetch_latest(cfg: dict, conn, tickers: list[str] | None = None,
 
     # +1 second: the stored bar is already held, and `collect_many` refuses an
     # empty or inverted range rather than treating it as a silent no-op.
-    if start + 1 >= now_ts:
-        return 0
-    return market.collect_many(cfg, conn, tickers, start + 1, now_ts,
-                               interval, resume=True)
+    # `resume=False` is load-bearing, not a default left alone. `collect_many`
+    # skips every ticker whose `fetch_state` row says "ok", and that row is
+    # keyed on the ticker ALONE — it carries no window. Under `resume=True` the
+    # first run to populate `fetch_state` would make every later run skip every
+    # ticker and append nothing, while still reporting success. It survived
+    # earlier runs only because each began from the bootstrap, whose
+    # `fetch_state` is empty; the first run to restore a warm cache would have
+    # gone quiet. Resume answers "continue an interrupted backfill"; each
+    # monitor pass is a fresh window, so there is nothing to resume.
+    fetched = 0
+    if start + 1 < now_ts:
+        fetched += market.collect_many(cfg, conn, tickers, start + 1, now_ts,
+                                       interval, resume=False)
+
+    # The benchmark is fetched separately, from ITS own newest bar. It is not
+    # `in_universe`, so it is absent from the list above; left out, every
+    # `ret_rel_*` feature silently degrades to NaN once the universe's bars run
+    # past the benchmark's last one — measured at 74.8% of live alerts before
+    # this fix. Its own start closes the gap that had already opened.
+    benchmark = cfg["market"]["benchmark"]
+    if benchmark not in set(tickers):
+        bench_start = latest_stored_bar(conn, interval, ticker=benchmark)
+        if bench_start is not None and bench_start + 1 < now_ts:
+            fetched += market.collect_many(cfg, conn, [benchmark],
+                                           bench_start + 1, now_ts,
+                                           interval, resume=False)
+    return fetched
 
 
 def fetch_recent_filings(cfg: dict, conn, tickers: list[str] | None = None,
