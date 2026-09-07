@@ -2,11 +2,24 @@
 
 **Project Code 31 · NMAM Institute of Technology · Dept. of ISE**
 
-A live surveillance system that reads a stock's hourly price and volume, and
-raises a hand before the company files: *"something is coming for this
+A **same-day surveillance system** that reads a stock's hourly price and volume
+and raises a hand before the company files: *"something is coming for this
 company."* Every US listed company must disclose material events on an SEC
 **8-K**, timestamped to the second — which gives a free, exact answer key to
 grade against.
+
+**On "same-day", precisely.** The detector is *online*: at each hourly bar it
+decides WAIT or FLAG using only that bar and earlier ones, and it is tested by
+tampering with the future and demanding the output not move. The deployed
+monitor, however, runs **once per trading day, after the close** — it replays
+that day's bars in order rather than polling hourly. Because every feature is
+computed point-in-time, the alerts are identical to what an hour-by-hour
+deployment would have raised; only the moment they are *noticed* differs, and
+the log stores bar time and notice time in separate columns so the gap is
+visible. This is deliberately **not** live intraday alerting, and nothing here
+claims it is. The benchmark it is measured against is current compliance
+practice, which investigates months later, by hand, usually only after a
+complaint.
 
 The headline result is **how many trading hours of advance warning public
 market data gives, at a controlled false-alarm rate**, split by event type and
