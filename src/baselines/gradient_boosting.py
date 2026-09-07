@@ -57,6 +57,26 @@ FEATURES: tuple[str, ...] = (
 )
 
 
+def news_features(cfg: dict) -> tuple[str, ...]:
+    """The P8-01 news columns, or () when the news channel is off.
+
+    Derived from `features.news_windows_h` rather than written out, so a change
+    to the configured windows cannot leave this list naming columns the matrix
+    does not have — or, worse, silently omitting ones it does, which would make
+    the Phase 8 ablation quietly measure nothing.
+
+    This baseline is the ONLY one that can use them. `cusum` and
+    `volume_zscore` read `volume_z` alone and `always_quiet` reads nothing, so
+    the with/without comparison lives or dies here.
+    """
+    if not cfg["features"].get("include_news_coverage", False):
+        return ()
+    cols = ["hours_since_news"]
+    for w in cfg["features"]["news_windows_h"]:
+        cols += [f"news_count_{w}h", f"news_breadth_{w}h"]
+    return tuple(cols)
+
+
 def label_rows(frame: pd.DataFrame) -> np.ndarray:
     """1 where the row belongs to a positive window, else 0.
 
@@ -103,7 +123,8 @@ class GradientBoosting(Baseline):
         are reported; see work-log entry 54.
         """
         excluded = set(self.params.get("exclude_features", ()))
-        return tuple(f for f in FEATURES if f not in excluded)
+        available = FEATURES + news_features(self.cfg)
+        return tuple(f for f in available if f not in excluded)
 
     def _check_columns(self, frame: pd.DataFrame) -> None:
         missing = [c for c in self.features if c not in frame.columns]

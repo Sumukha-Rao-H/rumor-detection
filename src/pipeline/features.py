@@ -646,12 +646,28 @@ def build_matrix(cfg: dict, conn) -> pd.DataFrame:
     return matrix
 
 
-def write_matrix(cfg: dict, conn) -> pd.DataFrame:
-    """Build and write to `paths.processed`. Overwrites, never appends."""
+def matrix_path(cfg: dict):
+    """Where THIS configuration's feature matrix lives.
+
+    The filename carries the ablation arm. Two things follow, and both are the
+    point of P8-02: the arms cannot overwrite one another, and a comparison
+    cannot silently read the arm it did not mean to. Flipping
+    `include_news_coverage` moves the build target and the evaluation source
+    together, so "identical everything else" holds by construction rather than
+    by remembering to pass a matching pair of paths.
+    """
     from pathlib import Path
 
+    name = ("features-with-news.parquet"
+            if cfg["features"].get("include_news_coverage", False)
+            else "features.parquet")
+    return Path(cfg["paths"]["processed"]) / name
+
+
+def write_matrix(cfg: dict, conn) -> pd.DataFrame:
+    """Build and write to `paths.processed`. Overwrites, never appends."""
     matrix = build_matrix(cfg, conn)
-    dest = Path(cfg["paths"]["processed"]) / "features.parquet"
+    dest = matrix_path(cfg)
     dest.parent.mkdir(parents=True, exist_ok=True)
     matrix.to_parquet(dest, index=False)
     log.info("feature matrix: %d rows x %d cols -> %s",

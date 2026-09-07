@@ -75,8 +75,12 @@ def build_training_frame(cfg: dict, conn) -> pd.DataFrame:
     from src.pipeline.features import build_quiet_matrix
 
     lo, hi = split_bounds(cfg, "train")
-    matrix = pd.read_parquet(
-        f"{cfg['paths']['processed']}/features.parquet")
+    # `matrix_path` carries the ablation arm, so this reads the matrix that
+    # THIS config built — the with-news arm cannot be scored against the
+    # without-news matrix by forgetting to change a second path.
+    from src.pipeline.features import matrix_path
+
+    matrix = pd.read_parquet(matrix_path(cfg))
     positives = matrix[(matrix.ts_utc >= lo) & (matrix.ts_utc < hi)].copy()
 
     ratio = cfg["sampling"]["negatives_per_positive"]
