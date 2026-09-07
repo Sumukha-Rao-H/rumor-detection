@@ -218,8 +218,13 @@ def test_a_company_that_has_filed_nothing_is_not_an_error(cfg):
 
 
 def test_page_urls_sit_beside_the_submissions_file(cfg):
+    import requests
+
     from src.collectors.edgar import EdgarClient
-    c = EdgarClient(cfg)
+    # A session is injected because this only exercises URL building; omitting
+    # one would signal a live SEC client, which now demands a real contact
+    # address (see `require_sec_user_agent`).
+    c = EdgarClient(cfg, session=requests.Session())
     assert c.submissions_page_url("CIK0000019617-submissions-011.json") == (
         f"{cfg['edgar']['submissions_base']}/CIK0000019617-submissions-011.json")
 

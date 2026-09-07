@@ -38,7 +38,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from src import db
-from src.utils.config import load_config
+from src.utils.config import load_config, require_sec_user_agent
 from src.utils.ratelimit import Backoff, RateLimiter
 from src.utils.timeutils import (
     date_str_to_ts, iso_utc_to_ts, ts_to_dt, utc_now_ts,
@@ -68,6 +68,13 @@ class EdgarClient:
     def __init__(self, cfg: dict, session: requests.Session | None = None):
         self.cfg = cfg
         ecfg = cfg["edgar"]
+        if session is None:
+            # About to talk to the SEC for real, so the contact address has to
+            # be a real one. Checked here rather than in each caller because
+            # this is the one chokepoint every live request passes through.
+            # An injected session means a test or a replay, which never
+            # reaches the SEC and so needs no address.
+            require_sec_user_agent(cfg)
         self.session = session or requests.Session()
         self.session.headers.update({
             # SEC's entire terms of service: say who you are and how to reach

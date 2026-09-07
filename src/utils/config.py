@@ -37,6 +37,14 @@ def _read_config(cfg_path: Path) -> dict:
     for key, value in cfg.get("paths", {}).items():
         p = Path(value)
         cfg["paths"][key] = str(p if p.is_absolute() else REPO_ROOT / p)
+
+    # This repository is public, so the SEC contact address cannot live in the
+    # committed config — see the comment on `http.user_agent` in config.yaml.
+    # The environment wins when it is set; otherwise the placeholder survives
+    # and `require_sec_user_agent` refuses it at the point of use.
+    env_ua = os.getenv("SEC_USER_AGENT", "").strip()
+    if env_ua:
+        cfg.setdefault("http", {})["user_agent"] = env_ua
     return cfg
 
 
@@ -62,6 +70,33 @@ def load_config(path: str | Path | None = None) -> dict:
 
 
 load_config.cache_clear = _read_config.cache_clear  # type: ignore[attr-defined]
+
+
+#: Marker for the placeholder User-Agent shipped in the public config.yaml.
+#: Matching on this rather than the whole string means the placeholder text
+#: can be reworded without silently disarming the check.
+PLACEHOLDER_SEC_UA = "SET-SEC_USER_AGENT"
+
+
+def require_sec_user_agent(cfg: dict) -> str:
+    """The SEC User-Agent, refusing the placeholder the public repo ships with.
+
+    The SEC's entire terms of service is "say who you are and how to reach
+    you", and it blocks requests that do not. Failing here — loudly, before a
+    single request goes out — is kinder than letting a clone run for a while
+    and then get blocked for identifying itself as nobody.
+    """
+    ua = str(cfg.get("http", {}).get("user_agent", "")).strip()
+    if not ua or PLACEHOLDER_SEC_UA in ua:
+        raise RuntimeError(
+            "config.http.user_agent is still the committed placeholder. The SEC "
+            "requires a real contact address and blocks requests without one, and "
+            "this repository is public so the address cannot be committed. Copy "
+            ".env.example to .env and set, for example:\n"
+            "    SEC_USER_AGENT=Your Project Name (you@example.com)\n"
+            "In GitHub Actions, set it as the SEC_USER_AGENT repository secret."
+        )
+    return ua
 
 
 def require_env(name: str) -> str:

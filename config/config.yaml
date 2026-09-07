@@ -12,7 +12,16 @@ paths:
 http:
   # SEC requires a descriptive User-Agent with a contact address, and caps
   # traffic at 10 requests/second. That is the entire terms of service.
-  user_agent: "NMAMIT ISE Project 31 (18881ujwal@gmail.com)"
+  #
+  # The real address is NOT stored here, because this repository is public.
+  # Two reasons, and the second is the one that matters:
+  #   1. a committed address is scraped for spam;
+  #   2. anyone who clones or forks this would send OUR address to the SEC,
+  #      so their rate-limit violations would be attributed to us.
+  # Set SEC_USER_AGENT in your .env (see .env.example) — the loader prefers it
+  # over the placeholder below, and the EDGAR client refuses to start if the
+  # placeholder is all it has, rather than letting the SEC block you later.
+  user_agent: "SET-SEC_USER_AGENT-IN-YOUR-ENV (unset@example.invalid)"
 
 # ------------------------------------------------------------
 # Rate limiting — shared across every collector's Backoff (src/utils/ratelimit.py)

@@ -95,10 +95,26 @@ def test_cache_path_mirrors_url_including_host(cfg):
 # -- the terms of service --------------------------------------------------
 
 def test_user_agent_carries_a_contact_address(cfg):
+    cfg["http"]["user_agent"] = "Test Suite (tests@example.com)"
     c, session = client(cfg, [])
     ua = session.headers["User-Agent"]
     assert ua == cfg["http"]["user_agent"]
     assert "@" in ua, "SEC requires a contact address; requests without one are blocked"
+
+
+def test_a_live_client_refuses_the_committed_placeholder():
+    """The public repo ships a placeholder address; using it would get us blocked.
+
+    Guarding only the live path — an injected session is a test or a replay and
+    never reaches the SEC.
+    """
+    c = copy.deepcopy(load_config())
+    c["http"]["user_agent"] = "SET-SEC_USER_AGENT-IN-YOUR-ENV (unset@example.invalid)"
+
+    with pytest.raises(RuntimeError, match="placeholder"):
+        EdgarClient(c)                      # no session => live client => refused
+
+    EdgarClient(c, session=requests.Session())   # injected session => allowed
 
 
 def test_rate_limiter_interval_comes_from_config(tmp_path):
