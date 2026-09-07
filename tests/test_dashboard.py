@@ -160,3 +160,42 @@ def test_an_open_window_hides_what_happened_next():
     assert ("nothing after the flagged hour is shown" in body
             or "no alerts to inspect" in body
             or "why this hour was flagged" in body)
+
+
+# --------------------------------------------------------------------------
+# the P9-03 / P9-04 elements the spec names explicitly
+# --------------------------------------------------------------------------
+def test_evaluation_shows_calibration_and_the_action_distribution():
+    """P9-04 names four things; the table alone is not the screen."""
+    at = _run("Evaluation")
+    body = _text(at)
+    assert "calibration" in body
+    assert "action distribution" in body
+    # Brier / ECE / WAIT-FLAG counts reach the screen, not just the CSV.
+    cols = {c for df in at.dataframe for c in df.value.columns}
+    assert {"brier", "ece", "brier_skill_score"} <= cols
+    assert {"n_wait_hours", "n_flag_hours", "pct_windows_alerted"} <= cols
+
+
+def test_a_non_probability_baseline_is_not_given_a_calibration_score():
+    """CUSUM and the z-score never claimed probabilities; blank is honest."""
+    at = _run("Evaluation")
+    body = _text(at)
+    assert "not probabilities" in body
+    for df in at.dataframe:
+        if "brier" in df.value.columns and "baseline" in df.value.columns:
+            cusum = df.value[df.value.baseline == "cusum"]
+            if not cusum.empty:
+                assert cusum["brier"].isna().all(), (
+                    "cusum emits raw statistics; a Brier score would invent a "
+                    "calibration it never claimed")
+
+
+def test_ticker_detail_compares_each_feature_to_its_trailing_normal():
+    """P9-03: a value alone means little — the comparison is the point."""
+    at = _run("Ticker detail")
+    if "no alerts to inspect" in _text(at):
+        pytest.skip("no alerts logged")
+    cols = {c for df in at.dataframe for c in df.value.columns}
+    assert {"at the flagged hour", "trailing median", "percentile"} <= cols, (
+        f"feature table missing its comparison columns; got {cols}")

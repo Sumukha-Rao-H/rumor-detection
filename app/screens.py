@@ -110,6 +110,56 @@ def alerts_today() -> None:
                 b.markdown(f"- {line}")
 
 
+def _feature_table(row: pd.Series, price: pd.DataFrame) -> None:
+    """Feature values beside the same measure's trailing normal (P9-03).
+
+    The trailing normal is recomputed from this ticker's own bars over the 30
+    days BEFORE the flagged hour — never the whole series, which would include
+    the flagged hour in the baseline it is being judged against and damp the
+    very spike under inspection. `volume_zscore` already carries its own
+    `shift(1)` for the same reason.
+    """
+    from src.pipeline.features import returns, volume_zscore
+
+    rows = []
+    if not price.empty:
+        frame = price.set_index("ts_utc")[["close", "volume"]]
+        cfg = data.config()
+        hist = pd.concat([returns(frame, cfg), volume_zscore(frame, cfg)], axis=1)
+        hist = hist[hist.index < int(row["ts_utc"])]  # strictly before the flag
+
+        for col in ("volume_z", "ret_1h", "ret_4h", "ret_24h", "ret_120h"):
+            if col not in row.index or pd.isna(row[col]) or col not in hist:
+                continue
+            past = hist[col].dropna()
+            if past.empty:
+                continue
+            pct = (past < row[col]).mean() * 100
+            fmt = (lambda v: f"{v:+.2f} sd") if col == "volume_z" \
+                else (lambda v: f"{v:+.2%}")
+            rows.append({
+                "feature": col,
+                "at the flagged hour": fmt(row[col]),
+                "trailing median": fmt(past.median()),
+                "trailing 5–95%": f"{fmt(past.quantile(.05))} … {fmt(past.quantile(.95))}",
+                "percentile": f"{pct:.0f}th",
+            })
+
+    # Context features have no price-derived trailing normal; they are shown
+    # as-is rather than given a fabricated comparison.
+    for col in ("days_since_last_8k", "hours_since_news", "news_count_24h"):
+        if col in row.index and pd.notna(row[col]):
+            rows.append({"feature": col,
+                         "at the flagged hour": _REASON[col](row[col]),
+                         "trailing median": "—", "trailing 5–95%": "—",
+                         "percentile": "—"})
+
+    if rows:
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+    else:
+        st.caption("No features recorded for this alert.")
+
+
 # --------------------------------------------------------------------------
 # P9-03 — ticker detail
 # --------------------------------------------------------------------------
@@ -163,11 +213,35 @@ def ticker_detail() -> None:
                           xaxis_title="UTC", yaxis_title="volume")
         st.plotly_chart(vol, width='stretch')
 
+        # The z-score band the spec asks for, with the detector's own
+        # threshold drawn. Computed with `features.volume_zscore`, not a
+        # lookalike written here: a band that drifted from the formula the
+        # detector actually scored would explain the wrong thing convincingly.
+        from src.pipeline.features import volume_zscore
+
+        frame = price.set_index("ts_utc")[["close", "volume"]]
+        z = volume_zscore(frame, data.config())["volume_z"]
+        if z.notna().any():
+            band = go.Figure()
+            band.add_trace(go.Scatter(x=ts, y=z.to_numpy(), name="volume z",
+                                      line=dict(color="#1f4e79")))
+            if pd.notna(row.get("threshold")) and row["detector"] == "volume_zscore":
+                band.add_hline(y=float(row["threshold"]), line_dash="dot",
+                               line_color="#b5502a",
+                               annotation_text="alert threshold")
+            band.add_vline(
+                x=dt.datetime.fromtimestamp(int(flagged), dt.timezone.utc),
+                line_dash="dash", line_color="#b5502a")
+            band.update_layout(height=200, margin=dict(t=10, b=10),
+                               xaxis_title="UTC",
+                               yaxis_title="volume z-score (sd)")
+            st.plotly_chart(band, width='stretch')
+
     st.subheader("Why this hour was flagged")
-    st.caption("Feature values at the flagged hour. A value alone means "
-               "little; each is shown against what it is measured relative to.")
-    for line in _reasons(row, limit=12):
-        st.markdown(f"- {line}")
+    st.caption("Each value beside the same measure's trailing normal for this "
+               "ticker over the 30 days before the flag. A number alone means "
+               "little — the comparison is what makes it mean something.")
+    _feature_table(row, price)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -237,6 +311,35 @@ def evaluation() -> None:
         "detector cannot reach 1.0. Read precision against it. **If a simple "
         "baseline wins, it is shown winning** — that is the finding, not a "
         "failure to hide.")
+
+    st.subheader("Calibration")
+    st.caption(
+        "When a detector says 70%, is it right about 70% of the time? A system "
+        "can rank well and still be badly calibrated, which matters when a "
+        "human decides what to act on.")
+    cal = view[["baseline", "brier", "brier_skill_score", "ece"]].copy()
+    st.dataframe(cal, width='stretch', hide_index=True)
+    st.caption(
+        "**Blank is the honest entry, not a gap.** CUSUM and the volume "
+        "z-score emit scores that are not probabilities — the evaluation "
+        "contract says so, and scoring them with Brier or ECE would invent a "
+        "calibration they never claimed. A NEGATIVE Brier skill score means "
+        "the probabilities are worse than always predicting the base rate: "
+        "these models rank far better than they calibrate, and that is "
+        "reported rather than smoothed over.")
+
+    st.subheader("Action distribution")
+    st.caption(
+        "WAIT versus FLAG. An always-WAIT policy is degenerate and shows here "
+        "as zero flagged hours — the column exists to make that visible "
+        "instead of letting it hide behind a flattering precision.")
+    acts = view[["baseline", "n_wait_hours", "n_flag_hours", "pct_hours_flagged",
+                 "pct_windows_alerted", "degenerate"]].copy()
+    st.dataframe(acts, width='stretch', hide_index=True)
+    st.caption(
+        "`pct_hours_flagged` never exceeds ~2% even for a busy detector, "
+        "because at most one FLAG is allowed per 48-hour window; "
+        "`pct_windows_alerted` is the interpretable one.")
 
     with_news = data.comparison("p8-with-news-val.csv")
     if not with_news.empty:
