@@ -77,10 +77,20 @@ def observation_features(cfg: dict) -> tuple[str, ...]:
     Deliberately reads the *same* config knob gradient boosting reads rather
     than keeping a second list, so the two cannot drift apart and quietly
     disagree about what is safe to learn from.
+
+    That principle is why the P8-01 news columns are appended from
+    `news_features` rather than spelled out again here: the Phase 8 ablation
+    only means something if both learners are handed the same inputs. Adding
+    them to the tabular baseline and forgetting the agent would have made
+    "the policy does not benefit from news" a statement about this function
+    instead of about the market.
     """
+    from src.baselines.gradient_boosting import news_features
+
     excluded = set(cfg.get("baselines", {}).get("gradient_boosting", {})
                    .get("exclude_features", ()))
-    return tuple(f for f in FEATURES if f not in excluded)
+    available = FEATURES + news_features(cfg)
+    return tuple(f for f in available if f not in excluded)
 
 
 def episodes_from_frame(frame: pd.DataFrame,
