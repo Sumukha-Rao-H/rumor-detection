@@ -41,7 +41,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from src.pipeline.features import _event_times, _ticker_frame, ticker_features
+from src.pipeline.features import (_event_times, _news_arrays, _ticker_frame,
+                                   ticker_features)
 from src.pipeline.split import LIVE, split_of
 from src.utils.config import load_config
 from src.utils.timeutils import ts_to_iso, utc_now_ts
@@ -107,7 +108,10 @@ def latest_bar_frame(cfg: dict, conn, tickers: list[str] | None = None,
         if frame.empty:
             continue
         filings, earnings = _event_times(conn, cfg, ticker)
-        feats = ticker_features(frame, benchmark, filings, earnings, cfg)
+        articles, publishers = _news_arrays(conn, cfg, ticker)
+        feats = ticker_features(frame, benchmark, filings, earnings, cfg,
+                                article_times=articles,
+                                publishers=publishers)
         stamps = feats.index.to_numpy()
 
         end = np.searchsorted(stamps, as_of, side="right")   # at or before now

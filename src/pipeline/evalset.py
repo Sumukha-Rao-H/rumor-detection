@@ -49,7 +49,8 @@ import argparse
 import numpy as np
 import pandas as pd
 
-from src.pipeline.features import _event_times, _ticker_frame, ticker_features
+from src.pipeline.features import (_event_times, _news_arrays, _ticker_frame,
+                                   ticker_features)
 from src.pipeline.split import TEST, boundaries, split_of
 from src.utils.config import load_config
 from src.utils.timeutils import date_str_to_ts, ts_to_iso
@@ -126,7 +127,10 @@ def build_eval_frame(cfg: dict, conn, lo: int, hi: int,
         if frame.empty:
             continue
         filings, earnings = _event_times(conn, cfg, ticker)
-        feats = ticker_features(frame, benchmark, filings, earnings, cfg)
+        articles, publishers = _news_arrays(conn, cfg, ticker)
+        feats = ticker_features(frame, benchmark, filings, earnings, cfg,
+                                article_times=articles,
+                                publishers=publishers)
         stamps = feats.index.to_numpy()
 
         # Positive episodes first, so their bars can be excluded from the

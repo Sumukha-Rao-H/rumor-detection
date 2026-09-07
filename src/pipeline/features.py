@@ -336,9 +336,99 @@ def _ticker_frame(conn, ticker: str, interval: str) -> pd.DataFrame:
     return pd.DataFrame([dict(r) for r in rows]).set_index("ts_utc")
 
 
+def news_coverage(frame: pd.DataFrame,
+                  article_times: np.ndarray | None = None,
+                  publishers: list[str] | None = None,
+                  cfg: dict | None = None) -> pd.DataFrame:
+    """P8-01. How loudly the press was already covering this company.
+
+    Three signals per configured window, all strictly backward-looking:
+
+      news_count_<W>h      articles published in (t-W, t]
+      news_breadth_<W>h    DISTINCT publishers over that same window
+      hours_since_news     hours to the most recent article at or before t
+
+    Count and breadth are separate on purpose. Twenty articles from one wire
+    aggregator republishing itself is not the same event as five articles from
+    five newsrooms, and a count alone cannot tell them apart — which matters
+    here, because this corpus is dominated by a handful of aggregators.
+
+    **The boundary is `<= t`, matching `_days_since`.** An article published at
+    exactly t is public at t. Anything later is the future, and the leakage
+    test perturbs it to prove this reads none of it.
+
+    ⚠ **A zero means "nothing was published", not "nobody asked".** That holds
+    only because P4-00b fetched every week of the window for every in-universe
+    ticker, not merely the weeks containing a filing. Without it the negatives
+    — which sit >=168 h from any filing, exactly the weeks a filing-only
+    backfill never requests — would carry a structural zero while positives
+    carried real counts, and the Phase 8 ablation would report a large delta
+    caused by collection scope rather than by the market. See issue 23.
+
+    `article_times` must be sorted ascending, with `publishers` parallel to it.
+    Supplied by the caller; this module does no I/O.
+    """
+    cfg = cfg or load_config()
+    windows = cfg["features"]["news_windows_h"]
+    stamps = np.asarray(frame.index, dtype=np.int64)
+    times = np.asarray(article_times if article_times is not None else [],
+                       dtype=np.int64)
+    names = list(publishers or [])
+    out: dict[str, pd.Series] = {}
+
+    if times.size:
+        _assert_sorted(times, "article_times")
+    if names and len(names) != times.size:
+        raise ValueError(
+            f"publishers has {len(names)} entries for {times.size} article "
+            "times — they must be parallel, or breadth counts the wrong rows.")
+
+    # Most recent article at or before t. NaN where none exists: "no coverage
+    # yet" is not "coverage infinitely long ago", and a large number would be
+    # a lie in the opposite direction — the same rule `_days_since` follows.
+    if times.size:
+        pos = np.searchsorted(times, stamps, side="right") - 1
+        last = np.where(pos >= 0, times[np.clip(pos, 0, None)], np.nan)
+        hours_since = (stamps - last) / 3600.0
+    else:
+        hours_since = np.full(stamps.size, np.nan)
+    out["hours_since_news"] = pd.Series(hours_since, index=frame.index)
+
+    for w in windows:
+        span = int(w) * 3600
+        hi = np.searchsorted(times, stamps, side="right")
+        lo = np.searchsorted(times, stamps - span, side="right")
+        out[f"news_count_{w}h"] = pd.Series(hi - lo, index=frame.index)
+
+        # Distinct publishers over the same window. Two pointers with a running
+        # tally rather than a set per row: `stamps` is ascending, so both edges
+        # only ever move forward, which is O(bars + articles) instead of the
+        # O(bars x articles) a per-row set would cost on a 2.4M-row matrix.
+        breadth = np.zeros(stamps.size, dtype=np.int64)
+        if names:
+            tally: dict[str, int] = {}
+            left = right = 0
+            for i in range(stamps.size):
+                while right < hi[i]:
+                    tally[names[right]] = tally.get(names[right], 0) + 1
+                    right += 1
+                while left < lo[i]:
+                    n = tally[names[left]] - 1
+                    if n:
+                        tally[names[left]] = n
+                    else:
+                        del tally[names[left]]
+                    left += 1
+                breadth[i] = len(tally)
+        out[f"news_breadth_{w}h"] = pd.Series(breadth, index=frame.index)
+
+    return pd.DataFrame(out, index=frame.index)
+
+
 def ticker_features(frame: pd.DataFrame, benchmark: pd.DataFrame,
                     filing_times: np.ndarray, earnings_times: np.ndarray,
-                    cfg: dict) -> pd.DataFrame:
+                    cfg: dict, article_times: np.ndarray | None = None,
+                    publishers: list[str] | None = None) -> pd.DataFrame:
     """Every feature for one ticker, over its WHOLE bar history.
 
     Computed on the full series and sliced afterwards, never computed on a
@@ -347,13 +437,20 @@ def ticker_features(frame: pd.DataFrame, benchmark: pd.DataFrame,
     would return NaN for every row of every event — and would look perfectly
     reasonable while doing it.
     """
-    return pd.concat([
+    parts = [
         returns(frame, cfg),
         volume_zscore(frame, cfg),
         realised_volatility(frame, cfg),
         benchmark_relative(frame, benchmark, cfg),
         context_signals(frame, filing_times, earnings_times, cfg),
-    ], axis=1)
+    ]
+    # Off unless config says otherwise, because Phase 8 is an ABLATION: the
+    # with/without switch has to be a config flag rather than a code edit, or
+    # the two arms are not otherwise-identical and the delta means nothing.
+    # Default false also keeps every Phase 5/6 number reproducible unchanged.
+    if cfg["features"].get("include_news_coverage", False):
+        parts.append(news_coverage(frame, article_times, publishers, cfg))
+    return pd.concat(parts, axis=1)
 
 
 def _event_times(conn, cfg: dict, ticker: str) -> tuple[np.ndarray, np.ndarray]:
@@ -384,6 +481,24 @@ def _event_times(conn, cfg: dict, ticker: str) -> tuple[np.ndarray, np.ndarray]:
         # that is a valid (if unusual) choice.
         earnings = np.array([], dtype=np.int64)
     return filings, earnings
+
+
+def _news_arrays(conn, cfg: dict, ticker: str
+                 ) -> tuple[np.ndarray | None, list[str] | None]:
+    """(article times, publishers) for one ticker, or (None, None) when off.
+
+    Deliberately beside `_event_times` and returning the same shape of thing,
+    so the four builders that call one and then the other cannot wire up half
+    of it. When `include_news_coverage` is false this does no query at all —
+    the "without" arm of the ablation must not pay for data it never reads.
+    """
+    if not cfg["features"].get("include_news_coverage", False):
+        return None, None
+    from src import db  # local: keeps this module importable without the DB
+
+    times, names = db.news_times(
+        conn, ticker, max_tier=cfg["features"].get("news_max_tier", 2))
+    return np.asarray(times, dtype=np.int64), names
 
 
 def build_quiet_matrix(cfg: dict, conn,
@@ -429,7 +544,10 @@ def build_quiet_matrix(cfg: dict, conn,
             skipped += len(anchors)
             continue
         filings, earnings = _event_times(conn, cfg, ticker)
-        feats = ticker_features(frame, benchmark, filings, earnings, cfg)
+        articles, publishers = _news_arrays(conn, cfg, ticker)
+        feats = ticker_features(frame, benchmark, filings, earnings, cfg,
+                                article_times=articles,
+                                publishers=publishers)
         stamps = feats.index.to_numpy()
 
         for anchor in sorted(anchors):
@@ -495,8 +613,11 @@ def build_matrix(cfg: dict, conn) -> pd.DataFrame:
         if frame.empty:
             continue
         filings, earnings = _event_times(conn, cfg, ticker)
+        articles, publishers = _news_arrays(conn, cfg, ticker)
 
-        feats = ticker_features(frame, benchmark, filings, earnings, cfg)
+        feats = ticker_features(frame, benchmark, filings, earnings, cfg,
+                                article_times=articles,
+                                publishers=publishers)
         stamps = feats.index.to_numpy()
 
         for e in ticker_events:

@@ -822,6 +822,48 @@ def earliest_news_ts(
     return row["ts"] if row else None
 
 
+def news_times(
+    conn: sqlite3.Connection, ticker: str,
+    max_tier: int | None = 2, allow_crawl_time: bool = False,
+) -> tuple[list[int], list[str]]:
+    """Every credible article time for a ticker, ascending, with its publisher.
+
+    The P8-01 counterpart to `earliest_news_ts`: that answers "when did this
+    company first appear in the press before its filing", this answers "how
+    much was the press already saying about it, at every hour". Same tier rule
+    and the same publication-time rule, deliberately — a coverage feature built
+    on a different notion of "credible" than the t0 correction would make the
+    Phase 8 ablation measure the disagreement between the two rather than the
+    value of the news channel.
+
+    Returns parallel lists so the caller can count articles and distinct
+    publishers over the same window without a second query. Rows with no usable
+    timestamp are dropped rather than defaulted: an article whose publication
+    time is unknown cannot be placed in a trailing window, and putting it at
+    the epoch or at "now" would both be inventions.
+
+    **This is the only news I/O the feature path does.** `features.py` takes the
+    arrays and never touches the database, exactly as it takes filing times.
+    """
+    time_expr = ("COALESCE(published_utc, seen_utc)" if allow_crawl_time
+                 else "published_utc")
+    tier_clause = "" if max_tier is None else \
+        " AND source_tier IS NOT NULL AND source_tier <= ?"
+    args: list = [ticker]
+    if max_tier is not None:
+        args.append(max_tier)
+
+    rows = conn.execute(
+        f"""SELECT {time_expr} AS ts, COALESCE(source_name, source_domain, '?')
+                   AS publisher
+            FROM news
+            WHERE ticker = ? AND {time_expr} IS NOT NULL{tier_clause}
+            ORDER BY ts ASC""",
+        args,
+    ).fetchall()
+    return [int(r["ts"]) for r in rows], [str(r["publisher"]) for r in rows]
+
+
 def retier_news(conn: sqlite3.Connection, cfg: dict) -> int:
     """Recompute `source_tier` for every row from the CURRENT config.
 

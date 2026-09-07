@@ -300,6 +300,22 @@ features:
   include_days_since_last_8k: true
   include_earnings_proximity: true
 
+  # P8-01 news-coverage features. OFF by default, and that default is the
+  # experiment: Phase 8 asks whether the news channel adds anything, so the
+  # "without" arm has to be the baseline every earlier phase already ran.
+  # Flipping this flag is the whole of P8-02 — nothing else may differ, not
+  # the seeds, not the split, not the budget.
+  include_news_coverage: false
+  # 24 h is "since yesterday's session", 168 h a full week — the same span
+  # `sampling.quiet_gap_hours` uses to decide a window is quiet, so a quiet
+  # window's coverage count is measured over exactly the period that made it
+  # quiet.
+  news_windows_h: [24, 168]
+  # Same credibility ceiling as the t0 correction (`events:t0_max_tier`). A
+  # coverage feature that counted sources the t0 rule rejects would make the
+  # ablation measure the gap between two whitelists, not the news channel.
+  news_max_tier: 2
+
 # ------------------------------------------------------------
 # Sampling (review "Day 9" — fix this now, report two ratios)
 # ------------------------------------------------------------
