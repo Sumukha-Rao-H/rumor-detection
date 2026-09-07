@@ -32,7 +32,25 @@
 # that pre-registration is the whole evidential value of the exercise.
 # Changing the sampling cadence part-way through changes the experiment, so it
 # is a decision to take deliberately and record, not a free upgrade to take
-# because it is now free. The same goes for --max-tickers below.
+# because it is now free.
+#
+# COVERAGE WIDENED 2026-09-07 — READ THIS BEFORE ANALYSING THE ALERT LOG
+# Until 2026-09-07 the run passed --max-tickers 400. That was never a sample:
+# it is `ORDER BY ticker LIMIT 400`, the alphabetical head of the universe, so
+# every alert raised before that date comes from a ticker between A and DIOD.
+# The cap existed only for the minute budget that being private imposed, and
+# with that gone the restriction was indefensible rather than conservative.
+#
+# The log therefore has a deliberate discontinuity: alerts/day steps up on
+# 2026-09-07, and that step is this change, not the market. It stays
+# analysable because every row carries `ticker` and `raised_utc`, so the
+# original A-DIOD series can be reconstructed exactly by filtering on those
+# two columns.
+#
+# This widens the evidence and touches no threshold: the detectors, their
+# tuned parameters and the scoring code are unchanged, so it cannot flatter a
+# result. Narrowing coverage, or moving a threshold, would be a different kind
+# of change and is not on the table.
 #
 # Nothing is lost by running daily: yfinance serves roughly two years of hourly
 # history, so a run picks up every hour since the last one. The alert log
@@ -93,7 +111,11 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # The market collector is paced at one request a second, so a full
+    # 1,500-ticker pass is ~25 minutes of bar fetching plus ~3 of EDGAR. 60
+    # left too little headroom for a retry storm once the cap was removed;
+    # minutes are free on a public repository, so the ceiling is generous.
+    timeout-minutes: 120
 
     # The SEC contact address is a secret because this repository is public —
     # config.yaml ships only a placeholder, which the EDGAR client refuses.
@@ -181,9 +203,12 @@ jobs:
       - name: Run the monitor
         env:
           PYTHONPATH: .
-        # --max-tickers caps the run inside the minute budget. Raise it once
-        # the actual cost per run is known from a few real runs.
-        run: python -m src.live.catchup --max-tickers 400 | tee run.log
+        # No --max-tickers: the whole 1,500-company universe is scanned. The
+        # flag selected `ORDER BY ticker LIMIT 400`, which is not a sample of
+        # the universe but its alphabetical head — every live alert before
+        # 2026-09-07 comes from tickers A through DIOD. See the coverage note
+        # in the header.
+        run: python -m src.live.catchup | tee run.log
 
       - name: Commit the alert log
         run: |
