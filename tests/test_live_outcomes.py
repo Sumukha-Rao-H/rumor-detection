@@ -163,6 +163,75 @@ def test_the_corrected_t0_is_preferred_when_an_event_row_exists(cfg, conn):
         == BASE + 8 * HOUR
 
 
+def test_a_filing_whose_news_broke_before_the_alert_did_not_follow_it(cfg, conn):
+    """The bug that aborted the whole backfill, found in the 2026-09-09 review.
+
+    The window used to be selected on `acceptance_utc` while the row REPORTED
+    `t0_utc`. t0 is min(acceptance, earliest matched news), so a filing accepted
+    after the alert could carry a t0 from before it — a company whose press
+    release went out on the wire while the monitor was still deciding. The lead
+    time was then negative, `trading_hours_between` refused it (correctly), and
+    `backfill` died before its commit, so NOT ONE alert in that run got an
+    outcome. It bit exactly the good early alerts, and only them.
+
+    The question and the answer now use the same instant: news already public
+    when the alert fired is not something the alert anticipated.
+    """
+    append(conn, [make(offset=9)])                        # alert at BASE + 9h
+    add_filing(conn, "AAA", BASE + 10 * HOUR, "0001")     # accepted after it
+    db.upsert_events(conn, [{"event_id": "E1", "accession_no": "0001",
+                             "ticker": "AAA", "items": "8.01",
+                             "t0_filing_utc": BASE + 10 * HOUR,
+                             "t0_utc": BASE + 8 * HOUR,   # ...but public before
+                             "t0_source": "news", "is_scheduled": 0,
+                             "usable": 1, "exclude_reason": None}])
+    add_filing(conn, "BBB", BASE + 300 * HOUR, "0009", cik="C2")
+
+    result = backfill(cfg, conn)          # must not raise
+
+    assert result["scored"] == 1
+    row = conn.execute("SELECT * FROM alert_outcomes").fetchone()
+    assert row["filed"] == 0
+    assert row["accession_no"] is None
+    assert row["lead_trading_h"] is None
+
+
+def test_a_later_filing_still_counts_when_an_earlier_one_predates_the_alert(cfg, conn):
+    """Skipping the already-public filing must not skip the whole alert."""
+    append(conn, [make(offset=9)])
+    add_filing(conn, "AAA", BASE + 10 * HOUR, "0001")
+    db.upsert_events(conn, [{"event_id": "E1", "accession_no": "0001",
+                             "ticker": "AAA", "items": "8.01",
+                             "t0_filing_utc": BASE + 10 * HOUR,
+                             "t0_utc": BASE + 8 * HOUR, "t0_source": "news",
+                             "is_scheduled": 0, "usable": 1,
+                             "exclude_reason": None}])
+    add_filing(conn, "AAA", BASE + 20 * HOUR, "0002", items="1.01")
+    add_filing(conn, "BBB", BASE + 300 * HOUR, "0009", cik="C2")
+
+    backfill(cfg, conn)
+    row = conn.execute("SELECT * FROM alert_outcomes").fetchone()
+    assert row["filed"] == 1
+    assert row["accession_no"] == "0002"
+    assert row["t0_utc"] == BASE + 20 * HOUR
+
+
+def test_the_answerable_edge_allows_for_a_t0_earlier_than_acceptance(cfg, conn):
+    """The horizon is the newest acceptance time, but the window is measured on
+    t0, which can be up to `news.t0_lookback_hours` earlier. A filing accepted
+    just past the horizon can still have a t0 inside the window, so an alert
+    ending at the horizon is not yet answerable."""
+    lookback = int(cfg["news"]["t0_lookback_hours"])
+    assert lookback > 0                    # otherwise this test proves nothing
+
+    append(conn, [make(offset=0)])                        # window ends BASE+48h
+    add_filing(conn, "AAA", BASE + 48 * HOUR, "0001")     # horizon exactly there
+    assert backfill(cfg, conn)["pending"] == 1
+
+    add_filing(conn, "BBB", BASE + (48 + lookback) * HOUR, "0002", cik="C2")
+    assert backfill(cfg, conn)["scored"] == 1
+
+
 # --------------------------------------------------------------------------
 # The two clocks
 # --------------------------------------------------------------------------

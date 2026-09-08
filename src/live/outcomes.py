@@ -86,14 +86,29 @@ def first_filing_after(conn, ticker: str, after_ts: int,
     `t0_utc` prefers the event row's corrected instant — min(acceptance,
     earliest matched news) — and falls back to raw acceptance when the filing
     has no event row, which is the same fallback `sampling.py` uses.
+
+    The window is measured on that corrected instant, NOT on acceptance time.
+    Selecting on acceptance while reporting t0 was a real defect: t0 is
+    min(acceptance, earliest news) and so can be up to `news.t0_lookback_hours`
+    EARLIER than acceptance, so a filing accepted after the alert could carry a
+    t0 before it. That is a filing whose news was already public when the alert
+    fired — the alert did not anticipate it — and it made
+    `trading_hours_between` raise on a negative lead, aborting the whole
+    backfill before it committed. Asking the question about the same instant
+    that gets reported fixes both at once: the filing simply is not one that
+    followed the alert, and the next qualifying filing is considered instead.
     """
     marks = ",".join("?" * len(forms))
+    # COALESCE, not f.acceptance_utc: the public instant is what "did a filing
+    # follow this alert" is asking about, and it is what the row reports.
     row = conn.execute(
-        f"SELECT f.accession_no, f.items, f.acceptance_utc, e.t0_utc "
+        f"SELECT f.accession_no, f.items, f.acceptance_utc, "
+        f"       COALESCE(e.t0_utc, f.acceptance_utc) AS t0_utc "
         f"FROM filings f LEFT JOIN events e ON e.accession_no = f.accession_no "
         f"WHERE f.ticker = ? AND f.form IN ({marks}) "
-        f"AND f.acceptance_utc > ? AND f.acceptance_utc <= ? "
-        f"ORDER BY f.acceptance_utc LIMIT 1",
+        f"AND COALESCE(e.t0_utc, f.acceptance_utc) > ? "
+        f"AND COALESCE(e.t0_utc, f.acceptance_utc) <= ? "
+        f"ORDER BY COALESCE(e.t0_utc, f.acceptance_utc) LIMIT 1",
         (ticker, *forms, int(after_ts), int(until_ts))).fetchone()
     if row is None:
         return None
@@ -124,10 +139,19 @@ def backfill(cfg: dict, conn, horizon: int | None = None,
     checked_utc = utc_now_ts()
     scored = filed = pending = 0
 
+    # The horizon is the newest ACCEPTANCE time held locally, but the window is
+    # measured on t0, which is min(acceptance, earliest news) and so can be up
+    # to `news.t0_lookback_hours` earlier. A filing not yet collected — accepted
+    # just past the horizon — can therefore still carry a t0 that falls inside
+    # an alert's window. Pulling the answerable edge back by that much keeps the
+    # promise this module is built on: never score on data we do not have.
+    lookback = int((cfg.get("news") or {}).get("t0_lookback_hours", 0)) * 3600
+    answerable_until = horizon - lookback
+
     for alert in unscored(conn, limit=limit):
         ts = int(alert["ts_utc"])
         until = ts + span
-        if until > horizon:
+        if until > answerable_until:
             # Not "checked and clean" — not answerable yet. Recording a miss
             # here would count missing data as a missing event.
             pending += 1
