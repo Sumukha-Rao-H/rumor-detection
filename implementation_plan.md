@@ -350,9 +350,20 @@ Write the limitations section around §8. Write down every trap you actually hit
 
 **One-sentence version for the report:**
 
-> A live surveillance dashboard that flags stocks showing pre-announcement
+> A same-day surveillance dashboard that flags stocks showing pre-announcement
 > trading footprints, plus the first systematic measurement of how much advance
 > warning public market data gives across all categories of corporate disclosure.
+
+*"Same-day", not "live", corrected 2026-09-07.* The detector is online — it
+decides at each hourly bar using only that bar and earlier — but the deployed
+monitor runs once per trading day after the close, replaying the day's bars in
+order. Because every feature is point-in-time, the alerts are identical to what
+hourly polling would raise; only the moment they are noticed differs. The
+workflow that runs it says so in its own header, and §10's first intended user
+is "a **same-day** triage queue", so "live" was the outlier. The benchmark being
+beaten is compliance practice that investigates months later, by hand, usually
+only after a complaint — months to same-day is the contribution, and claiming
+intraday alerting would invite a question the system cannot answer.
 
 ---
 

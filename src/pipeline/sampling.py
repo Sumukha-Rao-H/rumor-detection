@@ -157,7 +157,13 @@ def eval_decision_points(cfg: dict, conn) -> dict:
     them, so the honest denominator is every in-universe bar:
 
         base rate = usable events / all in-universe bars
-                  = 6,737 / 2,584,872 = 0.26%
+                  = 6,778 / 2,375,072 = 0.285%
+
+    (Those figures were 6,737 / 2,584,872 = 0.26% when this was written, before
+    the 2026-09-02 rebuild settled the positive count and before the
+    denominator was bounded to the study window. The function has always
+    computed them from the database; only this docstring went stale, which is
+    the failure mode a hardcoded number in prose always has.)
 
     which is where the plan's "~0.3%, and always-quiet scores 99.7%" comes
     from. One positive per EVENT, not per pre-event hour: 48 positive hours
