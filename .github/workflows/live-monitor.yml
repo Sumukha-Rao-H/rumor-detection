@@ -238,6 +238,19 @@ jobs:
         # in the header.
         run: python -m src.live.catchup | tee run.log
 
+      # REBASE BEFORE PUSHING, AND RETRY. A pass takes about 40 minutes, so the
+      # branch this checked out is routinely stale by the time it finishes: any
+      # human push during that window made the run fail with
+      # "! [rejected] (fetch first)". That happened on 2026-09-08 and cost a
+      # run's commit — the analysis survived only because the monitor rescans a
+      # rolling 48-bar window and dedupes by natural key, so the next run
+      # rebuilt the same rows.
+      #
+      # Rebasing is safe here specifically because this job is the only writer
+      # of `live-log/alerts.csv`, and the file is append-only and hash-chained:
+      # replaying our commit on top of someone else's work cannot reorder or
+      # rewrite an existing row, and `--verify` would catch it if it did.
+      # `--autostash` covers the run.log left in the tree by `tee`.
       - name: Commit the alert log
         run: |
           git config user.name  "live-monitor"
@@ -245,10 +258,22 @@ jobs:
           git add live-log/alerts.csv
           if git diff --cached --quiet; then
             echo "no new alerts to commit"
-          else
-            git commit -m "chore(live): alert log $(date -u +%Y-%m-%dT%H:%MZ)"
-            git push
+            exit 0
           fi
+          git commit -m "chore(live): alert log $(date -u +%Y-%m-%dT%H:%MZ)"
+          for attempt in 1 2 3; do
+            if git pull --rebase --autostash origin "${GITHUB_REF_NAME}" \
+               && git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              echo "pushed on attempt ${attempt}"
+              exit 0
+            fi
+            echo "push attempt ${attempt} failed — refetching and retrying"
+            sleep $((attempt * 10))
+          done
+          echo "::error::could not push the alert log after 3 attempts. The"
+          echo "alerts are NOT lost: the next run rescans the same rolling"
+          echo "48-bar window and will re-export them."
+          exit 1
 
       # Uploaded whatever happened, so a failed run can be diagnosed without
       # re-running it — the failure may not reproduce.
