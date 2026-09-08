@@ -134,7 +134,13 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS fetch_state (
   source TEXT,                   -- 'edgar'
   key TEXT,                      -- the CIK for edgar
-  status TEXT,                   -- 'ok' | 'failed'
+  status TEXT,                   -- 'ok' | 'failed' | 'empty'
+                                 -- 'empty' is market.py's: the fetch
+                                 -- succeeded and the source genuinely has
+                                 -- no bars for this ticker. `--resume`
+                                 -- reads it back to keep such tickers out
+                                 -- of the zero-record guard's denominator,
+                                 -- so a mop-up run cannot false-alarm.
   records INTEGER,               -- what the fetch returned
   rows_written INTEGER,          -- what was stored from it
   error TEXT,
@@ -302,6 +308,16 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_news_ticker_published "
             "ON news (ticker, published_utc)"
         )
+        # And this one, because the composite-PK rebuild above drops the old
+        # `news` table and every index that hung off it. SCHEMA declares
+        # idx_news_ticker, but SCHEMA has already run by now, so without this
+        # the connection that performs the upgrade is left with a schema that
+        # is not what SCHEMA says it is. It self-heals on the next connect,
+        # which is exactly why it would otherwise never be noticed.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_news_ticker "
+            "ON news (ticker, seen_utc)"
+        )
 
     with conn:
         for key, sql in DATA_MIGRATIONS:
@@ -432,38 +448,58 @@ def candidate_tickers(conn: sqlite3.Connection) -> list[str]:
     return [r[0] for r in rows]
 
 
-def clear_universe_flags(conn: sqlite3.Connection) -> int:
-    """Reset every liquidity flag before the filter re-runs.
+CLEAR_UNIVERSE_FLAGS_SQL = """
+    UPDATE companies
+       SET in_universe = 0, adv_usd = NULL, last_price = NULL,
+           universe_as_of = NULL
+"""
 
-    Without this the filter is additive: a company that qualified on an earlier
-    run but no longer does would keep its flag and quietly stay in the study.
+SET_UNIVERSE_FLAGS_SQL = """
+    UPDATE companies
+       SET in_universe = 1, adv_usd = :adv_usd,
+           last_price = :last_price, universe_as_of = :as_of_utc
+     WHERE ticker = :ticker AND successor_cik IS NULL
+"""
+
+
+def replace_universe_flags(conn: sqlite3.Connection, rows: list[dict],
+                           expected: int | None = None) -> int:
+    """Rebuild the study universe: clear every flag, then set the survivors'.
+
+    ONE transaction, deliberately. Clearing is not optional — the filter
+    rebuilds the universe rather than adding to it, so a company that no longer
+    qualifies must be demoted. But clearing and setting as two separate commits
+    means a crash, a KeyboardInterrupt or a raise in between leaves
+    `in_universe = 0` on every row, and t0, sampling, coverage and the news
+    collector then all read an empty universe and REPORT SUCCESS. This used to
+    be two exported functions that committed separately, with the one real
+    caller working around them by inlining both statements itself; the hazard
+    belongs here, closed, rather than in a comment telling the next caller to
+    be careful.
+
+    Flags are written only to primary rows (`successor_cik IS NULL`). P2-11's
+    predecessor rows carry their successor's ticker, so flagging both would
+    double-count a reorganised company in every headcount.
+
+    `expected` is checked INSIDE the transaction, so a mismatch rolls the whole
+    thing back and leaves the previous universe standing. Every survivor must
+    land on exactly one primary row: fewer means a company silently dropped out
+    of the study, more means one counted twice, and both are worth stopping for.
     """
-    with conn:
-        cur = conn.execute(
-            "UPDATE companies SET in_universe = 0, adv_usd = NULL, "
-            "last_price = NULL, universe_as_of = NULL"
-        )
-    return cur.rowcount
-
-
-def set_universe_flags(conn: sqlite3.Connection, rows: list[dict]) -> int:
-    """Mark the companies that passed the liquidity filter.
-
-    Written only to primary rows (`successor_cik IS NULL`). P2-11's predecessor
-    rows carry their successor's ticker, so flagging both would double-count a
-    reorganised company in every headcount.
-    """
-    if not rows:
-        return 0
-    with conn:
-        cur = conn.executemany(
-            """UPDATE companies
-                  SET in_universe = 1, adv_usd = :adv_usd,
-                      last_price = :last_price, universe_as_of = :as_of_utc
-                WHERE ticker = :ticker AND successor_cik IS NULL""",
-            rows,
-        )
-    return cur.rowcount
+    with conn:                      # commits once at the end, rolls back whole
+        conn.execute(CLEAR_UNIVERSE_FLAGS_SQL)
+        written = conn.executemany(SET_UNIVERSE_FLAGS_SQL, rows).rowcount if rows else 0
+        if expected is not None and written != expected:
+            flagged = {r[0] for r in conn.execute(
+                "SELECT ticker FROM companies WHERE in_universe = 1")}
+            missing = sorted({r["ticker"] for r in rows} - flagged)
+            raise ValueError(
+                f"universe write mismatch: {expected} companies selected "
+                f"but {written} rows flagged. Flags left untouched. "
+                f"Unflagged tickers (no row with successor_cik IS NULL): "
+                f"{missing or 'none — some ticker has two primary rows'}"
+            )
+    return written
 
 
 def company_name(conn: sqlite3.Connection, ticker: str) -> str | None:
@@ -616,20 +652,55 @@ EVENT_COLUMNS = (
 )
 
 
+#: Columns on `events` that a LATER stage owns, not the event builder:
+#: `materiality.py` measures the move and writes the verdict, `events.py`
+#: writes the item-code filter's reason. They are COALESCEd on conflict — an
+#: upsert that omits one leaves the stored value alone — while everything else
+#: is overwritten outright, because t0 is the event builder's to recompute.
+#:
+#: Without this, "key not present in the dict" and "explicitly None" were
+#: indistinguishable and both wrote NULL. A caller refreshing only the t0
+#: columns wiped the materiality verdict for every event it touched: `usable`
+#: went NULL, `usable_events` returned nothing, and the failure surfaced three
+#: stages later as `features.build_matrix` raising "no usable events" with no
+#: hint that a write had caused it. `t0.py` guards against this today by
+#: reading all 16,842 events back and re-emitting the columns it does not own —
+#: an invariant enforced by a comment in a different file. It belongs here,
+#: with the statement that can break it.
+#:
+#: The one thing this gives up: `exclude_reason` can no longer be CLEARED back
+#: to NULL through an upsert. Nothing does that — `materiality.write_filter`
+#: and `events.write_filters` clear it with direct UPDATEs — and an explicit
+#: non-NULL value still wins, so a deliberate downgrade works as before.
+EVENT_COLUMNS_OWNED_DOWNSTREAM = (
+    "is_scheduled", "abs_return", "is_material", "usable", "exclude_reason",
+)
+
+
 def upsert_events(conn: sqlite3.Connection, rows: list[dict]) -> int:
     """Insert/refresh events. Derived columns are recomputed on conflict so the
-    event builder can be re-run after a config change. Returns new-row count."""
+    event builder can be re-run after a config change. Returns new-row count.
+
+    A column a later stage owns (see `EVENT_COLUMNS_OWNED_DOWNSTREAM`) survives
+    an upsert that does not mention it, rather than being NULLed.
+    """
     if not rows:
         return 0
     before = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     updatable = [c for c in EVENT_COLUMNS if c not in ("event_id", "accession_no")]
+
+    def assignment(column: str) -> str:
+        if column in EVENT_COLUMNS_OWNED_DOWNSTREAM:
+            return f"{column} = COALESCE(excluded.{column}, events.{column})"
+        return f"{column} = excluded.{column}"
+
     with conn:
         conn.executemany(
             f"""
             INSERT INTO events ({", ".join(EVENT_COLUMNS)})
             VALUES ({", ".join(":" + c for c in EVENT_COLUMNS)})
             ON CONFLICT(event_id) DO UPDATE SET
-              {", ".join(f"{c} = excluded.{c}" for c in updatable)}
+              {", ".join(assignment(c) for c in updatable)}
             """,
             [{c: r.get(c) for c in EVENT_COLUMNS} for r in rows],
         )

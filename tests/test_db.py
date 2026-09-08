@@ -95,6 +95,50 @@ def test_events_recompute_derived_columns_on_rerun(conn):
     assert row["usable"] == 0 and row["exclude_reason"] == "below materiality"
 
 
+def test_a_partial_event_upsert_does_not_wipe_the_materiality_verdict(conn):
+    """"Key absent" and "explicitly None" used to be indistinguishable, and
+    both wrote NULL. A caller refreshing only the t0 columns therefore wiped
+    `usable` for every event it touched — `usable_events` then returned nothing
+    and the failure surfaced three stages later as `build_matrix` raising "no
+    usable events", with nothing pointing at the write that caused it.
+
+    `t0.py` guards against this by reading all 16,842 events back and
+    re-emitting the columns it does not own. That is an invariant enforced by a
+    comment in a different file; this pins it at the statement that can break
+    it.
+    """
+    db.upsert_filings(conn, [make_filing()])
+    db.upsert_events(conn, [make_event(usable=1, is_material=1, abs_return=0.05,
+                                       is_scheduled=1)])
+
+    # Exactly what a t0 rebuild emits: the key plus the t0 columns, nothing else.
+    db.upsert_events(conn, [{"event_id": make_event()["event_id"],
+                             "accession_no": make_event()["accession_no"],
+                             "ticker": "AAPL", "items": "2.02",
+                             "t0_filing_utc": 90, "t0_news_utc": 80,
+                             "t0_utc": 80, "t0_source": "news"}])
+
+    row = conn.execute("SELECT * FROM events").fetchone()
+    assert row["t0_utc"] == 80                 # t0 is the builder's to rewrite
+    assert row["usable"] == 1                  # ...the verdict is not
+    assert row["is_material"] == 1
+    assert row["abs_return"] == 0.05
+    assert row["is_scheduled"] == 1
+    assert len(db.usable_events(conn)) == 1
+
+
+def test_an_explicit_event_downgrade_still_wins(conn):
+    """Preserving an omitted column must not mean a stated one is ignored:
+    materiality has to be able to demote an event it previously passed."""
+    db.upsert_filings(conn, [make_filing()])
+    db.upsert_events(conn, [make_event(usable=1, is_material=1)])
+    db.upsert_events(conn, [make_event(usable=0, is_material=0,
+                                       exclude_reason="below materiality")])
+    row = conn.execute("SELECT * FROM events").fetchone()
+    assert (row["usable"], row["is_material"]) == (0, 0)
+    assert row["exclude_reason"] == "below materiality"
+
+
 def test_usable_events_split_by_scheduled(conn):
     db.upsert_filings(conn, [make_filing(), make_filing(acc="0000320193-26-000074")])
     db.upsert_events(conn, [
@@ -449,6 +493,37 @@ def test_migration_upgrades_news_to_composite_pk(tmp_path):
     conn.close()
 
 
+def test_the_pk_migration_leaves_the_declared_indexes_in_place(tmp_path):
+    """The rebuild drops the old `news` table, and its indexes go with it.
+    SCHEMA has already run by then, so the connection that performs the
+    upgrade was left missing `idx_news_ticker` — a schema that is not what
+    SCHEMA says it is. It self-heals on the next connect, which is exactly why
+    it would otherwise never be noticed."""
+    import sqlite3
+
+    path = tmp_path / "old_pk_idx.db"
+    raw = sqlite3.connect(path)
+    raw.executescript("""
+        CREATE TABLE news (
+          url TEXT PRIMARY KEY, ticker TEXT, title TEXT, source_domain TEXT,
+          source_name TEXT, source_tier INTEGER, published_utc INTEGER,
+          seen_utc INTEGER, fetched_utc INTEGER, api TEXT
+        );
+    """)
+    raw.commit()
+    raw.close()
+
+    def index_names(c):
+        return {r[1] for r in c.execute("PRAGMA index_list(news)")
+                if not r[1].startswith("sqlite_autoindex")}
+
+    migrating = db.get_conn(path)
+    fresh = db.get_conn(tmp_path / "fresh.db")
+    assert index_names(migrating) == index_names(fresh)
+    migrating.close()
+    fresh.close()
+
+
 def test_migration_upgrade_of_news_pk_is_idempotent(tmp_path):
     """Reconnecting to an already-upgraded DB must not try to rebuild again."""
     import sqlite3
@@ -615,35 +690,54 @@ def test_companies_for_collection_all_and_subset(conn):
             db.companies_for_collection(conn, ["BBB"])] == ["BBB"]
 
 
-def test_clear_and_set_universe_flags(conn):
+def test_replace_universe_flags_clears_then_sets(conn):
+    """The rebuild is not additive: a company that no longer qualifies must be
+    demoted, not left flagged from an earlier run."""
     db.upsert_companies(conn, [make_company(cik="1", ticker="AAA", in_universe=1,
                                             adv_usd=5.0, last_price=9.0,
+                                            universe_as_of=100),
+                               make_company(cik="2", ticker="BBB", in_universe=1,
+                                            adv_usd=5.0, last_price=9.0,
                                             universe_as_of=100)])
-    assert db.clear_universe_flags(conn) == 1
-    row = conn.execute(
-        "SELECT in_universe, adv_usd, last_price, universe_as_of FROM companies"
-    ).fetchone()
-    assert tuple(row) == (0, None, None, None)
-
-    n = db.set_universe_flags(conn, [
+    n = db.replace_universe_flags(conn, [
         {"ticker": "AAA", "adv_usd": 12.0, "last_price": 20.0, "as_of_utc": 200},
     ])
     assert n == 1
-    row = conn.execute("SELECT in_universe, adv_usd FROM companies").fetchone()
-    assert (row["in_universe"], row["adv_usd"]) == (1, 12.0)
+    rows = {r["ticker"]: r for r in conn.execute("SELECT * FROM companies")}
+    assert (rows["AAA"]["in_universe"], rows["AAA"]["adv_usd"]) == (1, 12.0)
+    assert tuple(rows["BBB"][k] for k in
+                 ("in_universe", "adv_usd", "last_price", "universe_as_of")) \
+        == (0, None, None, None)
 
 
-def test_set_universe_flags_skips_predecessor_rows(conn):
+def test_replace_universe_flags_skips_predecessor_rows(conn):
     db.upsert_companies(conn, [make_company(cik="1", ticker="AAA", in_universe=0)])
     db.upsert_companies(conn, [make_company(cik="2", ticker="AAA", in_universe=0,
                                             successor_cik="1")])
-    n = db.set_universe_flags(conn, [
+    n = db.replace_universe_flags(conn, [
         {"ticker": "AAA", "adv_usd": 1.0, "last_price": 2.0, "as_of_utc": 3},
     ])
     assert n == 1   # only the live row, not the predecessor
     rows = {r["cik"]: r["in_universe"] for r in
             conn.execute("SELECT cik, in_universe FROM companies")}
     assert rows == {"1": 1, "2": 0}
+
+
+def test_a_universe_write_mismatch_leaves_the_previous_universe_standing(conn):
+    """Clear-then-set used to be two separate commits, so anything that went
+    wrong between them left `in_universe = 0` on every row — and t0, sampling,
+    coverage and the news collector all then read an empty universe and
+    reported success. One transaction, so a mismatch rolls the clear back too."""
+    db.upsert_companies(conn, [make_company(cik="1", ticker="AAA", in_universe=1,
+                                            adv_usd=5.0)])
+    with pytest.raises(ValueError, match="write mismatch"):
+        db.replace_universe_flags(
+            conn,
+            [{"ticker": "AAA", "adv_usd": 1.0, "last_price": 2.0, "as_of_utc": 3},
+             {"ticker": "NOPE", "adv_usd": 1.0, "last_price": 2.0, "as_of_utc": 3}],
+            expected=2)
+    row = conn.execute("SELECT in_universe, adv_usd FROM companies").fetchone()
+    assert (row["in_universe"], row["adv_usd"]) == (1, 5.0)   # untouched
 
 
 def test_tickers_with_filings_before_cutoff(conn):

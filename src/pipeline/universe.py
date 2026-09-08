@@ -222,52 +222,24 @@ def select_universe(cfg: dict, conn) -> tuple[list[Candidate], dict[str, int]]:
     return passed, reasons
 
 
-CLEAR_FLAGS_SQL = """
-    UPDATE companies SET in_universe = 0, adv_usd = NULL, last_price = NULL,
-                         universe_as_of = NULL
-"""
-
-SET_FLAGS_SQL = """
-    UPDATE companies
-       SET in_universe = 1, adv_usd = :adv_usd,
-           last_price = :last_price, universe_as_of = :as_of_utc
-     WHERE ticker = :ticker AND successor_cik IS NULL
-"""
-
-
 def write_flags(conn, survivors: list[Candidate], cutoff: int) -> int:
     """Clear every flag and set the survivors' — in ONE transaction.
 
-    Clearing is not optional: the filter rebuilds the universe rather than
-    adding to it, so a company that no longer qualifies must be demoted. But
-    clear-then-set as two commits means a crash in between leaves `in_universe`
-    zero on every row, and t0, sampling, coverage and the news collector all
-    read an empty universe and report success. So the two statements share a
-    transaction and either both land or neither does. Written here rather than
-    through `db.clear_universe_flags` / `db.set_universe_flags` because each of
-    those commits on its own; folding the pair into one db-layer call is the
-    tidier home for this and is filed as a cross-unit note.
-
-    Every survivor must land on exactly one primary row. Fewer means a company
-    silently dropped out of the study, more means one counted twice, and both
-    are worth stopping the run for.
+    The transaction, the SQL and the all-or-nothing count check now live in
+    `db.replace_universe_flags`, which is where they belong: this used to
+    duplicate both statements here precisely because the two db-layer functions
+    committed separately, and a crash between them left `in_universe = 0` on
+    every row while every downstream stage read an empty universe and reported
+    success. `SystemExit` rather than the `ValueError` the db layer raises,
+    because this is what a CLI run should exit on.
     """
     rows = [{"ticker": c.ticker, "adv_usd": c.adv_usd,
              "last_price": c.last_close, "as_of_utc": cutoff}
             for c in survivors]
-    with conn:                      # commits once at the end, rolls back whole
-        conn.execute(CLEAR_FLAGS_SQL)
-        written = conn.executemany(SET_FLAGS_SQL, rows).rowcount
-        if written != len(survivors):
-            flagged = {r[0] for r in conn.execute(
-                "SELECT ticker FROM companies WHERE in_universe = 1")}
-            missing = sorted({c.ticker for c in survivors} - flagged)
-            raise SystemExit(
-                f"universe write mismatch: {len(survivors)} companies selected "
-                f"but {written} rows flagged. Flags left untouched. "
-                f"Unflagged tickers (no row with successor_cik IS NULL): "
-                f"{missing or 'none — some ticker has two primary rows'}"
-            )
+    try:
+        written = db.replace_universe_flags(conn, rows, expected=len(survivors))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     return written
 
 
