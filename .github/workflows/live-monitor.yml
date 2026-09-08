@@ -125,7 +125,7 @@ jobs:
       SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Cheap, before pip and a 31 MB download, so a missing secret costs
       # seconds rather than failing deep in the run.
@@ -140,25 +140,41 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
 
       - name: Install dependencies
-        # Only what the monitor needs. The RL and dashboard stacks are heavy
-        # and are not on this path.
+        # Only what the monitor needs — the RL and dashboard stacks are heavy
+        # and are not on this path, so `requirements.txt` is deliberately not
+        # installed wholesale.
+        #
+        # PINNED, and the versions must match `requirements.txt`. Everything
+        # else in this project was pinned on 2026-09-08 for reproducibility;
+        # leaving the one process that runs UNATTENDED, DAILY, and writes to
+        # the evidence log floating would have been the worst place to keep it.
+        # A pandas or yfinance release changing a default could shift a feature
+        # value, and the alert log would record the new behaviour with no
+        # error and nothing to point at.
         run: |
           python -m pip install --upgrade pip
-          pip install pandas pyarrow numpy pyyaml requests yfinance \
-                      "exchange-calendars==4.13.2" python-dotenv
+          pip install \
+            pandas==3.0.5 \
+            pyarrow==24.0.0 \
+            numpy==2.5.1 \
+            pyyaml==6.0.3 \
+            requests==2.34.2 \
+            yfinance==1.5.2 \
+            exchange-calendars==4.13.2 \
+            python-dotenv==1.2.2
 
       # The database is a CACHE. Everything in it can be rebuilt: bars from
       # yfinance, filings from EDGAR. The alert log is the one thing that
       # cannot, and it lives in git, restored below.
       - name: Restore the database cache
         id: dbcache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: data/db/footprints.db
           key: monitor-db-${{ github.run_id }}
@@ -166,7 +182,7 @@ jobs:
             monitor-db-
 
       # The miss is detected by looking for the FILE, not by reading a step
-      # output. `actions/cache@v4` publishes only `cache-hit`; `cache-matched-key`
+      # output. `actions/cache@v6` publishes only `cache-hit`; `cache-matched-key`
       # belongs to `actions/cache/restore`, so the old condition read an output
       # that does not exist, was therefore always '', and bootstrapped on every
       # run — overwriting the very database the cache had just restored. Three
@@ -238,7 +254,7 @@ jobs:
       # re-running it — the failure may not reproduce.
       - name: Upload the run log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: run-log-${{ github.run_id }}
           path: run.log
