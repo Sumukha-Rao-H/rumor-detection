@@ -19,32 +19,29 @@ DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "config.yaml"
 
 
 @lru_cache(maxsize=4)
-def _read_config(cfg_path: Path) -> dict:
-    """Parse config.yaml once per path. See `load_config` for why.
+def _read_config(cfg_path: Path, mtime_ns: int) -> dict:
+    """Parse config.yaml once per (path, modification time). See `load_config`.
 
-    `load_dotenv` runs here as a side effect of the FIRST `load_config()`
-    call anywhere in the process — including from code that only wants
-    `market.calendar` or some other non-secret key — because this is cached
-    to run once. `override=False` is passed explicitly (it is already
-    python-dotenv's default) so this can never clobber a value a test has
-    already set with `monkeypatch.setenv`; a test that instead needs a key to
-    be ABSENT must `monkeypatch.delenv` at test time, since nothing here
-    stops `.env` from having populated it earlier in the process.
+    `mtime_ns` is not used in the body — it is here purely as part of the cache
+    key, so that editing config.yaml invalidates the cached parse. Keying on
+    the path alone meant an edit was invisible for the life of the process,
+    which made `app/data.py`'s advertised 5-minute config refresh a no-op: the
+    Streamlit cache expired on schedule and then got handed the same stale dict
+    underneath. Within a single run nothing edits its own config, so this costs
+    one `stat` per call and changes no behaviour there.
     """
-    load_dotenv(REPO_ROOT / ".env", override=False)
     with open(cfg_path, encoding="utf-8") as fh:
         cfg = yaml.safe_load(fh)
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            f"{cfg_path} did not parse to a mapping (got {type(cfg).__name__}). "
+            f"An empty or malformed config.yaml is not a config with defaults — "
+            f"every knob in this project is meant to come from that file."
+        )
     for key, value in cfg.get("paths", {}).items():
         p = Path(value)
         cfg["paths"][key] = str(p if p.is_absolute() else REPO_ROOT / p)
 
-    # This repository is public, so the SEC contact address cannot live in the
-    # committed config — see the comment on `http.user_agent` in config.yaml.
-    # The environment wins when it is set; otherwise the placeholder survives
-    # and `require_sec_user_agent` refuses it at the point of use.
-    env_ua = os.getenv("SEC_USER_AGENT", "").strip()
-    if env_ua:
-        cfg.setdefault("http", {})["user_agent"] = env_ua
     return cfg
 
 
@@ -60,13 +57,37 @@ def load_config(path: str | Path | None = None) -> dict:
     which is exactly the kind of silent, unreproducible drift this project
     cannot afford.
 
+    The cache is keyed on the file's modification time as well as its path, so
+    a genuine EDIT to config.yaml is picked up while a run still sees one
+    configuration throughout — nothing edits its own config mid-run.
+
     A deep copy is returned so a caller mutating the result cannot corrupt the
     config every other caller sees.
 
     Call `load_config.cache_clear()` if a test genuinely needs a re-read.
     """
     cfg_path = Path(path) if path else DEFAULT_CONFIG_PATH
-    return copy.deepcopy(_read_config(cfg_path))
+    # Outside the cached body on purpose. It used to sit inside, so the
+    # environment was frozen at whatever it happened to be on the first
+    # `load_config()` call anywhere in the process — setting SEC_USER_AGENT
+    # after that had no effect at all. `override=False` is python-dotenv's
+    # default, passed explicitly so this can never clobber a value a test has
+    # already set with `monkeypatch.setenv`; a test that instead needs a key to
+    # be ABSENT must `monkeypatch.delenv`, since nothing here stops `.env` from
+    # having populated it earlier in the process.
+    load_dotenv(REPO_ROOT / ".env", override=False)
+    cfg = copy.deepcopy(_read_config(cfg_path, os.stat(cfg_path).st_mtime_ns))
+
+    # This repository is public, so the SEC contact address cannot live in the
+    # committed config — see the comment on `http.user_agent` in config.yaml.
+    # The environment wins when it is set; otherwise the placeholder survives
+    # and `require_sec_user_agent` refuses it at the point of use. Applied to
+    # the caller's copy rather than the cached parse so that it tracks the
+    # environment rather than whichever call happened to populate the cache.
+    env_ua = os.getenv("SEC_USER_AGENT", "").strip()
+    if env_ua:
+        cfg.setdefault("http", {})["user_agent"] = env_ua
+    return cfg
 
 
 load_config.cache_clear = _read_config.cache_clear  # type: ignore[attr-defined]

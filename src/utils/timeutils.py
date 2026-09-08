@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 
 import exchange_calendars as xc
+import numpy as np
 import pandas as pd
 
 GDELT_FMT = "%Y%m%d%H%M%S"  # e.g. 20250101000000, always UTC
@@ -106,6 +107,41 @@ def get_market_calendar(code: str | None = None) -> xc.ExchangeCalendar:
     return xc.get_calendar(code)
 
 
+@lru_cache(maxsize=4)
+def _session_bounds(calendar_name: str) -> tuple[np.ndarray, np.ndarray]:
+    """Every session's open and close for one calendar, as epoch seconds.
+
+    Keyed on the calendar's name rather than the object because
+    `xc.get_calendar` hands back the same instance for a given name, and a
+    string is the obvious cache key. Cached because `trading_hours_between`
+    is asked one question per hour per ticker across a 322k-row feature
+    matrix, and rebuilding two ~5,000-element arrays on every one of those
+    calls would dominate the pipeline's runtime.
+
+    Session opens and closes are always minute-aligned, so whole seconds hold
+    them exactly; the fractional part of a real timestamp is carried by the
+    other side of the arithmetic.
+
+    Refuses a calendar with a lunch break. `trading_hours_between` reads a
+    session as one unbroken interval `[open, close)`, which is true of XNYS
+    but not of XTKS or XHKG — those shut for lunch, and counting the break as
+    tradeable would inflate every lead time crossing it by an hour or more.
+    Changing `market.calendar` to one of those must stop here rather than
+    quietly produce bigger numbers.
+    """
+    cal = xc.get_calendar(calendar_name)
+    if not cal.break_starts.isna().all():
+        raise ValueError(
+            f"{cal.name} has a lunch break, and trading_hours_between treats "
+            f"each session as one unbroken [open, close) interval — it would "
+            f"count the break as tradeable. Subtract the break interval here "
+            f"before using this calendar for market.calendar."
+        )
+    opens = cal.opens.to_numpy(dtype="datetime64[s]").astype("int64")
+    closes = cal.closes.to_numpy(dtype="datetime64[s]").astype("int64")
+    return opens, closes
+
+
 def _out_of_range(cal: xc.ExchangeCalendar, minute: pd.Timestamp) -> ValueError:
     """The error every market-hours helper raises when asked about a date the
     calendar does not cover. The library's own message omits the bounds, which
@@ -140,7 +176,11 @@ def is_market_open(ts: int | float,
 
 def next_market_close(ts: int | float,
                       calendar: xc.ExchangeCalendar | None = None) -> int:
-    """Epoch second of the next market close at or after `ts`.
+    """Epoch second of the next market close strictly after `ts`.
+
+    Strictly after, matching the module's `[open, close)` convention: asked at
+    the closing bell itself, that session is already over, so the answer is the
+    NEXT session's close.
 
     From inside a session this is that session's own close — which is what the
     "trading hours to close" feature wants. From after the close it is the next
@@ -193,6 +233,19 @@ def trading_hours_between(start_ts: int | float, end_ts: int | float,
     a = pd.Timestamp(start_ts, unit="s", tz="UTC")
     b = pd.Timestamp(end_ts, unit="s", tz="UTC")
 
+    # Before anything else: a missing timestamp. Without this the comparisons
+    # below all fall through on NaT, the bounds check fails, and the error
+    # formatter then dies with "NaTType does not support strftime" — loud, but
+    # naming the wrong problem to whoever has to debug it.
+    if a is pd.NaT or b is pd.NaT:
+        missing = "start_ts" if a is pd.NaT else "end_ts"
+        raise ValueError(
+            f"trading_hours_between got a missing timestamp for {missing} "
+            f"({start_ts!r}, {end_ts!r}). A lead time cannot be measured from "
+            f"or to an unknown instant — find why it is NaN rather than "
+            f"treating it as zero."
+        )
+
     if b < a:
         raise ValueError(
             f"end precedes start: {b:%Y-%m-%d %H:%M:%S}Z < {a:%Y-%m-%d %H:%M:%S}Z. "
@@ -205,59 +258,30 @@ def trading_hours_between(start_ts: int | float, end_ts: int | float,
         if not (cal.first_minute <= t <= cal.last_minute):
             raise _out_of_range(cal, t)
 
-    # `exchange_calendars` only knows whole trading minutes — it has no notion
-    # of a fraction of a minute. Real timestamps in this project (EDGAR
-    # acceptanceDateTime, news article times) carry seconds, so `a` and `b`
-    # are not, in general, minute-aligned, and the sub-minute remainder at
-    # each end has to be handled by hand rather than handed to the library.
+    # The answer is the total overlap between [start, end) and the sessions
+    # themselves — summed directly from session opens and closes rather than by
+    # counting the library's trading MINUTES.
     #
-    # A previous version asked `minutes_in_range(a, b - 1 minute)` for a
-    # half-open span. That is only a correct way to exclude `b`'s minute when
-    # `a` and `b` are themselves exactly on minute boundaries: internally,
-    # `exchange_calendars` FLOORS any sub-minute timestamp to its containing
-    # minute before comparing (see `calendar_helpers.parse_timestamp`, which
-    # floors because this calendar's `side` is "left"). That floors `b - 1
-    # minute` right back down whenever `b` itself isn't aligned, which can
-    # even push it before `a` and silently return 0 minutes for a span that
-    # was open the whole time — or, the other direction, floors `a` and `b`
-    # to their own minutes and then counts each of those minutes as whole,
-    # overcounting a sub-minute span that merely touches two different
-    # minutes. Neither direction is a rounding error; both are wrong answers.
+    # That distinction is the point of this implementation. `is_trading_minute`
+    # and `minutes_in_range` answer under `exchange_calendars`' minute-grid
+    # convention, set by the calendar's `side` (this project's calendars are
+    # "left", so a session contributes 390 minutes, not 391). That convention is
+    # a library default we do not pin, and a flip would move every lead-time
+    # number in the report by a minute per session crossed — silently, with
+    # every test still passing. Counting from opens and closes depends on no
+    # such convention.
     #
-    # The correct decomposition treats `a`'s minute and `b`'s minute as
-    # special and sums three pieces:
-    #   1. the open seconds remaining in `a`'s own minute (from `a` to the
-    #      start of the next minute), counted only if `a`'s minute is itself
-    #      a trading minute;
-    #   2. every whole trading minute strictly between `a`'s minute and `b`'s
-    #      minute — this is exactly what `minutes_in_range` is for, since
-    #      both endpoints here ARE minute-aligned;
-    #   3. the open seconds already elapsed in `b`'s own minute (from the
-    #      start of that minute to `b`), counted only if `b`'s minute is
-    #      itself a trading minute.
-    # When `a` and `b` fall in the same minute, only that one (possibly
-    # partial) minute matters. When `a` and `b` are both exactly minute-
-    # aligned (the case every previous test exercised), this reduces to
-    # exactly the old behaviour: piece 1 contributes a's minute in full,
-    # piece 3 contributes nothing from b's minute, and piece 2 is the whole
-    # minutes strictly in between — the same count as before.
-    one_minute = pd.Timedelta(minutes=1)
-    a_minute = a.floor("min")
-    b_minute = b.floor("min")
-
-    if a_minute == b_minute:
-        seconds = (b - a).total_seconds() if cal.is_trading_minute(a_minute) else 0.0
-        return seconds / 3600.0
-
-    seconds = 0.0
-    if cal.is_trading_minute(a_minute):
-        seconds += (a_minute + one_minute - a).total_seconds()
-    if cal.is_trading_minute(b_minute):
-        seconds += (b - b_minute).total_seconds()
-
-    between_start = a_minute + one_minute
-    between_end = b_minute - one_minute
-    if between_start <= between_end:
-        seconds += len(cal.minutes_in_range(between_start, between_end)) * 60.0
-
-    return seconds / 3600.0
+    # It is also exact below a minute, which the grid is not: real timestamps
+    # here (EDGAR acceptanceDateTime, news article times) carry seconds, and an
+    # earlier version that handed sub-minute values to `minutes_in_range` got
+    # them floored — sometimes to zero hours for a span that was open
+    # throughout. Here the endpoints enter the arithmetic as they are.
+    #
+    # Holidays, weekends, early closes and DST are all already baked into
+    # `opens`/`closes` in UTC, so none of them needs a special case. A session
+    # is read as one unbroken interval, which `_session_bounds` refuses to let
+    # a lunch-break calendar violate.
+    opens, closes = _session_bounds(cal.name)
+    overlap = np.clip(np.minimum(closes, float(end_ts))
+                      - np.maximum(opens, float(start_ts)), 0.0, None)
+    return float(overlap.sum()) / 3600.0

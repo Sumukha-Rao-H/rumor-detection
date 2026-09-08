@@ -498,3 +498,110 @@ def test_iso_utc_to_ts_refuses_a_naive_timestamp():
     from src.utils.timeutils import iso_utc_to_ts
     with pytest.raises(ValueError, match="without a timezone"):
         iso_utc_to_ts("2026-07-30T20:30:28")
+
+
+# --------------------------------------------------------------------------
+# The session-interval implementation (review pass 2026-09-09)
+#
+# `trading_hours_between` used to count the library's trading MINUTES, which
+# made every lead-time number in the report depend on `exchange_calendars`'
+# minute-grid `side` convention — a library default this project does not pin.
+# It now sums the overlap between [start, end) and the sessions themselves.
+# These tests pin the properties that change was made to guarantee.
+# --------------------------------------------------------------------------
+
+def test_trading_hours_matches_an_independent_session_overlap_oracle(cal):
+    """The property test the hand-picked examples above cannot give.
+
+    An independent oracle — total overlap of [start, end) with each session,
+    computed straight from the calendar's opens and closes — checked against
+    thousands of random spans, deliberately including sub-second endpoints and
+    spans that land on half-days, holidays, weekends and both daylight-saving
+    transitions. This is the check that would have caught the sub-minute
+    flooring bug of 2026-09-01 the moment it was written, rather than in an
+    audit months later.
+    """
+    import random
+
+    import numpy as np
+    import pandas as pd
+
+    opens = cal.opens.to_numpy(dtype="datetime64[s]").astype("int64")
+    closes = cal.closes.to_numpy(dtype="datetime64[s]").astype("int64")
+
+    def oracle(a: float, b: float) -> float:
+        overlap = np.clip(np.minimum(closes, b) - np.maximum(opens, a), 0.0, None)
+        return float(overlap.sum()) / 3600.0
+
+    lo = int(pd.Timestamp("2024-01-02", tz="UTC").timestamp())
+    hi = int(pd.Timestamp("2026-06-01", tz="UTC").timestamp())
+    rng = random.Random(20260909)          # seeded: a flake here must be a bug
+
+    spans = [0, 1, 59, 60, 61, 3600, 23400, 86400, 3 * 86400, 7 * 86400]
+    for _ in range(3000):
+        a = rng.randint(lo, hi)
+        span = rng.choice(spans) + rng.randint(0, 120)
+        if rng.random() < 0.35:            # sub-second endpoints
+            a, span = a + rng.random(), span + rng.random()
+        # The span is built non-negative rather than by perturbing both ends
+        # independently: a reversed span is a documented ValueError, not a
+        # case for this oracle to check.
+        b = a + span
+        assert trading_hours_between(a, b, cal) == pytest.approx(oracle(a, b),
+                                                                 abs=1e-9)
+
+    # And the awkward dates by name, hour by hour, rather than by luck of the
+    # draw: two half-days, a weekday holiday, and both DST switches.
+    for day in ("2024-11-29", "2024-12-24", "2024-11-28",
+                "2024-03-10", "2024-11-03", "2025-03-09", "2025-11-02"):
+        base = date_str_to_ts(day)
+        for hours in range(0, 72, 3):
+            for offset in (0, 137, 1799.5):
+                a, b = base + offset, base + hours * 3600 + offset + 61
+                assert trading_hours_between(a, b, cal) == pytest.approx(
+                    oracle(a, b), abs=1e-9)
+
+
+def test_a_lunch_break_calendar_is_refused_rather_than_over_counted():
+    """XNYS trades straight through; XTKS and XHKG shut for lunch.
+
+    The implementation reads a session as one unbroken [open, close) interval,
+    which would count a lunch break as tradeable and inflate every lead time
+    crossing it. Changing `market.calendar` to such an exchange has to stop
+    here, loudly, rather than quietly producing bigger numbers.
+    """
+    import exchange_calendars as xc
+
+    from src.utils.timeutils import _session_bounds
+
+    for code in ("XTKS", "XHKG"):
+        try:
+            calendar = xc.get_calendar(code)
+        except Exception:                  # not shipped by this version
+            continue
+        if calendar.break_starts.isna().all():
+            continue                       # no break in this version's data
+        with pytest.raises(ValueError, match="lunch break"):
+            _session_bounds(calendar.name)
+        return
+    pytest.skip("no lunch-break calendar available in this exchange_calendars")
+
+
+def test_a_missing_timestamp_names_itself_rather_than_dying_in_the_formatter():
+    """NaN reached the error formatter and raised "NaTType does not support
+    strftime" — loud, but naming the wrong problem. A NaN lead time means an
+    upstream join produced nothing; that is what the message must say."""
+    base = date_str_to_ts("2024-11-27")
+    with pytest.raises(ValueError, match="missing timestamp for end_ts"):
+        trading_hours_between(base, float("nan"))
+    with pytest.raises(ValueError, match="missing timestamp for start_ts"):
+        trading_hours_between(float("nan"), base)
+
+
+def test_next_market_close_at_the_bell_is_the_following_session():
+    """Pins the docstring's corrected claim: strictly after, not at or after.
+
+    The module's convention is [open, close) — asked at the closing bell the
+    session is already over, so the answer is the next session's close."""
+    close = next_market_close(date_str_to_ts("2024-11-27"))
+    assert next_market_close(close) > close

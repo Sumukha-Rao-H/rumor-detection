@@ -95,3 +95,41 @@ def test_config_loads_and_resolves_paths():
     assert cfg["eval"]["alert_budget_per_stock_per_month"] > 0
     # No hardcoded rate limits (rule 7): the Backoff ceiling comes from here.
     assert cfg["ratelimit"]["backoff_cap_s"] > 0
+
+
+# --------------------------------------------------------------------------
+# The config cache (review pass 2026-09-09)
+#
+# The parse is cached for consistency — a run must use ONE configuration
+# throughout — but it was keyed on the path alone, so a genuine edit to
+# config.yaml was invisible for the life of the process. `app/data.py` puts
+# `@st.cache_data(ttl=300)` on top of this, so a long-running dashboard
+# advertised a five-minute config refresh that could never happen.
+# --------------------------------------------------------------------------
+
+def test_config_reload_sees_an_edited_file(tmp_path):
+    """The Streamlit dashboard's advertised refresh depends on this."""
+    import os
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("paths: {db: a.db}\ndecision: {horizon_hours: 1}\n",
+                        encoding="utf-8")
+    assert load_config(cfg_file)["decision"]["horizon_hours"] == 1
+
+    cfg_file.write_text("paths: {db: a.db}\ndecision: {horizon_hours: 999}\n",
+                        encoding="utf-8")
+    # A same-second rewrite must still be seen: the key is nanosecond mtime,
+    # but a filesystem with coarse timestamps would defeat that, so nudge it.
+    st = cfg_file.stat()
+    os.utime(cfg_file, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    assert load_config(cfg_file)["decision"]["horizon_hours"] == 999
+
+
+def test_an_empty_config_is_a_named_error_not_an_attribute_error(tmp_path):
+    """Every knob in this project comes from config.yaml, so an empty one is a
+    broken install, not a config with defaults. `yaml.safe_load` returns None
+    for it, which used to surface three frames later as AttributeError."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("# nothing but a comment\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="did not parse to a mapping"):
+        load_config(cfg_file)
