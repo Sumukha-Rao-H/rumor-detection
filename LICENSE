@@ -1,0 +1,56 @@
+MIT License
+
+Copyright (c) 2026 the Pre-Announcement Footprints contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+
+WHAT THIS LICENCE DOES AND DOES NOT COVER
+
+The MIT terms above cover the SOURCE CODE in this repository.
+
+They do not, and cannot, license the DATA the code collects. That data belongs
+to its providers and each carries its own terms:
+
+  SEC EDGAR       Public domain as a US government work. Free to use, subject
+                  to the SEC's fair-access rules — a descriptive User-Agent
+                  with a real contact address, and no more than ten requests a
+                  second. Both are enforced in code.
+
+  Yahoo Finance   Retrieved via the `yfinance` library, which is an
+                  unofficial client. Yahoo's own terms restrict
+                  redistribution. Price bars are therefore treated as a local
+                  cache, rebuildable from source, and are not committed to
+                  this repository.
+
+  Finnhub         Free tier, subject to Finnhub's terms. News articles are
+                  label infrastructure only and are likewise not committed.
+
+Consequently `data/` is gitignored in full. The one derived artifact kept in
+version control is `live-log/alerts.csv` — detector outputs computed by this
+code, not redistributed vendor data.
+
+NOT INVESTMENT ADVICE
+
+This is a research prototype produced as an academic project. It detects a
+statistical *footprint* — unusual trading before a disclosure, which has many
+innocent explanations. It does not identify a person, a fund, or an intent,
+and it is not evidence of wrongdoing. Nothing here is investment advice or a
+recommendation to trade.
