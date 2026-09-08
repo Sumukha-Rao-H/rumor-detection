@@ -216,3 +216,25 @@ def note(text: str) -> None:
     find is a rule the screen does not really make.
     """
     st.info(text)
+
+
+def budget_strip(b: dict) -> None:
+    """Rule 6, kept VISIBLE rather than behind a click.
+
+    An earlier attempt put this in an expander, on the grounds that a triage
+    queue should lead with the queue. The first half of that is right — the
+    headline row now answers "what is in front of me" — but the conclusion was
+    not: rule 6 says a user must SEE how much of the budget is spent, and a
+    rule a reader has to expand to find is a rule the screen does not really
+    make. So it stays on the page, as one compact line rather than four
+    competing panels.
+    """
+    used, allow = b["used"], b["allowance"]
+    st.caption(
+        f"**Alert budget** {b['rate']} / stock / month across "
+        f"{num(b['universe'])} companies — **{num(used)} of {num(allow)} "
+        f"spent in {b['month']}** ({pct(used / allow, 1) if allow else '—'} of "
+        f"the allowance). The budget is the operational constraint the whole "
+        f"system is tuned to, fixed before any model existed so it cannot have "
+        f"been chosen to flatter a result; precision is measured at exactly it."
+    )

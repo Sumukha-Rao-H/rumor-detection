@@ -74,9 +74,13 @@ def main() -> None:
         + (f' &nbsp;·&nbsp; newest scored bar {ui.utc(newest)}' if newest else "")
         + '</div>', unsafe_allow_html=True)
 
-    ui.budget_bar(budget)
-    st.markdown("")
+    # The screen's own headline row comes first: eye-tracking work is
+    # consistent that the top-left carries most of the attention, and for a
+    # triage queue the first question is "what is in front of me", not "how is
+    # the system configured". The budget is still on screen — rule 6 — but as
+    # the context for a result rather than the result itself.
     fn()
+    ui.budget_strip(budget)
     ui.disclaimer()
 
 

@@ -74,6 +74,63 @@ def _outcome(row: pd.Series) -> tuple[str, str]:
 # --------------------------------------------------------------------------
 # P9-02 — today's alerts
 # --------------------------------------------------------------------------
+def _queue_stats(view: pd.DataFrame, all_rows: pd.DataFrame) -> None:
+    """The four numbers a triage analyst needs before anything else.
+
+    Eye-tracking work on dashboards is consistent that the top-left carries
+    most of the attention and that four to six figures above the fold is the
+    limit before they stop being read. So this row answers "what is in my
+    queue right now", not "how is the system configured" — the alert budget
+    and universe size are real (rule 6) but they are context for a result, not
+    the first question a queue poses. They now sit in the strip below.
+    """
+    resolved, filed, rate = data.hit_rate(view)
+    strongest = view.apply(
+        lambda r: ui.strength(r["score"], r["threshold"])[2], axis=1).max() \
+        if not view.empty else float("nan")
+    open_n = int(view["filed"].isna().sum()) if "filed" in view else len(view)
+
+    c = st.columns(4)
+    # No `delta` here: Streamlit renders one with a directional arrow, and an
+    # arrow beside "of 2,033 logged" reads as a trend when it is a denominator.
+    c[0].metric(f"In view · of {ui.num(len(all_rows))}", ui.num(len(view)),
+                help="Alerts matching the filters above, out of every alert "
+                     "ever logged.")
+    c[1].metric("Awaiting outcome", ui.num(open_n),
+                help="The 48-hour window has not closed, so these cannot be "
+                     "graded yet. They are excluded from the hit rate rather "
+                     "than counted as misses.")
+    c[2].metric("Strongest", f"{strongest:.1f}×" if pd.notna(strongest) else "—",
+                help="Highest multiple of its own alert threshold in this view. "
+                     "NOT a probability.")
+    c[3].metric("Hit rate", ui.pct(rate, 1) if rate is not None else "—",
+                help=(f"{filed} of {resolved} closed windows were followed by "
+                      f"an 8-K within 48 hours." if resolved else
+                      "No window in this view has closed yet, so there is no "
+                      "rate to quote. An empty figure is reported rather than "
+                      "a flattering one."))
+
+
+def _volume_trend(df: pd.DataFrame) -> None:
+    """Alert volume over time — named in the triage literature as a core metric.
+
+    It is the fastest way to see the thing a count cannot show: whether today
+    is unusual, and whether a step in the series is the market or a change we
+    made. This log has one such step by construction — coverage widened from
+    400 tickers to 1,500 on 2026-09-07 — and a reader who cannot see it would
+    mistake it for a signal.
+    """
+    if df.empty:
+        return
+    day = pd.to_datetime(df["ts_utc"], unit="s", utc=True).dt.floor("D")
+    counts = day.value_counts().sort_index()
+    if len(counts) < 2:
+        return
+    fig = go.Figure(go.Bar(x=counts.index, y=counts.to_numpy(),
+                           marker_color=ui.SERIES))
+    st.plotly_chart(ui.chart(fig, 120, "alerts"), width="stretch")
+
+
 def alerts_today() -> None:
     df = data.alerts_with_outcomes()
     if df.empty:
@@ -100,57 +157,82 @@ def alerts_today() -> None:
     view = df[df["ts_utc"] >= cutoff]
     if which != "All detectors":
         view = view[view["detector"] == which]
+    if state != "All outcomes":
+        want = {"8-K followed": 1.0, "No 8-K": 0.0}.get(state)
+        view = view[view["filed"].isna()] if want is None else view[view["filed"] == want]
 
-    resolved, filed, rate = data.hit_rate(view)
-    st.caption(ui.honest_rate(resolved, filed, rate))
-
+    _queue_stats(view, df)
     if view.empty:
-        st.info("No alerts in this window. The system flags roughly 2 per stock "
-                "per month by design.")
+        st.info("No alerts match these filters. The system flags roughly 2 per "
+                "stock per month by design.")
         return
 
-    rows = []
-    for _, r in view.iterrows():
-        key, words, mult = ui.strength(r["score"], r["threshold"])
-        outcome = _outcome(r)[1]
-        rows.append({
-            "Ticker": r["ticker"],
-            "Strength": words,
-            "× thresh": round(mult, 1),
-            "Detector": r["detector"],
-            "Bar (UTC)": ui.short_utc(r["ts_utc"]),
-            "Outcome": outcome,
-            # Rule 1: the reasons travel WITH the alert, in the row, never
-            # behind a click. A number with no reason attached is a black box.
-            "Why it fired": " · ".join(_reasons(r)),
-        })
-    table = pd.DataFrame(rows)
-    if state != "All outcomes":
-        want = {"8-K followed": "8-K followed", "No 8-K": "no 8-K in window",
-                "Window open": "window still open"}[state]
-        table = table[table["Outcome"] == want]
-    table = table.sort_values("× thresh", ascending=False)
+    # Sort ONCE, on the source frame, so a selected table row maps back to its
+    # alert by position. Sorting the rendered table separately would silently
+    # open the wrong alert the moment the two orders diverged.
+    view = view.assign(_mult=view.apply(
+        lambda r: ui.strength(r["score"], r["threshold"])[2], axis=1)
+    ).sort_values("_mult", ascending=False).reset_index(drop=True)
 
-    ui.section(
-        f"{len(table):,} alerts",
-        "Strongest first — a work queue, not an index. Sort any column by "
-        "clicking it. Every row carries the features that triggered it, "
-        "because a score with no reason beside it is a black box.")
-    st.dataframe(
-        table, width="stretch", hide_index=True, height=520,
+    table = pd.DataFrame([{
+        "Ticker": r["ticker"],
+        "Strength": ui.strength(r["score"], r["threshold"])[1],
+        "× thresh": round(r["_mult"], 1),
+        "Detector": r["detector"],
+        "Bar (UTC)": ui.short_utc(r["ts_utc"]),
+        "Outcome": _outcome(r)[1],
+        # Rule 1: the reasons travel WITH the alert, never behind a click.
+        "Why it fired": " · ".join(_reasons(r)),
+    } for _, r in view.iterrows()])
+
+    ui.section(f"{len(table):,} alerts",
+               "Strongest first — a work queue, not an index. Click any column "
+               "to sort, or a row to open it below.")
+    picked = st.dataframe(
+        table, width="stretch", hide_index=True, height=430,
+        on_select="rerun", selection_mode="single-row",
         column_config={
             "× thresh": st.column_config.NumberColumn(
                 "× thresh", format="%.1f×", width="small",
-                help="How far above its own alert threshold this score sat. "
-                     "NOT a probability — these detectors emit raw statistics."),
-            "Why it fired": st.column_config.TextColumn("Why it fired", width="large"),
+                help="How far above its own threshold this score sat. NOT a "
+                     "probability — these detectors emit raw statistics."),
+            "Why it fired": st.column_config.TextColumn(width="large"),
             "Ticker": st.column_config.TextColumn(width="small"),
             "Strength": st.column_config.TextColumn(width="small"),
         })
-    st.caption(
-        "**Strength bands come from the observed distribution**, not round "
-        "numbers: the median alert sits at 1.6× its threshold and the 90th "
-        "percentile at 4.3×. Extreme ≥10×, Strong ≥4×, Elevated ≥2×.")
+
+    # Master-detail: the row is the summary, selecting it reveals the depth,
+    # without losing the queue position that a page change would cost.
+    sel = picked.selection.rows if picked and picked.selection else []
+    if sel and sel[0] < len(view):
+        _alert_detail(view.iloc[sel[0]])
+    else:
+        st.caption("**Strength bands come from the observed distribution**, not "
+                   "round numbers: the median alert sits at 1.6× its threshold "
+                   "and the 90th percentile at 4.3×. Extreme ≥10×, Strong ≥4×, "
+                   "Elevated ≥2×. Select a row above to open it.")
+
+    with st.expander("Alert volume over time — is today unusual?"):
+        _volume_trend(df)
+        st.caption("One step in this series is ours, not the market's: coverage "
+                   "widened from 400 tickers to the full 1,500 on 2026-09-07, "
+                   "so alerts per day rises there by construction.")
+
+
+def _alert_detail(r: pd.Series) -> None:
+    """One alert opened in place — the master-detail half of the queue."""
+    _, words, mult = ui.strength(r["score"], r["threshold"])
+    with st.container(border=True):
+        a, b = st.columns([1, 3])
+        a.metric(r["ticker"], f"{mult:.1f}×", delta=words, delta_color="off")
+        a.caption(f"{r['detector']} · {_outcome(r)[1]}")
+        b.markdown(f"**Bar** {ui.utc(r['ts_utc'])}  \n"
+                   f"**Noticed** {ui.utc(r['raised_utc'], False)}  \n"
+                   f"**Score** {r['score']:.4f} against a threshold of "
+                   f"{r['threshold']:.4f}")
+        b.markdown("**Why it fired** — " + " · ".join(_reasons(r, limit=8)))
+        st.caption("Open **Ticker detail** for the price chart, the volume "
+                   "z-score band and this company's filing history.")
 
 
 # --------------------------------------------------------------------------
@@ -381,8 +463,21 @@ def evaluation() -> None:
         "alerts": view["n_alerts"].map(ui.num),
     })
     st.dataframe(show, width="stretch", hide_index=True)
-    st.caption("**If a simple baseline wins, it is shown winning** — that is "
-               "the finding, not something to hide.")
+
+    # State the outcome rather than leaving a reader to rank nine rows by eye.
+    # This is the project's actual finding and the plan committed to reporting
+    # it either way: "if the simple threshold wins, that is a finding".
+    if len(view):
+        top = view.iloc[0]
+        floor = view[view.baseline == "always_quiet"]["precision"]
+        lift = (top["precision"] / floor.iloc[0]) if len(floor) and floor.iloc[0] else None
+        st.success(
+            f"**{top['baseline']}** leads this slice at "
+            f"**{ui.pct(top['precision'], 3)}** precision"
+            + (f", {lift:.1f}× the do-nothing floor" if lift else "")
+            + f", against a ceiling of {ui.pct(top['max_precision'], 2)}. "
+            f"**If a simple baseline wins, it is shown winning** — that is the "
+            f"finding, not something to hide.")
 
     ui.section("Calibration",
                "When a detector says 70%, is it right about 70% of the time? A "
