@@ -403,3 +403,40 @@ def test_a_multi_item_filing_reaches_every_component_item_slice():
 
     assert windows("item 2.02") == {"w-multi", "w-single"}
     assert windows("item 8.01") == {"w-multi"}
+
+
+def test_a_constant_scoring_detector_is_degenerate_even_though_it_alerts(frame) -> None:
+    """The gap found 2026-09-04 (work-log 55), fixed 2026-09-08.
+
+    `precision_at_alert_budget` SPENDS the budget rather than capping it: it
+    ranks every window and takes the top k. So a detector emitting one constant
+    still collects alerts — on whichever rows the sort happened to leave on
+    top, which is a tie-breaking artifact and not a detection.
+
+    `always_quiet` is the proof. It never flags by construction, yet the Phase
+    10 table reported it with 317,198 alerts and `degenerate=False`, because
+    `evaluate` re-derives actions from scores at the chosen operating point and
+    discards the WAIT the model actually emitted. That is right for
+    comparability and wrong for this column. Phase 6 needs it to catch a
+    collapsed policy.
+    """
+    flat = frame.copy()
+    flat["score"] = 0.0
+    row = evaluate(flat)
+
+    assert row["degenerate"] is True, (
+        "a detector whose scores cannot rank must be flagged degenerate even "
+        "when the spent budget hands it alerts")
+    assert row["n_alerts"] > 0, (
+        "the budget is spent, not capped — this row should still show the "
+        "alerts it was handed, or the reader cannot see WHY it is degenerate")
+
+
+def test_a_varying_scorer_that_flags_is_not_degenerate(frame) -> None:
+    """The guard on the guard: the check must not simply return True."""
+    import numpy as np
+
+    lively = frame.copy()
+    lively["score"] = np.random.default_rng(0).random(len(lively))
+    row = evaluate(lively)
+    assert row["degenerate"] is False

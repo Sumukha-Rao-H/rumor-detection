@@ -199,7 +199,29 @@ def evaluate(df: pd.DataFrame, threshold: float | None = None,
         "brier": brier,
         "brier_skill_score": skill,
         "ece": ece,
-        "degenerate": actions["n_flag_hours"] == 0,
+        # TRUE when this row's precision is not evidence of detection ability.
+        # Two distinct ways that happens, and the column needs both:
+        #
+        #   no flags at all      the original meaning, and still the right
+        #                        answer whenever a caller supplies a threshold
+        #                        the scores never cross.
+        #
+        #   scores that cannot   `precision_at_alert_budget` SPENDS the budget:
+        #   rank                 it ranks every window and takes the top k. A
+        #                        detector emitting one constant therefore still
+        #                        "alerts", but on whichever rows the sort
+        #                        happened to leave on top — a tie-breaking
+        #                        artifact, not a detection.
+        #
+        # The second case is why this column read `False` for `always_quiet`
+        # while reporting 317,198 alerts against a detector that never flags by
+        # construction: `evaluate` re-derives actions from scores at the chosen
+        # operating point, which is right for comparability and discards the
+        # WAIT the model actually emitted. Phase 6 needs this column to catch a
+        # collapsed policy, and on scores alone it would not have. Found
+        # 2026-09-04 (work-log 55), fixed 2026-09-08.
+        "degenerate": bool(actions["n_flag_hours"] == 0
+                           or frame["score"].nunique(dropna=True) <= 1),
         **actions,
     }
 
@@ -213,8 +235,11 @@ def report_table(frames: Mapping[str, pd.DataFrame] | pd.DataFrame,
     carries one t0 column. A bare DataFrame is treated as a single unnamed
     variant.
 
-    An always-WAIT policy shows up as `degenerate=True` with zero alerts, which
-    is the point of the column.
+    A detector that cannot detect shows up as `degenerate=True` — either
+    because it never flags, or because its scores are all one value and so
+    cannot rank. See `evaluate` for why the second case is not optional: the
+    alert budget is spent rather than capped, so a constant-scoring detector
+    still collects alerts, and reading its precision as skill would be wrong.
     """
     if isinstance(frames, pd.DataFrame):
         frames = {"default": frames}
