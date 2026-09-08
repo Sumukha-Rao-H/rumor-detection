@@ -11,7 +11,7 @@ roughly 600 bars of history per ticker are required before `volume_z` exists at
 all. `--days` is generous against that: at ~7 bars a session, 120 calendar days
 is about 600 bars.
 
-The alert log is deliberately NOT copied. It lives in `data/live/alerts.csv`,
+The alert log is deliberately NOT copied. It lives in `live-log/alerts.csv`,
 committed to the repository, and is restored with `alertlog.import_csv`. The
 database is a cache that can be rebuilt; the log is the record that cannot.
 
@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sqlite3
 import sys
 from pathlib import Path
 
@@ -33,7 +32,33 @@ from src.utils.config import load_config              # noqa: E402
 from src.utils.timeutils import ts_to_iso             # noqa: E402
 
 
-def build(cfg: dict, out_path: str, days: int = 120) -> dict:
+def _columns(conn, table: str) -> list[str]:
+    return [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+
+
+def _copy_sql(out, table: str, verb: str = "INSERT") -> str:
+    """`INSERT INTO t (cols) SELECT cols FROM full.t` — columns NAMED.
+
+    `SELECT *` across two databases matches columns by POSITION, and the two
+    schemas here are not built the same way: the destination is created fresh
+    from SCHEMA, while the source has had columns appended by `ALTER TABLE` as
+    migrations ran. Those orders agree today — checked — but they agree by
+    accident of migration history, and if one ever diverged the copy would
+    succeed silently with values in the wrong columns. That is the worst
+    possible failure for a file whose whole job is to seed the scheduled
+    monitor: no error, a plausible-looking database, and every alert wrong.
+
+    A named copy cannot do that. Columns are taken from the DESTINATION, so a
+    column the source is missing raises "no such column" — a problem you can
+    see — and a source column the destination schema dropped is simply not
+    copied, which is the intended direction.
+    """
+    names = ", ".join(f'"{c}"' for c in _columns(out, table))
+    return f'{verb} INTO "{table}" ({names}) SELECT {names} FROM full."{table}"'
+
+
+def build(cfg: dict, out_path: str, days: int = 120,
+          filing_days: int = 400) -> dict:
     src = db.get_conn(cfg["paths"]["db"], readonly=True)
     interval = cfg["market"]["interval"]
     benchmark = cfg["market"]["benchmark"]
@@ -45,7 +70,7 @@ def build(cfg: dict, out_path: str, days: int = 120) -> dict:
     cutoff = int(newest) - days * 24 * 3600
     # Filings reach back further: days_since_last_8k needs the most recent
     # filing before a bar, which can be months old.
-    filing_cutoff = cutoff - 400 * 24 * 3600
+    filing_cutoff = cutoff - filing_days * 24 * 3600
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     if os.path.exists(out_path):
@@ -53,25 +78,25 @@ def build(cfg: dict, out_path: str, days: int = 120) -> dict:
     out = db.get_conn(out_path)                       # creates the full schema
 
     out.execute("ATTACH DATABASE ? AS full", (cfg["paths"]["db"],))
-    counts = {}
-    out.execute("INSERT INTO companies SELECT * FROM full.companies")
-    counts["companies"] = out.total_changes
 
+    # Every column named explicitly — see `_copy_sql`. A source column the
+    # destination schema does not have is dropped deliberately; a destination
+    # column the source lacks raises, which is what should happen.
+    out.execute(_copy_sql(out, "companies"))
     out.execute(
-        "INSERT INTO bars SELECT * FROM full.bars WHERE interval = ? "
-        "AND ts_utc >= ? AND (ticker IN (SELECT ticker FROM full.companies "
+        _copy_sql(out, "bars") + " WHERE interval = ? AND ts_utc >= ? "
+        "AND (ticker IN (SELECT ticker FROM full.companies "
         "WHERE in_universe = 1) OR ticker = ?)",
         (interval, cutoff, benchmark))
     out.execute(
-        "INSERT INTO filings SELECT * FROM full.filings "
-        "WHERE acceptance_utc >= ?", (filing_cutoff,))
-    out.execute(
-        "INSERT INTO events SELECT * FROM full.events WHERE t0_utc >= ?",
+        _copy_sql(out, "filings") + " WHERE acceptance_utc >= ?",
         (filing_cutoff,))
+    out.execute(
+        _copy_sql(out, "events") + " WHERE t0_utc >= ?", (filing_cutoff,))
     # meta carries the snapshot freeze stamps; without them the collector
     # refuses to run at all. OR REPLACE because get_conn seeds meta when it
     # creates the schema, so a plain INSERT collides on schema_version.
-    out.execute("INSERT OR REPLACE INTO meta SELECT * FROM full.meta")
+    out.execute(_copy_sql(out, "meta", verb="INSERT OR REPLACE"))
     out.commit()
     out.execute("DETACH DATABASE full")
     out.execute("VACUUM")
@@ -90,9 +115,13 @@ def main() -> None:
     ap.add_argument("--days", type=int, default=120,
                     help="bar history to keep; 120 days is ~600 bars, the "
                          "minimum for volume_z to be defined")
+    ap.add_argument("--filing-days", type=int, default=400,
+                    help="how much further back than --days to keep filings; "
+                         "days_since_last_8k needs the most recent filing "
+                         "before a bar, which can be many months old")
     args = ap.parse_args()
 
-    stats = build(load_config(), args.out, args.days)
+    stats = build(load_config(), args.out, args.days, args.filing_days)
     print(f"wrote {args.out}  ({stats['bytes'] / 1e6:.0f} MB)")
     print(f"  bars from {ts_to_iso(stats['cutoff_utc'])}")
     for t in ("companies", "bars", "filings", "events", "meta"):

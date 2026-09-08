@@ -25,7 +25,8 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 
 import pandas as pd                                    # noqa: E402
 
@@ -47,20 +48,41 @@ WHAT_IT_IS = {
     "alert_outcomes": "did an 8-K actually follow each live alert within 48h",
     "fetch_state": "collector bookkeeping: what was fetched, what failed",
     "meta":      "database stamps — the snapshot freeze, the split seal",
-    "features":  "the model's inputs: 322,741 rows x 19 columns",
+    "features":  "the model's inputs — one row per ticker-hour, news features off",
+    "features-with-news": "the same matrix with Phase 8's news-coverage columns on",
     "baseline-comparison": "Phase 5 result table (all baselines, all slices)",
     "phase6-comparison": "Phase 6 result table (policy vs baselines)",
     "rl-seeds":  "the 5 RL training seeds and what each scored",
+    "p8-with-news": "Phase 8 ablation, news channel ON",
+    "p8-without-news": "Phase 8 ablation, news channel OFF — the control",
+    "p8-delta":  "Phase 8: what the news channel bought, with its sign",
+    "p8-policy-seeds": "Phase 8, the learned policy across seeds",
+    "phase10-final": "THE FINAL TEST-SET NUMBERS — unsealed and run once",
     "live-alerts": "the durable alert log committed to git",
 }
 
 #: Files, as opposed to SQLite tables.
+#:
+#: Resolved against the repo root, not the working directory. They used to be
+#: bare relative paths, so running this from anywhere but the repo root printed
+#: "(not generated yet)" for EVERY file — an inventory tool answering the one
+#: question it exists to answer, confidently and wrongly, while the SQLite half
+#: of the same listing kept working because `load_config` resolves its paths
+#: properly.
 FILES = {
-    "features": ("data/processed/features.parquet", "parquet"),
-    "baseline-comparison": ("data/processed/baseline-comparison-val.csv", "csv"),
-    "phase6-comparison": ("data/processed/phase6-comparison-val.csv", "csv"),
-    "rl-seeds": ("data/processed/rl-policy-seeds-val.csv", "csv"),
-    "live-alerts": ("live-log/alerts.csv", "csv"),
+    name: (REPO_ROOT / rel, kind) for name, (rel, kind) in {
+        "features": ("data/processed/features.parquet", "parquet"),
+        "features-with-news": ("data/processed/features-with-news.parquet", "parquet"),
+        "baseline-comparison": ("data/processed/baseline-comparison-val.csv", "csv"),
+        "phase6-comparison": ("data/processed/phase6-comparison-val.csv", "csv"),
+        "rl-seeds": ("data/processed/rl-policy-seeds-val.csv", "csv"),
+        "p8-with-news": ("data/processed/p8-with-news-val.csv", "csv"),
+        "p8-without-news": ("data/processed/p8-without-news-val.csv", "csv"),
+        "p8-delta": ("data/processed/p8-news-ablation-delta.csv", "csv"),
+        "p8-policy-seeds": ("data/processed/p8-policy-ablation-seeds.csv", "csv"),
+        "phase10-final": ("data/processed/phase10/FINAL-test-evaluation.csv", "csv"),
+        "live-alerts": ("live-log/alerts.csv", "csv"),
+    }.items()
 }
 
 
@@ -133,13 +155,18 @@ def show_list(cfg) -> None:
              else sum(1 for _ in open(path)) - 1)
         print(f"  {name:20s} {n:>10,}  {WHAT_IT_IS.get(name, '')}")
 
-    runs = sorted(Path("data/runs").glob("*/manifest.json")) \
-        if Path("data/runs").exists() else []
+    # Two locations, both real: Phase 6 wrote to `rl.runs_dir`, Phase 8's
+    # ablation wrote its ten seed runs under `runs/p8`. Listing only the first
+    # made half the training record invisible to the tool that claims to show
+    # every dataset this project generated.
+    run_roots = [REPO_ROOT / cfg["rl"]["runs_dir"], REPO_ROOT / "runs"]
+    runs = sorted({m for root in run_roots if root.exists()
+                   for m in root.glob("**/manifest.json")})
     if runs:
         print(f"\nRL TRAINING RUNS: {len(runs)} — each with a manifest.json "
               f"recording seed, config and data fingerprint")
         for r in runs[:5]:
-            print(f"  {r.parent.name}")
+            print(f"  {r.parent.relative_to(REPO_ROOT)}")
         if len(runs) > 5:
             print(f"  ... and {len(runs) - 5} more")
 
