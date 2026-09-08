@@ -78,12 +78,16 @@ coming" scores 99.7%. The headline metric is precision at a fixed alert budget
 │   └── archive/               # the old Reddit database (gitignored)
 ├── src/
 │   ├── collectors/            # edgar, market, news
-│   ├── pipeline/              # universe, events, t0, features, sampling
+│   ├── pipeline/              # universe, coverage, t0, events, materiality,
+│   │                          #   features, sampling, split, evalset
 │   ├── baselines/             # always-quiet, volume z-score, CUSUM, gradient boosting
 │   ├── rl/                    # Gymnasium env + SB3 learned stopping policy
+│   ├── live/                  # the same-day monitor: alert log, outcomes, catch-up
 │   ├── eval/                  # precision @ alert budget, detection delay, Brier, ECE
 │   └── utils/                 # rate limiting, UTC + market-hours helpers, config
-├── app/dashboard.py           # Streamlit monitor — every alert shows its reasons
+├── app/                       # Streamlit dashboard — every alert shows its reasons
+├── scripts/                   # browse any generated dataset; build the CI bootstrap DB
+├── .github/workflows/         # live-monitor.yml — the scheduled same-day run
 ├── archive/                   # the abandoned Reddit approach, kept for the report
 ├── tests/                     # pytest — leakage tests are mandatory
 └── implementation_plan.md     # the authoritative plan — read first
@@ -97,22 +101,36 @@ pip install -r requirements.txt
 cp .env.example .env      # add your free Finnhub key — needed on day one
 ```
 
-Then set a real contact address in `config/config.yaml` under `http.user_agent`.
-SEC requires it, and it is the entire terms of service alongside a 10 req/s cap.
+Then set `SEC_USER_AGENT` in that `.env` to a project name and a contact
+address you actually read. SEC requires it, and it is the entire terms of
+service alongside a 10 req/s cap. It lives in `.env` rather than in
+`config/config.yaml` because this repository is public: a committed address
+gets scraped, and worse, anyone who forked the project would identify to the
+SEC as its author, so their rate-limit violations would land on that author.
+The config ships a placeholder and the EDGAR client refuses to make a live
+request while that placeholder is all it has.
 
 ## Running the collectors
 
 ```bash
-# Market data — yfinance hourly bars, cached incrementally.
+# EDGAR — the study universe, then one submissions request per company.
+# Every raw response is cached under data/raw/edgar/ and never re-fetched.
+python -m src.collectors.edgar --build-universe
+python -m src.collectors.edgar --universe --resume
+python -m src.collectors.edgar --report
+
+# Market data — yfinance hourly and daily bars, cached incrementally.
 python -m src.collectors.market --tickers TSLA,AAPL --start 2025-09-01 --end 2026-08-01
 python -m src.collectors.market --universe --stamp-snapshot
 
-# News — Finnhub primary, GDELT for breadth. Runs from week 1.
+# News — Finnhub primary, GDELT for breadth. Label infrastructure, not an
+# optional channel: it runs from week 1 because t0 depends on it.
 python -m src.collectors.news --ticker TSLA --start 2025-01-01 --end 2025-01-08
 ```
 
-`src/collectors/edgar.py` is the next file to be written; see
-[`implementation_plan.md`](implementation_plan.md).
+Any collector cycle that parses zero records fails loudly rather than passing
+quietly — HTTP 200 responses carrying redirect HTML or empty JSON are the
+failure mode that lets a pipeline look healthy while writing nothing for days.
 
 ## Tests
 
