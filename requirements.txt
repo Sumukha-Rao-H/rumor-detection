@@ -1,18 +1,37 @@
+# ============================================================================
+# PINNED EXACTLY, on purpose (open question 7, settled 2026-09-08).
+#
+# This is a graded project whose headline numbers were produced once, on the
+# sealed test set, and cannot be re-tuned afterwards. A floating dependency
+# makes those numbers unreproducible by anyone — including us — the moment an
+# upstream release changes a default. `>=` does not help: it is the upgrade
+# that breaks things, not the floor.
+#
+# Every version below is the one the results were actually produced with, read
+# from the working environment rather than chosen. Python 3.13.7.
+#
+# The RL run manifests under runs/ record their own library versions
+# independently, so a policy can be traced to its exact stack even if this file
+# moves later.
+#
+# To reproduce:  python -m venv .venv && .venv/bin/pip install -r requirements.txt
+# ============================================================================
+
 # Core data
-requests
-pandas
-pyarrow
-numpy
-pyyaml
-python-dotenv
-tqdm
+requests==2.34.2
+pandas==3.0.5
+pyarrow==24.0.0
+numpy==2.5.1
+pyyaml==6.0.3
+python-dotenv==1.2.2
+tqdm==4.70.0
 
 # Market / calendar / news
-yfinance
-# Pinned exactly, unlike everything else here. This package ships holiday
-# tables and early-close rules as DATA: an upgrade can move a session boundary,
-# which silently changes every lead-time number in the report with no error and
-# no test failure. `>=` does not help — it is the upgrade that breaks it.
+yfinance==1.5.2
+# This one was pinned long before the rest, and for a sharper reason than
+# reproducibility in general. The package ships holiday tables and early-close
+# rules as DATA: an upgrade can move a session boundary, which silently changes
+# every lead-time number in the report with no error and no test failure.
 exchange-calendars==4.13.2  # market-hours helper — lead time is measured in
                             # trading hours, not wall-clock hours
 # NOTE: no finnhub-python. src/collectors/news.py calls the REST endpoint with
@@ -20,21 +39,28 @@ exchange-calendars==4.13.2  # market-hours helper — lead time is measured in
 # The SDK would duplicate that and hide the rate limit. Do not re-add it.
 
 # RL / sequential decision
-gymnasium
-stable-baselines3
+gymnasium==1.3.0
+stable-baselines3==2.9.0
 
 # Baselines + evaluation (CUSUM is hand-written, no dependency)
-scikit-learn
-xgboost
-scipy
+scikit-learn==1.9.0
+xgboost==3.3.0
+scipy==1.18.0
 
-# torch: install separately with the CUDA index-url for the RTX 3050, e.g.
-#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# torch is NOT listed as a requirement above, because the wheel depends on the
+# accelerator: this machine installs the CUDA build for an RTX 3050 from a
+# separate index. Install it explicitly, at the version the Phase 6 and Phase 8
+# policies were trained with:
+#
+#   pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu121
+#
+# CPU-only is fine and gives the same numbers — training ran on CPU (see the
+# run manifests, `rl_config.device`), it is simply slower.
 
 # Demo + tracking
-streamlit
-plotly
-tensorboard
+streamlit==1.60.0
+plotly==6.9.0
+tensorboard==2.20.0
 
 # Tests
-pytest
+pytest==9.1.1
