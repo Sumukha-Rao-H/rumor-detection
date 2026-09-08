@@ -181,8 +181,25 @@ def build_eval_frame(cfg: dict, conn, lo: int, hi: int,
     return matrix
 
 
-def split_bounds(cfg: dict, split: str) -> tuple[int, int]:
-    """[lo, hi) for 'train', 'val' or 'test'."""
+def split_bounds(cfg: dict, split: str, conn=None) -> tuple[int, int]:
+    """[lo, hi) for 'train', 'val' or 'test'.
+
+    Asking for the TEST bounds while the seal is on is refused here, when
+    `conn` is supplied.
+
+    The seal used to guard only TRAINING — `rl/train.py`, `base.py` and
+    `gradient_boosting.py` all call `assert_not_test` on the frame they fit
+    on. That stops a model being trained on the test set, which is the worse
+    leak, but it left the EVALUATION path open: `compare --split test` built
+    the test frame and would have scored on it without ever consulting the
+    seal. Since evaluating once is precisely what the seal exists to ration,
+    the guard belongs at the point the bounds are handed out.
+
+    `conn` is optional only because several callers legitimately want the
+    boundaries without touching data — reporting the split sizes, drawing the
+    calendar. Those pass nothing and are unaffected. Anything that is about to
+    READ rows passes the connection, and then the seal decides.
+    """
     lo = date_str_to_ts(cfg["study_window"]["start"])
     hi = date_str_to_ts(cfg["study_window"]["end"])
     train_end, val_end = boundaries(cfg)
@@ -191,6 +208,14 @@ def split_bounds(cfg: dict, split: str) -> tuple[int, int]:
     if split not in bounds:
         raise SystemExit(f"unknown split {split!r}; expected one of "
                          f"{sorted(bounds)}")
+    if split == TEST and conn is not None:
+        from src.pipeline.split import assert_not_test
+
+        # The midpoint stands for the period: `assert_not_test` reports the
+        # boundary and the offending instant, which is the message a caller
+        # needs, and any timestamp inside the range proves the same point.
+        assert_not_test(cfg, conn, (bounds[TEST][0] + bounds[TEST][1]) // 2,
+                        "evaluation on the test split")
     return bounds[split]
 
 

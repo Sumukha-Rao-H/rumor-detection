@@ -175,3 +175,37 @@ def test_the_guard_permits_data_after_the_study_window(cfg, conn):
     seal(cfg, conn)
     hi = date_str_to_ts(cfg["study_window"]["end"])
     assert_not_test(cfg, conn, [hi, hi + 7 * 24 * HOUR])
+
+
+def test_the_seal_guards_EVALUATION_not_only_training(cfg, conn):
+    """The gap found during the Phase 10 pre-flight (2026-09-07).
+
+    `assert_not_test` was wired into the three TRAINING paths — `rl/train.py`,
+    `base.py`, `gradient_boosting.py` — which stops a model being fitted on the
+    test set, the worse leak. But nothing consulted the seal on the way IN to
+    an evaluation, so `compare --split test` built the test frame and would
+    have scored on it. Evaluating once is the entire thing the seal rations, so
+    the guard belongs where the bounds are handed out.
+    """
+    from src.pipeline.evalset import split_bounds
+    from src.pipeline.split import seal, unseal
+
+    seal(cfg, conn)
+
+    # Bounds WITHOUT a connection stay available: reporting split sizes or
+    # drawing the calendar reads no rows and must not need unsealing.
+    lo, hi = split_bounds(cfg, "test")
+    assert lo < hi
+
+    # Bounds WITH a connection are a declaration of intent to read.
+    with pytest.raises(SystemExit, match="SEALED TEST SET"):
+        split_bounds(cfg, "test", conn=conn)
+
+    # train/val are never gated.
+    for split in ("train", "val"):
+        assert split_bounds(cfg, split, conn=conn)[0] < split_bounds(
+            cfg, split, conn=conn)[1]
+
+    # And unsealing deliberately lets the final run through.
+    unseal(cfg, conn, "test: the final evaluation")
+    assert split_bounds(cfg, "test", conn=conn)[0] < hi

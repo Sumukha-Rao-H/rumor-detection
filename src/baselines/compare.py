@@ -213,7 +213,7 @@ def main() -> None:
 
     cfg = load_config()
     conn = db.get_conn(cfg["paths"]["db"])
-    lo, hi = split_bounds(cfg, args.split)
+    lo, hi = split_bounds(cfg, args.split, conn=conn)
     variants = [args.variant] if args.variant else list(T0_COLUMNS)
 
     started = time.time()
