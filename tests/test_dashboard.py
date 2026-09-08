@@ -33,10 +33,19 @@ def _run(screen: str | None = None) -> AppTest:
 
 
 def _text(at: AppTest) -> str:
+    """Everything a reader can see, whichever widget carries it.
+
+    Metric labels and values are included deliberately. An earlier version
+    scanned only markdown-family elements, so moving the alert budget from a
+    styled panel into `st.metric` — a purely presentational choice — read as a
+    rule violation. The rules are about what reaches the reader.
+    """
     parts = []
     for block in (at.markdown, at.caption, at.info, at.warning, at.success,
                   at.error, at.subheader, at.title):
         parts += [getattr(e, "value", "") or "" for e in block]
+    for m in at.metric:
+        parts += [m.label or "", str(m.value or ""), getattr(m, "help", "") or ""]
     return "\n".join(parts).lower()
 
 
@@ -148,11 +157,17 @@ def test_strength_is_not_dressed_up_as_a_probability():
     """
     from app.ui import strength
 
-    icon, words, mult = strength(5.0, 2.5)
-    assert mult == 2.0
-    assert 0.0 <= 1.0  # sanity
-    assert words.lower() in {"very strong", "strong", "moderate", "at threshold"}
-    assert not isinstance(mult, bool)
+    key, words, mult = strength(5.0, 2.5)
+
+    # The number returned is a MULTIPLE OF THRESHOLD, not a probability.
+    assert mult == 2.0, "a score of 5 against a threshold of 2.5 is 2x, not 0.67"
+    assert mult > 1.0, "a multiple can exceed 1; a probability could not"
+    assert isinstance(words, str) and words
+    # The band names are a design choice and deliberately not pinned here —
+    # an earlier version fixed them, so renaming a label to something more
+    # informative failed a test about probabilities. What must hold is that
+    # the wording is qualitative and never a percentage.
+    assert "%" not in words, "strength must not be dressed up as a probability"
 
 
 def test_an_open_window_hides_what_happened_next():

@@ -27,18 +27,18 @@ DAY = 86400
 #: How each feature is put into words, with the comparison that makes it mean
 #: something: "4.2x its own normal", never a bare "4.2".
 _REASON = {
-    "volume_z": lambda v: f"volume <b>{v:+.1f} sd</b> vs its own trailing normal",
-    "ret_rel_4h": lambda v: f"<b>{v:+.2%}</b> vs SPY over 4h",
-    "ret_rel_24h": lambda v: f"<b>{v:+.2%}</b> vs SPY over 24h",
-    "ret_4h": lambda v: f"<b>{v:+.2%}</b> over 4h",
-    "ret_24h": lambda v: f"<b>{v:+.2%}</b> over 24h",
-    "ret_120h": lambda v: f"<b>{v:+.2%}</b> over 120h",
-    "volatility": lambda v: f"volatility <b>{v:.2%}</b>/h",
-    "days_since_last_8k": lambda v: f"last 8-K <b>{v:.0f}d</b> ago",
-    "days_since_last_earnings": lambda v: f"last results <b>{v:.0f}d</b> ago",
-    "hours_since_news": lambda v: f"last article <b>{v / 24:.1f}d</b> ago",
-    "news_count_24h": lambda v: f"<b>{v:.0f}</b> articles in 24h",
-    "trading_hours_to_close": lambda v: f"<b>{v:.1f}h</b> to the close",
+    "volume_z": lambda v: f"vol {v:+.1f} sd vs normal",
+    "ret_rel_4h": lambda v: f"{v:+.1%} vs SPY 4h",
+    "ret_rel_24h": lambda v: f"{v:+.1%} vs SPY 24h",
+    "ret_4h": lambda v: f"{v:+.1%} 4h",
+    "ret_24h": lambda v: f"{v:+.1%} 24h",
+    "ret_120h": lambda v: f"{v:+.1%} 120h",
+    "volatility": lambda v: f"vol'y {v:.2%}/h",
+    "days_since_last_8k": lambda v: f"8-K {v:.0f}d ago",
+    "days_since_last_earnings": lambda v: f"results {v:.0f}d ago",
+    "hours_since_news": lambda v: f"news {v / 24:.1f}d ago",
+    "news_count_24h": lambda v: f"{v:.0f} articles 24h",
+    "trading_hours_to_close": lambda v: f"{v:.1f}h to close",
 }
 
 #: Reading order for a triage analyst: the volume anomaly first, then whether
@@ -78,19 +78,22 @@ def alerts_today() -> None:
     df = data.alerts_with_outcomes()
     if df.empty:
         ui.section("No alerts yet")
-        ui.note("The alert log is empty. The system flags roughly <b>2 per stock "
-                "per month by design</b>, so an empty queue is a normal state "
+        st.info("The alert log is empty. The system flags roughly **2 per stock "
+                "per month by design**, so an empty queue is a normal state "
                 "rather than a failure.")
         return
 
     newest = int(df["ts_utc"].max())
-    left, right = st.columns([3, 2])
-    with left:
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
         scope = st.radio("Window", ["Latest session", "Last 7 days", "All"],
                          horizontal=True, label_visibility="collapsed")
-    with right:
-        detectors = ["All detectors"] + sorted(df["detector"].unique())
-        which = st.selectbox("Detector", detectors, label_visibility="collapsed")
+    which = c2.selectbox("Detector",
+                         ["All detectors"] + sorted(df["detector"].unique()),
+                         label_visibility="collapsed")
+    state = c3.selectbox("Outcome",
+                         ["All outcomes", "8-K followed", "No 8-K", "Window open"],
+                         label_visibility="collapsed")
 
     cutoff = {"Latest session": newest - (newest % DAY),
               "Last 7 days": newest - 7 * DAY, "All": 0}[scope]
@@ -99,40 +102,55 @@ def alerts_today() -> None:
         view = view[view["detector"] == which]
 
     resolved, filed, rate = data.hit_rate(view)
-    ui.note(ui.honest_rate(resolved, filed, rate))
+    st.caption(ui.honest_rate(resolved, filed, rate))
 
     if view.empty:
-        ui.note("No alerts in this window. The system flags roughly 2 per stock "
+        st.info("No alerts in this window. The system flags roughly 2 per stock "
                 "per month by design.")
         return
 
-    view = view.assign(_m=view.apply(
-        lambda r: ui.strength(r["score"], r["threshold"])[2], axis=1)
-    ).sort_values("_m", ascending=False)
-
-    ui.section(f"{len(view):,} alerts",
-               "Strongest first — this is a work queue, not an index. Each row "
-               "carries the features that triggered it.")
-
-    for _, r in view.head(50).iterrows():
+    rows = []
+    for _, r in view.iterrows():
         key, words, mult = ui.strength(r["score"], r["threshold"])
-        state, label = _outcome(r)
-        mark = {"filed": "8-K followed", "none": "no 8-K in window",
-                "open": "window open"}[state]
-        reasons = " &nbsp;·&nbsp; ".join(_reasons(r))
-        st.markdown(
-            f'<div class="card" style="--sev:{ui.SEV[key][0]}">'
-            f'<span class="tk">{r["ticker"]}</span> &nbsp;'
-            f'{ui.chip(key, words)} &nbsp;'
-            f'<span class="meta">{mult:.1f}× threshold · {r["detector"]} · {mark}</span>'
-            f'<div class="why">{reasons}</div>'
-            f'<div class="meta" style="margin-top:.3rem">'
-            f'bar {ui.utc(r["ts_utc"])} &nbsp;·&nbsp; '
-            f'noticed {ui.utc(r["raised_utc"], False)}</div></div>',
-            unsafe_allow_html=True)
+        outcome = _outcome(r)[1]
+        rows.append({
+            "Ticker": r["ticker"],
+            "Strength": words,
+            "× thresh": round(mult, 1),
+            "Detector": r["detector"],
+            "Bar (UTC)": ui.short_utc(r["ts_utc"]),
+            "Outcome": outcome,
+            # Rule 1: the reasons travel WITH the alert, in the row, never
+            # behind a click. A number with no reason attached is a black box.
+            "Why it fired": " · ".join(_reasons(r)),
+        })
+    table = pd.DataFrame(rows)
+    if state != "All outcomes":
+        want = {"8-K followed": "8-K followed", "No 8-K": "no 8-K in window",
+                "Window open": "window still open"}[state]
+        table = table[table["Outcome"] == want]
+    table = table.sort_values("× thresh", ascending=False)
 
-    if len(view) > 50:
-        st.caption(f"Showing the 50 strongest of {len(view):,}.")
+    ui.section(
+        f"{len(table):,} alerts",
+        "Strongest first — a work queue, not an index. Sort any column by "
+        "clicking it. Every row carries the features that triggered it, "
+        "because a score with no reason beside it is a black box.")
+    st.dataframe(
+        table, width="stretch", hide_index=True, height=520,
+        column_config={
+            "× thresh": st.column_config.NumberColumn(
+                "× thresh", format="%.1f×", width="small",
+                help="How far above its own alert threshold this score sat. "
+                     "NOT a probability — these detectors emit raw statistics."),
+            "Why it fired": st.column_config.TextColumn("Why it fired", width="large"),
+            "Ticker": st.column_config.TextColumn(width="small"),
+            "Strength": st.column_config.TextColumn(width="small"),
+        })
+    st.caption(
+        "**Strength bands come from the observed distribution**, not round "
+        "numbers: the median alert sits at 1.6× its threshold and the 90th "
+        "percentile at 4.3×. Extreme ≥10×, Strong ≥4×, Elevated ≥2×.")
 
 
 # --------------------------------------------------------------------------
@@ -178,19 +196,19 @@ def ticker_detail() -> None:
     else:
         ts = pd.to_datetime(price["ts_utc"], unit="s", utc=True)
         marker = dt.datetime.fromtimestamp(int(flagged), dt.timezone.utc)
-        sev = ui.SEV[key][0]
+        sev = ui.MARKER
 
         ui.section("Price and volume",
                    "Hourly bars for the 30 days before the flag. The dashed "
                    "line is the flagged hour.")
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=ts, y=price["close"], mode="lines",
-                                 name="close", line=dict(color=ui.ACCENT, width=1.4)))
+                                 name="close", line=dict(color=ui.SERIES, width=1.5)))
         fig.add_vline(x=marker, line_dash="dash", line_color=sev, line_width=1.4)
         st.plotly_chart(ui.chart(fig, 230, "close"), width="stretch")
 
         vol = go.Figure()
-        vol.add_trace(go.Bar(x=ts, y=price["volume"], marker_color="#C3CEDA"))
+        vol.add_trace(go.Bar(x=ts, y=price["volume"], marker_color=ui.DIM))
         vol.add_vline(x=marker, line_dash="dash", line_color=sev, line_width=1.4)
         st.plotly_chart(ui.chart(vol, 150, "volume"), width="stretch")
 
@@ -208,7 +226,7 @@ def ticker_detail() -> None:
                        "threshold.")
             band = go.Figure()
             band.add_trace(go.Scatter(x=ts, y=z.to_numpy(), mode="lines",
-                                      line=dict(color=ui.ACCENT, width=1.4)))
+                                      line=dict(color=ui.SERIES, width=1.5)))
             if pd.notna(row.get("threshold")) and row["detector"] == "volume_zscore":
                 band.add_hline(y=float(row["threshold"]), line_dash="dot",
                                line_color=sev, line_width=1.2)
@@ -236,11 +254,11 @@ def ticker_detail() -> None:
         else:
             for _, art in n.head(10).iterrows():
                 st.markdown(
-                    f'<div style="margin-bottom:.5rem"><span class="meta">'
+                    f'<div style="margin-bottom:.5rem"><span style="opacity:.65;font-size:.8rem">'
                     f'{ui.utc(art["published_utc"], False)}</span><br>'
-                    f'<span style="font-size:.85rem;color:{ui.BODY}">'
+                    f'<span style="font-size:.85rem;color:inherit">'
                     f'{art["title"]}</span> '
-                    f'<span class="meta">*{art["source_name"]}*</span></div>',
+                    f'<span style="opacity:.65;font-size:.8rem">*{art["source_name"]}*</span></div>',
                     unsafe_allow_html=True)
     with b:
         ui.section("Filing history", "Past 8-K filings with their item codes.")
@@ -292,8 +310,7 @@ def _feature_table(row: pd.Series, price: pd.DataFrame) -> None:
     for col in ("days_since_last_8k", "hours_since_news", "news_count_24h"):
         if col in row.index and pd.notna(row.get(col)):
             rows.append({"feature": col,
-                         "at the flagged hour": _REASON[col](row[col])
-                         .replace("<b>", "").replace("</b>", ""),
+                         "at the flagged hour": _REASON[col](row[col]),
                          "trailing median": "—", "trailing 5–95%": "—",
                          "percentile": "—"})
 

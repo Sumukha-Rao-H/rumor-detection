@@ -1,31 +1,30 @@
-"""The dashboard's design system, and the place `UI-context.md`'s rules live.
+"""Shared UI helpers, and the place `UI-context.md`'s binding rules live.
 
-TWO THINGS THIS MODULE IS FOR
+ON STYLING — a correction, recorded because it was an instructive mistake.
 
-**The house style.** One palette, one type scale, one chart template, one way
-to format a number. Defined once so four screens cannot drift into looking
-like four projects.
+An earlier version of this file hardcoded a light palette: white panels, near
+-black headings, fixed greys. It looked acceptable in a light browser and was
+close to unreadable in a dark one — the title rendered near-black on a
+near-black page, and a wall of white cards glared out of a dark background.
+Streamlit follows the viewer's system preference and this project sets no
+theme, so roughly half of all viewers got the broken version. The lesson is
+narrow and worth keeping: **do not hardcode colour in a themed app.**
 
-`UI-context.md` said "default theme, no custom CSS", and gave its reason:
-"time spent on styling is time not spent on Phase 10." Phase 10 is finished,
-so that reason has expired and a modest stylesheet is now the cheaper choice —
-it replaces a scattering of ad-hoc `st.caption` and emoji with one consistent
-surface. The rule's *intent* is kept: no framework, no theming engine, ~60
-lines of CSS doing spacing and weight, and the content still carries the page.
+So colour is now Streamlit's, entirely. What is left here is a handful of
+layout rules — spacing, table density — that hold in either theme, plus the
+formatting and rule helpers below. Native components (`st.metric`,
+`st.dataframe`, bordered containers) carry the look, which is also what
+`UI-context.md` asked for when it said "default theme, no custom CSS".
 
-**The binding rules.** Several of them exist because breaking one would
-misrepresent a result, not merely look untidy, so they are functions here
-rather than prose each screen must remember:
+THE BINDING RULES. Several exist because breaking one would misrepresent a
+result rather than merely look untidy, so they are functions here instead of
+prose each screen has to remember:
 
   rule 2  `footprint`, never "insider trading", never an implied person
   rule 5  never plain accuracy; the headline is precision at the alert budget
   rule 6  the budget is on screen, with how much of it is spent
   rule 7  every timestamp carries its timezone AND whether the market was open
   rule 9  the disclaimer is on every screen
-
-Colour carries exactly one meaning — alert strength — and never direction.
-Red-for-down/green-for-up would read as a trading terminal, which is the
-precise wrong impression for a tool whose framing is "awareness, not advice".
 """
 from __future__ import annotations
 
@@ -37,82 +36,35 @@ import streamlit as st
 
 from src.utils.timeutils import is_market_open
 
-# --------------------------------------------------------------------------
-# palette — deliberately small
-# --------------------------------------------------------------------------
-INK = "#12212F"        # headings
-BODY = "#3D4B59"       # body text
-MUTED = "#6B7A8A"      # captions, axis labels
-LINE = "#DCE3EA"       # rules, borders
-SURFACE = "#F7F9FB"    # panel fill
-ACCENT = "#1B3A5C"     # the one brand colour
-ACCENT_SOFT = "#E8EEF4"
-
-# Severity. One meaning only — how far above its own threshold an alert sits.
-SEV = {
-    "critical": ("#8C2F1F", "#F6E7E3", "Very strong"),
-    "high":     ("#A65A1E", "#FAEEE2", "Strong"),
-    "medium":   ("#7A6A1F", "#F7F3E0", "Moderate"),
-    "low":      ("#4A5A68", "#EEF1F4", "At threshold"),
-}
-
 DISCLAIMER = (
     "Research prototype — not investment advice, and not evidence of "
-    "wrongdoing. This detects a **footprint** in public price and volume "
-    "data: unusual trading ahead of a disclosure, which has many innocent "
-    "explanations such as index rebalancing, an analyst note, or a fund "
-    "unwinding a position. It does not identify a person, a fund, or an "
-    "intent."
+    "wrongdoing. This detects a **footprint** in public price and volume data: "
+    "unusual trading ahead of a disclosure, which has innocent explanations "
+    "such as index rebalancing, an analyst note, or a fund unwinding a "
+    "position. It does not identify a person, a fund, or an intent."
 )
 
-_CSS = f"""
+#: Severity bands, set from the OBSERVED distribution rather than round
+#: numbers. Across the live log the median alert sits at 1.6x its threshold
+#: and the 90th percentile at 4.3x, so a "3x and above is critical" scale — the
+#: first thing tried — labelled every visible row "very strong" and carried no
+#: information at all. These bands put roughly the top 2%, 10% and 40% in the
+#: three upper bands, which is what makes a queue sortable by eye.
+_BANDS = [(10.0, "Extreme"), (4.0, "Strong"), (2.0, "Elevated"), (0.0, "Marginal")]
+
+#: Layout only — no colour, so it holds in either theme.
+_CSS = """
 <style>
-  .block-container {{ padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1360px; }}
-  h1, h2, h3 {{ color: {INK}; letter-spacing: -0.011em; }}
-  h1 {{ font-size: 1.55rem !important; font-weight: 640 !important; }}
-  h2 {{ font-size: 1.12rem !important; font-weight: 620 !important;
-        margin: 1.9rem 0 .2rem 0 !important; }}
-  h3 {{ font-size: .95rem !important; font-weight: 620 !important; }}
-
-  /* masthead */
-  .mast {{ border-bottom: 2px solid {ACCENT}; padding-bottom: .7rem;
-           margin-bottom: .2rem; }}
-  .mast .title {{ font-size: 1.4rem; font-weight: 650; color: {INK};
-                  letter-spacing: -.015em; }}
-  .mast .sub {{ font-size: .82rem; color: {MUTED}; margin-top: .15rem; }}
-
-  /* a labelled statistic */
-  .stat {{ border: 1px solid {LINE}; border-radius: 7px; padding: .6rem .8rem;
-           background: #fff; height: 100%; }}
-  .stat .k {{ font-size: .68rem; text-transform: uppercase;
-              letter-spacing: .07em; color: {MUTED}; font-weight: 600; }}
-  .stat .v {{ font-size: 1.32rem; font-weight: 650; color: {INK};
-              line-height: 1.25; font-variant-numeric: tabular-nums; }}
-  .stat .n {{ font-size: .74rem; color: {MUTED}; }}
-
-  /* one alert */
-  .card {{ border: 1px solid {LINE}; border-left: 3px solid var(--sev);
-           border-radius: 7px; padding: .7rem .9rem; margin-bottom: .55rem;
-           background: #fff; }}
-  .card .tk {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-               font-size: 1.02rem; font-weight: 650; color: {INK}; }}
-  .chip {{ display: inline-block; font-size: .68rem; font-weight: 650;
-           padding: .1rem .45rem; border-radius: 4px; letter-spacing: .02em; }}
-  .meta {{ font-size: .76rem; color: {MUTED};
-           font-variant-numeric: tabular-nums; }}
-  .why {{ font-size: .82rem; color: {BODY}; margin-top: .3rem; }}
-  .why b {{ color: {INK}; font-weight: 620; }}
-
-  /* a short explanatory note — present, but not shouting */
-  .note {{ font-size: .8rem; color: {BODY}; background: {SURFACE};
-           border-left: 3px solid {ACCENT}; border-radius: 0 6px 6px 0;
-           padding: .55rem .8rem; margin: .35rem 0 .9rem 0; }}
-  .note b {{ color: {INK}; }}
-
-  [data-testid="stDataFrame"] {{ border: 1px solid {LINE}; border-radius: 7px; }}
-  hr {{ margin: 1.3rem 0; border-color: {LINE}; }}
-  section[data-testid="stSidebar"] {{ background: {SURFACE};
-                                      border-right: 1px solid {LINE}; }}
+  .block-container { padding-top: 2.4rem; padding-bottom: 3rem; max-width: 1400px; }
+  h1 { font-size: 1.5rem !important; font-weight: 640 !important;
+       letter-spacing: -.012em; }
+  h2 { font-size: 1.05rem !important; font-weight: 620 !important;
+       margin-top: 1.6rem !important; }
+  h3 { font-size: .92rem !important; font-weight: 620 !important; }
+  [data-testid="stMetricValue"] { font-size: 1.28rem; }
+  [data-testid="stMetricLabel"] { font-size: .72rem; text-transform: uppercase;
+                                  letter-spacing: .06em; opacity: .75; }
+  hr { margin: 1.1rem 0; }
 </style>
 """
 
@@ -130,10 +82,6 @@ def num(v, dp: int = 0) -> str:
 
 def pct(v, dp: int = 2) -> str:
     return "—" if v is None or pd.isna(v) else f"{v * 100:.{dp}f}%"
-
-
-def signed_pct(v, dp: int = 2) -> str:
-    return "—" if v is None or pd.isna(v) else f"{v * 100:+.{dp}f}%"
 
 
 def utc(ts, with_market: bool = True) -> str:
@@ -154,39 +102,15 @@ def utc(ts, with_market: bool = True) -> str:
     return out
 
 
-# --------------------------------------------------------------------------
-# components
-# --------------------------------------------------------------------------
-def masthead(subtitle: str) -> None:
-    st.markdown(
-        f'<div class="mast"><div class="title">Pre-Announcement Footprints</div>'
-        f'<div class="sub">{subtitle}</div></div>', unsafe_allow_html=True)
-
-
-def stat(col, label: str, value: str, note: str = "") -> None:
-    col.markdown(
-        f'<div class="stat"><div class="k">{label}</div>'
-        f'<div class="v">{value}</div><div class="n">{note}&nbsp;</div></div>',
-        unsafe_allow_html=True)
-
-
-def note(text: str) -> None:
-    """A short explanation, kept at top level rather than behind a click.
-
-    Several of these carry binding rules, and a rule a reader has to expand to
-    find is a rule the screen does not really make.
-    """
-    st.markdown(f'<div class="note">{text}</div>', unsafe_allow_html=True)
-
-
-def section(title: str, explain: str = "") -> None:
-    st.markdown(f"### {title}")
-    if explain:
-        st.markdown(f'<div class="meta">{explain}</div>', unsafe_allow_html=True)
+def short_utc(ts) -> str:
+    """Compact form for a dense table, where the column header carries "UTC"."""
+    if ts is None or pd.isna(ts):
+        return "—"
+    return dt.datetime.fromtimestamp(int(ts), dt.timezone.utc).strftime("%d %b %H:%M")
 
 
 def strength(score: float, threshold: float) -> tuple[str, str, float]:
-    """(severity key, words, multiple-of-threshold) for one alert.
+    """(band key, words, multiple-of-threshold) for one alert.
 
     Deliberately NOT called "confidence". These detectors emit scores that are
     not probabilities — the evaluation contract says so, and only a baseline
@@ -196,16 +120,12 @@ def strength(score: float, threshold: float) -> tuple[str, str, float]:
     `honest_rate` renders beside it.
     """
     if not threshold:
-        return "low", SEV["low"][2], float("nan")
+        return "marginal", "Marginal", float("nan")
     mult = score / threshold
-    key = ("critical" if mult >= 3 else "high" if mult >= 2
-           else "medium" if mult >= 1 else "low")
-    return key, SEV[key][2], mult
-
-
-def chip(key: str, text: str) -> str:
-    fg, bg, _ = SEV[key]
-    return f'<span class="chip" style="color:{fg};background:{bg}">{text}</span>'
+    for edge, words in _BANDS:
+        if mult >= edge:
+            return words.lower(), words, mult
+    return "marginal", "Marginal", mult
 
 
 def honest_rate(resolved: int, filed: int, rate) -> str:
@@ -214,24 +134,34 @@ def honest_rate(resolved: int, filed: int, rate) -> str:
         return ("No alert has a closed 48-hour window yet, so there is no hit "
                 "rate to quote. An empty figure is reported rather than a "
                 "flattering one.")
-    return (f"<b>{filed} of {resolved}</b> resolved alerts ({pct(rate, 1)}) were "
+    return (f"**{filed} of {resolved}** resolved alerts ({pct(rate, 1)}) were "
             f"followed by an 8-K within 48 hours. Alerts whose window is still "
             f"open are excluded from both sides — otherwise the figure would "
             f"drift with how recently the monitor last ran.")
 
 
-def chart(fig: go.Figure, height: int = 260, ylab: str = "") -> go.Figure:
-    """One chart template, so every plot reads as the same instrument."""
+def section(title: str, explain: str = "") -> None:
+    st.subheader(title, anchor=False)
+    if explain:
+        st.caption(explain)
+
+
+def chart(fig: go.Figure, height: int = 240, ylab: str = "") -> go.Figure:
+    """One chart template. Transparent, so the page theme shows through.
+
+    No background colour is set, for the same reason the palette went: a white
+    plot area punched into a dark page is exactly the mistake this module now
+    documents.
+    """
     fig.update_layout(
-        height=height, margin=dict(t=18, b=34, l=8, r=8),
-        plot_bgcolor="#fff", paper_bgcolor="#fff", showlegend=False,
-        font=dict(color=BODY, size=11),
-        xaxis=dict(title="", gridcolor=LINE, zeroline=False,
-                   linecolor=LINE, tickfont=dict(color=MUTED, size=10)),
-        yaxis=dict(title=dict(text=ylab, font=dict(color=MUTED, size=10)),
-                   gridcolor=LINE, zeroline=False, linecolor=LINE,
-                   tickfont=dict(color=MUTED, size=10)),
-        hovermode="x unified",
+        height=height, margin=dict(t=14, b=30, l=6, r=6),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        showlegend=False, hovermode="x unified",
+        xaxis=dict(title="", showgrid=True, gridcolor="rgba(128,128,128,.18)",
+                   zeroline=False, linecolor="rgba(128,128,128,.35)"),
+        yaxis=dict(title=dict(text=ylab, font=dict(size=11)), showgrid=True,
+                   gridcolor="rgba(128,128,128,.18)", zeroline=False,
+                   linecolor="rgba(128,128,128,.35)"),
     )
     return fig
 
@@ -245,11 +175,44 @@ def disclaimer() -> None:
 def budget_bar(b: dict) -> None:
     """Rule 6 — the constraint the system is tuned to, and how much is spent."""
     c = st.columns(4)
-    stat(c[0], "Alert budget", f"{b['rate']} / stock / month",
-         "fixed before any model existed")
-    used, allow = b["used"], b["allowance"]
-    stat(c[1], f"Spent in {b['month']}", num(used),
-         f"of {num(allow)} available")
-    stat(c[2], "Universe", num(b["universe"]), "companies, fixed in advance")
-    stat(c[3], "Utilisation", pct(used / allow, 1) if allow else "—",
-         "of the month's allowance")
+    c[0].metric("Alert budget", f"{b['rate']} / stock / month",
+                help="The operational constraint the whole system is tuned to. "
+                     "Fixed before any model existed, so it cannot have been "
+                     "chosen to flatter a result.")
+    c[1].metric(f"Spent in {b['month']}", num(b["used"]),
+                help=f"of {num(b['allowance'])} available this month")
+    c[2].metric("Universe", num(b["universe"]),
+                help="Companies, selected once in advance by fixed liquidity "
+                     "rules measured as of the study's start date.")
+    c[3].metric("Utilisation",
+                pct(b["used"] / b["allowance"], 1) if b["allowance"] else "—",
+                help="Share of the month's allowance spent.")
+
+
+#: Two chart colours chosen to read on BOTH a light and a dark page — a
+#: mid-tone blue and a warm marker. Everything else takes the theme's own
+#: colours; these two exist because a line has to be some colour, and the
+#: previous palette failed precisely by assuming a light background.
+SERIES = "#4C8DBF"
+MARKER = "#D2705A"
+DIM = "rgba(128,128,128,.45)"
+
+
+def masthead(subtitle: str) -> None:
+    """Title and one line of orientation. Native, so it follows the theme."""
+    st.title("Pre-Announcement Footprints", anchor=False)
+    st.caption(subtitle)
+
+
+def stat(col, label: str, value: str, note: str = "") -> None:
+    """One statistic. `st.metric` so the theme colours it, not this module."""
+    col.metric(label, value, help=note or None)
+
+
+def note(text: str) -> None:
+    """A short explanation, kept at top level rather than behind a click.
+
+    Several of these carry binding rules, and a rule a reader must expand to
+    find is a rule the screen does not really make.
+    """
+    st.info(text)
