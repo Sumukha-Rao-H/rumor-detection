@@ -100,11 +100,18 @@ def test_quoted_headlines_are_attributed():
 
 
 def test_the_alert_budget_is_on_screen():
-    """Rule 6. The constraint the system is tuned to is visible, not implied."""
-    at = _run()
-    labels = " ".join(m.label for m in at.metric).lower()
-    assert "alert budget" in labels
-    assert any("spent" in m.label.lower() for m in at.metric)
+    """Rule 6. The constraint the system is tuned to is visible, not implied.
+
+    Asserted against the rendered TEXT rather than `st.metric`, which the first
+    version of this test used. The rule is that a reader sees the budget and
+    how much of it is spent; which widget carries it is a presentation choice,
+    and pinning the widget made a purely visual change look like a rule
+    violation when the statistics moved into styled panels.
+    """
+    body = _text(_run())
+    assert "alert budget" in body
+    assert "spent in" in body, "the budget must show how much of it is used"
+    assert "/ stock / month" in body, "and the rate it is denominated in"
 
 
 def test_the_evaluation_screen_refuses_plain_accuracy():
@@ -144,7 +151,7 @@ def test_strength_is_not_dressed_up_as_a_probability():
     icon, words, mult = strength(5.0, 2.5)
     assert mult == 2.0
     assert 0.0 <= 1.0  # sanity
-    assert words in {"very strong", "strong", "moderate", "at threshold"}
+    assert words.lower() in {"very strong", "strong", "moderate", "at threshold"}
     assert not isinstance(mult, bool)
 
 

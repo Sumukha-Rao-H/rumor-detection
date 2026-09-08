@@ -1,8 +1,15 @@
 """The four dashboard screens (P9-02 … P9-05).
 
-Each is a plain function taking no arguments and rendering into the current
-Streamlit page. `dashboard.py` owns routing, the header and the disclaimer, so
-a screen cannot render without them.
+Each is a plain function taking no arguments, rendering into the current page.
+`dashboard.py` owns routing, the masthead and the disclaimer, so no screen can
+render without them.
+
+The screens differ in audience and are laid out accordingly. *Today's alerts*
+and *Ticker detail* are worked by an analyst deciding in about thirty seconds
+whether something deserves a closer look, so they lead with the alert and put
+the reasoning beside it. *Evaluation* is read by an examiner, so it leads with
+the comparison and states the measurement rules on the page rather than
+assuming them.
 """
 from __future__ import annotations
 
@@ -17,39 +24,51 @@ from app import data, ui
 HOUR = 3600
 DAY = 86400
 
-#: Rendered beside a feature so a number carries a comparison, not just a
-#: value — "4.2x trailing 20-day volume", never "4.2".
+#: How each feature is put into words, with the comparison that makes it mean
+#: something: "4.2x its own normal", never a bare "4.2".
 _REASON = {
-    "volume_z": lambda v: f"volume {v:+.1f} sd vs its own trailing normal",
-    "ret_rel_4h": lambda v: f"{v:+.2%} vs SPY over 4h",
-    "ret_rel_24h": lambda v: f"{v:+.2%} vs SPY over 24h",
-    "ret_4h": lambda v: f"{v:+.2%} over 4h",
-    "ret_24h": lambda v: f"{v:+.2%} over 24h",
-    "days_since_last_8k": lambda v: f"last 8-K {v:.0f}d ago",
-    "hours_since_news": lambda v: f"last article {v/24:.1f}d ago",
-    "news_count_24h": lambda v: f"{v:.0f} articles in 24h",
-    "volatility": lambda v: f"volatility {v:.2%}/h",
+    "volume_z": lambda v: f"volume <b>{v:+.1f} sd</b> vs its own trailing normal",
+    "ret_rel_4h": lambda v: f"<b>{v:+.2%}</b> vs SPY over 4h",
+    "ret_rel_24h": lambda v: f"<b>{v:+.2%}</b> vs SPY over 24h",
+    "ret_4h": lambda v: f"<b>{v:+.2%}</b> over 4h",
+    "ret_24h": lambda v: f"<b>{v:+.2%}</b> over 24h",
+    "ret_120h": lambda v: f"<b>{v:+.2%}</b> over 120h",
+    "volatility": lambda v: f"volatility <b>{v:.2%}</b>/h",
+    "days_since_last_8k": lambda v: f"last 8-K <b>{v:.0f}d</b> ago",
+    "days_since_last_earnings": lambda v: f"last results <b>{v:.0f}d</b> ago",
+    "hours_since_news": lambda v: f"last article <b>{v / 24:.1f}d</b> ago",
+    "news_count_24h": lambda v: f"<b>{v:.0f}</b> articles in 24h",
+    "trading_hours_to_close": lambda v: f"<b>{v:.1f}h</b> to the close",
 }
 
-#: Order matters: the first few are what a triage analyst reads first.
-_REASON_ORDER = ["volume_z", "ret_rel_4h", "ret_rel_24h", "ret_4h",
-                 "days_since_last_8k", "hours_since_news", "news_count_24h"]
+#: Reading order for a triage analyst: the volume anomaly first, then whether
+#: the move was market-wide, then how quiet the company had been.
+_ORDER = ["volume_z", "ret_rel_4h", "ret_rel_24h", "ret_4h", "ret_24h",
+          "days_since_last_8k", "hours_since_news", "news_count_24h",
+          "volatility", "trading_hours_to_close"]
 
 
 def _reasons(row: pd.Series, limit: int = 4) -> list[str]:
-    """The features that triggered this alert, rendered with their units.
+    """The features that fired this alert, in words with their units.
 
-    Rule 1: reasons travel WITH the alert, in the row, never behind a click.
-    A number with no reason attached is a black box, and the point of the
-    dashboard is that a human can sanity-check it in about thirty seconds.
+    Rule 1: reasons travel WITH the alert, in the row, never behind a click. A
+    number with no reason attached is a black box, and the point of the screen
+    is that a human can sanity-check it in half a minute.
     """
     out = []
-    for key in _REASON_ORDER:
-        if key in row.index and pd.notna(row[key]):
+    for key in _ORDER:
+        if key in row.index and pd.notna(row.get(key)):
             out.append(_REASON[key](row[key]))
         if len(out) >= limit:
             break
-    return out or ["(features not recorded for this alert)"]
+    return out or ["no features recorded for this alert"]
+
+
+def _outcome(row: pd.Series) -> tuple[str, str]:
+    filed = row.get("filed")
+    if pd.isna(filed):
+        return "open", "window still open"
+    return ("filed", "8-K followed") if filed == 1 else ("none", "no 8-K in window")
 
 
 # --------------------------------------------------------------------------
@@ -58,106 +77,62 @@ def _reasons(row: pd.Series, limit: int = 4) -> list[str]:
 def alerts_today() -> None:
     df = data.alerts_with_outcomes()
     if df.empty:
-        st.subheader("No alerts yet")
-        st.info("The alert log is empty. The system flags roughly 2 per stock "
-                "per month by design, so an empty list is a normal state, not "
-                "a failure.", icon="🗓️")
+        ui.section("No alerts yet")
+        ui.note("The alert log is empty. The system flags roughly <b>2 per stock "
+                "per month by design</b>, so an empty queue is a normal state "
+                "rather than a failure.")
         return
 
     newest = int(df["ts_utc"].max())
-    day_start = newest - (newest % DAY)
-    scope = st.radio(
-        "Show", ["Most recent session", "Last 7 days", "Everything"],
-        horizontal=True, label_visibility="collapsed")
-    cutoff = {"Most recent session": day_start,
-              "Last 7 days": newest - 7 * DAY,
-              "Everything": 0}[scope]
+    left, right = st.columns([3, 2])
+    with left:
+        scope = st.radio("Window", ["Latest session", "Last 7 days", "All"],
+                         horizontal=True, label_visibility="collapsed")
+    with right:
+        detectors = ["All detectors"] + sorted(df["detector"].unique())
+        which = st.selectbox("Detector", detectors, label_visibility="collapsed")
+
+    cutoff = {"Latest session": newest - (newest % DAY),
+              "Last 7 days": newest - 7 * DAY, "All": 0}[scope]
     view = df[df["ts_utc"] >= cutoff]
+    if which != "All detectors":
+        view = view[view["detector"] == which]
 
     resolved, filed, rate = data.hit_rate(view)
-    st.markdown(ui.honest_rate(resolved, filed, rate))
+    ui.note(ui.honest_rate(resolved, filed, rate))
 
     if view.empty:
-        st.info("No alerts in this window. The system flags roughly 2 per "
-                "stock per month by design.", icon="🗓️")
+        ui.note("No alerts in this window. The system flags roughly 2 per stock "
+                "per month by design.")
         return
 
-    # Sorted by strength, not alphabetically — the list is a work queue.
-    view = view.assign(
-        _mult=view.apply(
-            lambda r: ui.strength(r["score"], r["threshold"])[2], axis=1)
-    ).sort_values("_mult", ascending=False)
+    view = view.assign(_m=view.apply(
+        lambda r: ui.strength(r["score"], r["threshold"])[2], axis=1)
+    ).sort_values("_m", ascending=False)
 
-    st.caption(f"{len(view):,} alerts · strongest first")
-    for _, r in view.head(60).iterrows():
-        icon, words, mult = ui.strength(r["score"], r["threshold"])
-        outcome = ""
-        if pd.notna(r.get("filed")):
-            outcome = ("✅ 8-K followed" if r["filed"] == 1
-                       else "— no 8-K in window")
-        else:
-            outcome = "⏳ window still open"
+    ui.section(f"{len(view):,} alerts",
+               "Strongest first — this is a work queue, not an index. Each row "
+               "carries the features that triggered it.")
 
-        with st.container(border=True):
-            a, b = st.columns([1, 3])
-            a.markdown(f"### `{r['ticker']}`")
-            a.markdown(f"{icon} **{words}** · {mult:.1f}× threshold")
-            a.caption(f"{r['detector']} · {outcome}")
+    for _, r in view.head(50).iterrows():
+        key, words, mult = ui.strength(r["score"], r["threshold"])
+        state, label = _outcome(r)
+        mark = {"filed": "8-K followed", "none": "no 8-K in window",
+                "open": "window open"}[state]
+        reasons = " &nbsp;·&nbsp; ".join(_reasons(r))
+        st.markdown(
+            f'<div class="card" style="--sev:{ui.SEV[key][0]}">'
+            f'<span class="tk">{r["ticker"]}</span> &nbsp;'
+            f'{ui.chip(key, words)} &nbsp;'
+            f'<span class="meta">{mult:.1f}× threshold · {r["detector"]} · {mark}</span>'
+            f'<div class="why">{reasons}</div>'
+            f'<div class="meta" style="margin-top:.3rem">'
+            f'bar {ui.utc(r["ts_utc"])} &nbsp;·&nbsp; '
+            f'noticed {ui.utc(r["raised_utc"], False)}</div></div>',
+            unsafe_allow_html=True)
 
-            b.markdown(f"**Flagged at** {ui.utc(r['ts_utc'])}")
-            b.caption(f"Noticed by the monitor at {ui.utc(r['raised_utc'], False)}")
-            for line in _reasons(r):
-                b.markdown(f"- {line}")
-
-
-def _feature_table(row: pd.Series, price: pd.DataFrame) -> None:
-    """Feature values beside the same measure's trailing normal (P9-03).
-
-    The trailing normal is recomputed from this ticker's own bars over the 30
-    days BEFORE the flagged hour — never the whole series, which would include
-    the flagged hour in the baseline it is being judged against and damp the
-    very spike under inspection. `volume_zscore` already carries its own
-    `shift(1)` for the same reason.
-    """
-    from src.pipeline.features import returns, volume_zscore
-
-    rows = []
-    if not price.empty:
-        frame = price.set_index("ts_utc")[["close", "volume"]]
-        cfg = data.config()
-        hist = pd.concat([returns(frame, cfg), volume_zscore(frame, cfg)], axis=1)
-        hist = hist[hist.index < int(row["ts_utc"])]  # strictly before the flag
-
-        for col in ("volume_z", "ret_1h", "ret_4h", "ret_24h", "ret_120h"):
-            if col not in row.index or pd.isna(row[col]) or col not in hist:
-                continue
-            past = hist[col].dropna()
-            if past.empty:
-                continue
-            pct = (past < row[col]).mean() * 100
-            fmt = (lambda v: f"{v:+.2f} sd") if col == "volume_z" \
-                else (lambda v: f"{v:+.2%}")
-            rows.append({
-                "feature": col,
-                "at the flagged hour": fmt(row[col]),
-                "trailing median": fmt(past.median()),
-                "trailing 5–95%": f"{fmt(past.quantile(.05))} … {fmt(past.quantile(.95))}",
-                "percentile": f"{pct:.0f}th",
-            })
-
-    # Context features have no price-derived trailing normal; they are shown
-    # as-is rather than given a fabricated comparison.
-    for col in ("days_since_last_8k", "hours_since_news", "news_count_24h"):
-        if col in row.index and pd.notna(row[col]):
-            rows.append({"feature": col,
-                         "at the flagged hour": _REASON[col](row[col]),
-                         "trailing median": "—", "trailing 5–95%": "—",
-                         "percentile": "—"})
-
-    if rows:
-        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
-    else:
-        st.caption("No features recorded for this alert.")
+    if len(view) > 50:
+        st.caption(f"Showing the 50 strongest of {len(view):,}.")
 
 
 # --------------------------------------------------------------------------
@@ -166,92 +141,92 @@ def _feature_table(row: pd.Series, price: pd.DataFrame) -> None:
 def ticker_detail() -> None:
     df = data.alerts_with_outcomes()
     if df.empty:
-        st.info("No alerts to inspect yet.", icon="🗓️")
+        ui.note("No alerts to inspect yet.")
         return
 
-    tickers = sorted(df["ticker"].unique())
-    ticker = st.selectbox("Ticker", tickers)
+    c1, c2 = st.columns([1, 2])
+    ticker = c1.selectbox("Ticker", sorted(df["ticker"].unique()))
     rows = df[df["ticker"] == ticker].sort_values("ts_utc", ascending=False)
     label = {int(r.ts_utc): f"{ui.utc(r.ts_utc, False)} · {r.detector}"
              for r in rows.itertuples()}
-    flagged = st.selectbox("Flagged hour", list(label), format_func=label.get)
+    flagged = c2.selectbox("Flagged hour", list(label), format_func=label.get)
     row = rows[rows["ts_utc"] == flagged].iloc[0]
 
-    live = pd.isna(row.get("filed"))
-    if live:
-        st.warning(
-            "This alert's window is still open, so **nothing after the "
-            "flagged hour is shown**. Revealing what happened next would turn "
-            "a surveillance tool into a hindsight demo.", icon="🔒")
+    key, words, mult = ui.strength(row["score"], row["threshold"])
+    state, _ = _outcome(row)
+    s = st.columns(4)
+    ui.stat(s[0], "Ticker", ticker, row["detector"])
+    ui.stat(s[1], "Strength", f"{mult:.1f}×", f"{words} — {mult:.1f}× threshold")
+    ui.stat(s[2], "Flagged", dt.datetime.fromtimestamp(
+        int(flagged), dt.timezone.utc).strftime("%d %b %H:%M"), ui.utc(flagged))
+    ui.stat(s[3], "Outcome", {"filed": "8-K followed", "none": "No 8-K",
+                              "open": "Pending"}[state],
+            "within 48 trading hours")
 
-    # The hard boundary. While an alert is live the chart stops at the flagged
-    # hour; once resolved, the window is allowed so an analyst can review it.
+    live = state == "open"
+    if live:
+        ui.note("This alert's window is still open, so <b>nothing after the "
+                "flagged hour is shown</b>. Revealing what happened next would "
+                "turn a surveillance tool into a hindsight demo.")
+
     hi = int(flagged) if live else int(flagged) + 48 * HOUR
     lo = int(flagged) - 30 * DAY
-
     price = data.bars(ticker, lo, hi)
+
     if price.empty:
-        st.info("No bars stored for this window.")
+        ui.note("No price bars stored for this window.")
     else:
         ts = pd.to_datetime(price["ts_utc"], unit="s", utc=True)
+        marker = dt.datetime.fromtimestamp(int(flagged), dt.timezone.utc)
+        sev = ui.SEV[key][0]
+
+        ui.section("Price and volume",
+                   "Hourly bars for the 30 days before the flag. The dashed "
+                   "line is the flagged hour.")
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=ts, y=price["close"], name="close",
-                                 line=dict(color="#1f4e79")))
-        fig.add_vline(x=dt.datetime.fromtimestamp(int(flagged), dt.timezone.utc),
-                      line_dash="dash", line_color="#b5502a",
-                      annotation_text="flagged")
-        fig.update_layout(height=300, margin=dict(t=30, b=10),
-                          xaxis_title="UTC", yaxis_title="close")
-        st.plotly_chart(fig, width='stretch')
+        fig.add_trace(go.Scatter(x=ts, y=price["close"], mode="lines",
+                                 name="close", line=dict(color=ui.ACCENT, width=1.4)))
+        fig.add_vline(x=marker, line_dash="dash", line_color=sev, line_width=1.4)
+        st.plotly_chart(ui.chart(fig, 230, "close"), width="stretch")
 
         vol = go.Figure()
-        vol.add_trace(go.Bar(x=ts, y=price["volume"], name="volume",
-                             marker_color="#5a6672"))
-        vol.add_vline(x=dt.datetime.fromtimestamp(int(flagged), dt.timezone.utc),
-                      line_dash="dash", line_color="#b5502a")
-        vol.update_layout(height=200, margin=dict(t=10, b=10),
-                          xaxis_title="UTC", yaxis_title="volume")
-        st.plotly_chart(vol, width='stretch')
+        vol.add_trace(go.Bar(x=ts, y=price["volume"], marker_color="#C3CEDA"))
+        vol.add_vline(x=marker, line_dash="dash", line_color=sev, line_width=1.4)
+        st.plotly_chart(ui.chart(vol, 150, "volume"), width="stretch")
 
-        # The z-score band the spec asks for, with the detector's own
-        # threshold drawn. Computed with `features.volume_zscore`, not a
-        # lookalike written here: a band that drifted from the formula the
-        # detector actually scored would explain the wrong thing convincingly.
+        # The z-score band, computed with the SAME function the detector used.
+        # A lookalike written here could drift from it and would then explain
+        # the wrong thing convincingly.
         from src.pipeline.features import volume_zscore
 
         frame = price.set_index("ts_utc")[["close", "volume"]]
         z = volume_zscore(frame, data.config())["volume_z"]
         if z.notna().any():
+            ui.section("Volume z-score",
+                       "How unusual each hour's volume is against this stock's "
+                       "own trailing normal. The dotted line is the alert "
+                       "threshold.")
             band = go.Figure()
-            band.add_trace(go.Scatter(x=ts, y=z.to_numpy(), name="volume z",
-                                      line=dict(color="#1f4e79")))
+            band.add_trace(go.Scatter(x=ts, y=z.to_numpy(), mode="lines",
+                                      line=dict(color=ui.ACCENT, width=1.4)))
             if pd.notna(row.get("threshold")) and row["detector"] == "volume_zscore":
                 band.add_hline(y=float(row["threshold"]), line_dash="dot",
-                               line_color="#b5502a",
-                               annotation_text="alert threshold")
-            band.add_vline(
-                x=dt.datetime.fromtimestamp(int(flagged), dt.timezone.utc),
-                line_dash="dash", line_color="#b5502a")
-            band.update_layout(height=200, margin=dict(t=10, b=10),
-                               xaxis_title="UTC",
-                               yaxis_title="volume z-score (sd)")
-            st.plotly_chart(band, width='stretch')
+                               line_color=sev, line_width=1.2)
+            band.add_vline(x=marker, line_dash="dash", line_color=sev, line_width=1.4)
+            st.plotly_chart(ui.chart(band, 165, "standard deviations"),
+                            width="stretch")
 
-    st.subheader("Why this hour was flagged")
-    st.caption("Each value beside the same measure's trailing normal for this "
+    ui.section("Why this hour was flagged",
+               "Each value beside the same measure's trailing normal for this "
                "ticker over the 30 days before the flag. A number alone means "
                "little — the comparison is what makes it mean something.")
     _feature_table(row, price)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("News")
-        st.caption(
-            "Headlines as published, quoted verbatim with their publisher. "
-            "Some carry analyst language — that is the outlet's wording, not "
-            "this tool's, and nothing here is a recommendation. They are shown "
-            "because a quiet stretch before a move is the interesting shape, "
-            "and you cannot see a gap without seeing the coverage.")
+    a, b = st.columns(2)
+    with a:
+        ui.section("News", "Headlines as published, quoted verbatim with their "
+                           "publisher. Some carry analyst language — that is "
+                           "the outlet's wording, not this tool's.")
         n = data.news(ticker, lo, hi)
         if n.empty:
             st.caption("No articles in this window. A quiet stretch before a "
@@ -259,110 +234,193 @@ def ticker_detail() -> None:
                        "every week of the study window was fetched for every "
                        "in-universe ticker.")
         else:
-            for _, a in n.head(12).iterrows():
-                st.markdown(f"`{ui.utc(a['published_utc'], False)}` — "
-                            f"{a['title']}  \n*{a['source_name']}*")
-    with c2:
-        st.subheader("Past 8-K filings")
+            for _, art in n.head(10).iterrows():
+                st.markdown(
+                    f'<div style="margin-bottom:.5rem"><span class="meta">'
+                    f'{ui.utc(art["published_utc"], False)}</span><br>'
+                    f'<span style="font-size:.85rem;color:{ui.BODY}">'
+                    f'{art["title"]}</span> '
+                    f'<span class="meta">*{art["source_name"]}*</span></div>',
+                    unsafe_allow_html=True)
+    with b:
+        ui.section("Filing history", "Past 8-K filings with their item codes.")
         f = data.filings(ticker)
         if f.empty:
             st.caption("No 8-K filings on record.")
         else:
-            for _, k in f.iterrows():
-                st.markdown(f"`{ui.utc(k['acceptance_utc'], False)}` — "
-                            f"items **{k['items'] or '—'}**")
+            st.dataframe(pd.DataFrame({
+                "accepted (UTC)": f["acceptance_utc"].map(lambda t: ui.utc(t, False)),
+                "items": f["items"].fillna("—"),
+            }), width="stretch", hide_index=True, height=320)
+
+
+def _feature_table(row: pd.Series, price: pd.DataFrame) -> None:
+    """Feature values beside the same measure's trailing normal (P9-03).
+
+    The trailing normal is recomputed from this ticker's own bars over the 30
+    days STRICTLY BEFORE the flagged hour — the whole series would put the
+    spike inside the baseline it is being judged against, which is the same
+    reason `volume_zscore` carries its own `shift(1)`.
+    """
+    from src.pipeline.features import returns, volume_zscore
+
+    rows = []
+    if not price.empty:
+        frame = price.set_index("ts_utc")[["close", "volume"]]
+        cfg = data.config()
+        hist = pd.concat([returns(frame, cfg), volume_zscore(frame, cfg)], axis=1)
+        hist = hist[hist.index < int(row["ts_utc"])]
+
+        for col in ("volume_z", "ret_1h", "ret_4h", "ret_24h", "ret_120h"):
+            if col not in row.index or pd.isna(row.get(col)) or col not in hist:
+                continue
+            past = hist[col].dropna()
+            if past.empty:
+                continue
+            fmt = ((lambda v: f"{v:+.2f} sd") if col == "volume_z"
+                   else (lambda v: f"{v:+.2%}"))
+            rows.append({
+                "feature": col,
+                "at the flagged hour": fmt(row[col]),
+                "trailing median": fmt(past.median()),
+                "trailing 5–95%": f"{fmt(past.quantile(.05))} … {fmt(past.quantile(.95))}",
+                "percentile": f"{(past < row[col]).mean() * 100:.0f}th",
+            })
+
+    # Context features have no price-derived trailing normal. They are shown
+    # as-is rather than given a fabricated comparison.
+    for col in ("days_since_last_8k", "hours_since_news", "news_count_24h"):
+        if col in row.index and pd.notna(row.get(col)):
+            rows.append({"feature": col,
+                         "at the flagged hour": _REASON[col](row[col])
+                         .replace("<b>", "").replace("</b>", ""),
+                         "trailing median": "—", "trailing 5–95%": "—",
+                         "percentile": "—"})
+
+    if rows:
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    else:
+        st.caption("No features recorded for this alert.")
 
 
 # --------------------------------------------------------------------------
 # P9-04 — evaluation
 # --------------------------------------------------------------------------
 def evaluation() -> None:
-    ui.no_accuracy_note()
-    ui.split_note()
-
-    table = data.comparison("p8-without-news-val.csv")
+    table = data.comparison("phase10/FINAL-test-evaluation.csv")
+    final = not table.empty
+    if not final:
+        table = data.comparison("p8-without-news-val.csv")
     if table.empty:
         table = data.comparison("baseline-comparison-val.csv")
     if table.empty:
-        st.info("No comparison table built yet. Run "
-                "`python -m src.baselines.compare --split val --out ...`")
+        ui.note("No comparison table built yet. Run "
+                "<code>python -m src.baselines.compare --split val --out …</code>")
         return
 
-    variant = st.selectbox(
-        "t₀ variant", sorted(table["t0_variant"].unique()),
-        index=list(sorted(table["t0_variant"].unique())).index("news_adjusted")
-        if "news_adjusted" in set(table["t0_variant"]) else 0,
-        help="`filing` uses the 8-K acceptance time. `news_adjusted` uses the "
+    ui.note(
+        "<b>Plain accuracy is not reported anywhere, by design.</b> Only ~0.285% "
+        "of hours precede an event, so a system that always says \"nothing is "
+        "coming\" is <b>99.71%</b> accurate and useless. The function that would "
+        "compute it raises an error instead. The headline is precision at the "
+        "fixed alert budget.")
+    ui.note(
+        "<b>Scheduled and unscheduled are never pooled.</b> Scheduled events — "
+        "results announcements — have dates published weeks ahead, so a run-up "
+        "before one is far less interesting. Unscheduled events are the real "
+        "target, and pooling would let the easy half carry the number.")
+
+    if final:
+        st.caption("Source: **Phase 10 final evaluation on the sealed test "
+                   "set**, run once on 2026-09-08.")
+
+    c1, c2 = st.columns([1, 2])
+    variants = sorted(table["t0_variant"].unique())
+    variant = c1.selectbox(
+        "t₀ variant", variants,
+        index=variants.index("news_adjusted") if "news_adjusted" in variants else 0,
+        help="`filing` uses the 8-K acceptance time. `news_adjusted` takes the "
              "earlier of that and the first news article — the honest clock, "
              "and the project's main contribution.")
-    slices = ["all", "scheduled", "unscheduled"]
-    sl = st.radio("Slice", slices, horizontal=True)
+    with c2:
+        sl = st.radio("Slice", ["all", "scheduled", "unscheduled"],
+                      horizontal=True)
 
     view = table[(table["t0_variant"] == variant) & (table["slice"] == sl)]
-    cols = [c for c in ["baseline", "precision", "max_precision", "lift",
-                        "recall", "median_lead_trading_h", "n_alerts",
-                        "degenerate"] if c in view.columns]
-    st.dataframe(view[cols].sort_values("precision", ascending=False),
-                 width='stretch', hide_index=True)
+    view = view.sort_values("precision", ascending=False)
 
-    st.caption(
-        "`max_precision` is the ceiling, not a typo: the budget is SPENT, not "
-        "capped, so when it exceeds the number of events even a flawless "
-        "detector cannot reach 1.0. Read precision against it. **If a simple "
-        "baseline wins, it is shown winning** — that is the finding, not a "
-        "failure to hide.")
+    ui.section("Detector comparison",
+               "Precision at the fixed alert budget. `max_precision` is the "
+               "ceiling: the budget is SPENT, not capped, so when it exceeds "
+               "the number of events even a flawless detector cannot reach 1.0.")
+    show = pd.DataFrame({
+        "detector": view["baseline"],
+        "precision": view["precision"].map(lambda v: ui.pct(v, 3)),
+        "ceiling": view["max_precision"].map(lambda v: ui.pct(v, 2)),
+        "lift vs floor": view["lift"].map(lambda v: f"{v:.1f}×"),
+        "recall": view["recall"].map(lambda v: ui.pct(v, 1)),
+        "median lead": view["median_lead_trading_h"].map(
+            lambda v: "—" if pd.isna(v) else f"{v:.1f} h"),
+        "alerts": view["n_alerts"].map(ui.num),
+    })
+    st.dataframe(show, width="stretch", hide_index=True)
+    st.caption("**If a simple baseline wins, it is shown winning** — that is "
+               "the finding, not something to hide.")
 
-    st.subheader("Calibration")
+    ui.section("Calibration",
+               "When a detector says 70%, is it right about 70% of the time? A "
+               "detector can rank well and still be badly calibrated, which "
+               "matters when a human decides what to act on.")
+    st.dataframe(view[["baseline", "brier", "brier_skill_score", "ece"]],
+                 width="stretch", hide_index=True)
     st.caption(
-        "When a detector says 70%, is it right about 70% of the time? A system "
-        "can rank well and still be badly calibrated, which matters when a "
-        "human decides what to act on.")
-    cal = view[["baseline", "brier", "brier_skill_score", "ece"]].copy()
-    st.dataframe(cal, width='stretch', hide_index=True)
-    st.caption(
-        "**Blank is the honest entry, not a gap.** CUSUM and the volume "
-        "z-score emit scores that are not probabilities — the evaluation "
-        "contract says so, and scoring them with Brier or ECE would invent a "
-        "calibration they never claimed. A NEGATIVE Brier skill score means "
-        "the probabilities are worse than always predicting the base rate: "
-        "these models rank far better than they calibrate, and that is "
-        "reported rather than smoothed over.")
+        "**Blank is the honest entry, not a gap.** CUSUM and the volume z-score "
+        "emit scores that are **not probabilities** — the evaluation contract "
+        "says so — and scoring them with Brier or ECE would invent a "
+        "calibration they never claimed. A negative skill score means the "
+        "probabilities are worse than always predicting the base rate: these "
+        "models rank far better than they calibrate.")
 
-    st.subheader("Action distribution")
-    st.caption(
-        "WAIT versus FLAG. An always-WAIT policy is degenerate and shows here "
-        "as zero flagged hours — the column exists to make that visible "
-        "instead of letting it hide behind a flattering precision.")
-    acts = view[["baseline", "n_wait_hours", "n_flag_hours", "pct_hours_flagged",
-                 "pct_windows_alerted", "degenerate"]].copy()
-    st.dataframe(acts, width='stretch', hide_index=True)
-    st.caption(
-        "`pct_hours_flagged` never exceeds ~2% even for a busy detector, "
-        "because at most one FLAG is allowed per 48-hour window; "
-        "`pct_windows_alerted` is the interpretable one.")
+    ui.section("Action distribution",
+               "WAIT versus FLAG. A detector that cannot detect shows as "
+               "`degenerate` — either it never flags, or its scores are all "
+               "one value and so cannot rank.")
+    st.dataframe(view[["baseline", "n_wait_hours", "n_flag_hours",
+                       "pct_hours_flagged", "pct_windows_alerted", "degenerate"]],
+                 width="stretch", hide_index=True)
+    st.caption("`pct_hours_flagged` never exceeds ~2% even for a busy detector, "
+               "because at most one FLAG is allowed per 48-hour window; "
+               "`pct_windows_alerted` is the interpretable one.")
 
     with_news = data.comparison("p8-with-news-val.csv")
-    if not with_news.empty:
-        st.subheader("Phase 8 — does the news channel help?")
-        a = table[(table.t0_variant == variant) & (table.baseline == "gradient_boosting")]
+    without = data.comparison("p8-without-news-val.csv")
+    if not with_news.empty and not without.empty:
+        ui.section("Phase 8 — does the news channel help?",
+                   "Gradient boosting only: it is the sole baseline reading "
+                   "more than one column, so it is the only one that can carry "
+                   "this comparison. Validation, not test.")
+        a = without[(without.t0_variant == variant)
+                    & (without.baseline == "gradient_boosting")]
         b = with_news[(with_news.t0_variant == variant)
                       & (with_news.baseline == "gradient_boosting")]
         m = a.merge(b, on="slice", suffixes=("_without", "_with"))
-        m = m[m["slice"].isin(slices)]
-        m["precision_delta"] = m.precision_with - m.precision_without
-        m["lead_delta_h"] = (m.median_lead_trading_h_with
+        m = m[m["slice"].isin(["all", "scheduled", "unscheduled"])]
+        st.dataframe(pd.DataFrame({
+            "slice": m["slice"],
+            "without news": m["precision_without"].map(lambda v: ui.pct(v, 3)),
+            "with news": m["precision_with"].map(lambda v: ui.pct(v, 3)),
+            "change": ((m.precision_with / m.precision_without - 1)
+                       .map(lambda v: f"{v * 100:+.1f}%")),
+            "lead without": m["median_lead_trading_h_without"].map(lambda v: f"{v:.1f} h"),
+            "lead with": m["median_lead_trading_h_with"].map(lambda v: f"{v:.1f} h"),
+            "lead change": ((m.median_lead_trading_h_with
                              - m.median_lead_trading_h_without)
-        st.dataframe(
-            m[["slice", "precision_without", "precision_with",
-               "precision_delta", "median_lead_trading_h_without",
-               "median_lead_trading_h_with", "lead_delta_h"]],
-            width='stretch', hide_index=True)
-        st.caption(
-            "Gradient boosting only — it is the sole baseline that reads more "
-            "than one column, so it is the only one that can carry this "
-            "comparison. Lead time falls where precision rises: press coverage "
-            "accumulates close to the event, so it buys confidence at the cost "
-            "of warning. The delta is reported with its sign either way.")
+                            .map(lambda v: f"{v:+.1f} h")),
+        }), width="stretch", hide_index=True)
+        st.caption("Lead time falls where precision rises: press coverage "
+                   "accumulates close to the event, so it buys confidence at "
+                   "the cost of warning. The delta is reported with its sign "
+                   "either way.")
 
 
 # --------------------------------------------------------------------------
@@ -371,31 +429,40 @@ def evaluation() -> None:
 def monitor_log() -> None:
     df = data.alerts_with_outcomes()
     if df.empty:
-        st.info("The live alert log is empty.", icon="🗓️")
+        ui.note("The live alert log is empty.")
         return
 
     resolved, filed, rate = data.hit_rate(df)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Alerts logged", f"{len(df):,}")
-    c2.metric("Windows closed", f"{resolved:,}")
-    c3.metric("Followed by an 8-K", f"{filed:,}")
-    c4.metric("Hit rate", f"{rate:.1%}" if rate is not None else "—")
+    c = st.columns(4)
+    ui.stat(c[0], "Alerts logged", ui.num(len(df)), "append-only, hash-chained")
+    ui.stat(c[1], "Windows closed", ui.num(resolved), "48 trading hours elapsed")
+    ui.stat(c[2], "Followed by an 8-K", ui.num(filed), "within the window")
+    ui.stat(c[3], "Hit rate", ui.pct(rate, 1) if rate is not None else "—",
+            "of closed windows only")
 
-    st.markdown(ui.honest_rate(resolved, filed, rate))
-    st.info(
-        "**Append-only, and checkably so.** Every row carries a hash of itself "
-        "and of the row before it, so the log cannot be edited after the fact "
-        "without breaking the chain. Verify with "
-        "`python -m src.live.alertlog --verify`. The monitor re-scores a "
-        "rolling 48-bar window each run and suppresses re-detections by "
-        "natural key, so a repeated scan writes nothing.", icon="🔗")
+    ui.note(ui.honest_rate(resolved, filed, rate))
+    ui.note(
+        "<b>Append-only, and checkably so.</b> Every row carries a hash of "
+        "itself and of the row before it, so the log cannot be edited after the "
+        "fact without breaking the chain — verify with "
+        "<code>python -m src.live.alertlog --verify</code>. The monitor "
+        "re-scores a rolling 48-bar window each run and suppresses "
+        "re-detections by natural key, so a repeated scan writes nothing.")
 
-    show = df.copy()
-    show["flagged"] = show["ts_utc"].map(lambda t: ui.utc(t, False))
-    show["noticed"] = show["raised_utc"].map(lambda t: ui.utc(t, False))
-    show["outcome"] = show["filed"].map(
-        {1.0: "8-K followed", 0.0: "no 8-K in window"}).fillna("window open")
-    cols = ["flagged", "noticed", "ticker", "detector", "score", "threshold",
-            "outcome", "lead_trading_h"]
-    st.dataframe(show[[c for c in cols if c in show.columns]],
-                 width='stretch', hide_index=True)
+    ui.section("The log", "Bar time and notice time are separate columns on "
+                          "purpose: the monitor runs once a day after the "
+                          "close, so an alert is noticed later than the hour it "
+                          "describes.")
+    show = pd.DataFrame({
+        "bar (UTC)": df["ts_utc"].map(lambda t: ui.utc(t, False)),
+        "noticed (UTC)": df["raised_utc"].map(lambda t: ui.utc(t, False)),
+        "ticker": df["ticker"],
+        "detector": df["detector"],
+        "score": df["score"].map(lambda v: f"{v:.3f}"),
+        "threshold": df["threshold"].map(lambda v: f"{v:.3f}"),
+        "outcome": df["filed"].map({1.0: "8-K followed", 0.0: "no 8-K"})
+                              .fillna("window open"),
+        "lead (trading h)": df.get("lead_trading_h", pd.Series(index=df.index))
+                              .map(lambda v: "—" if pd.isna(v) else f"{v:.1f}"),
+    })
+    st.dataframe(show, width="stretch", hide_index=True, height=460)
