@@ -55,7 +55,8 @@ COLUMNS = [
     "threshold", "n_alerts", "precision", "max_precision", "recall",
     "median_lead_trading_h", "median_lead_wall_h", "n_missed",
     "n_wait_hours", "n_flag_hours", "pct_hours_flagged", "pct_windows_alerted",
-    "brier", "brier_skill_score", "ece", "degenerate",
+    "brier", "brier_skill_score", "ece", "calibration_base_rate",
+    "budget_exceeds_windows", "tie_spill_ratio", "degenerate",
 ]
 
 
@@ -122,7 +123,13 @@ def slice_frames(df: pd.DataFrame, split_by: list[str] | None = None
         # Item slices therefore overlap and do not sum to the total, exactly as
         # the scheduled/unscheduled slices do not once quiet windows are shared
         # — a per-item breakdown of multi-item filings cannot be a partition.
-        codes = positive["item_code"].dropna().map(_item_codes)
+        #
+        # Codes in `config.items.exclude` never become a slice — see
+        # `_item_codes`. Splitting the raw string would otherwise hand 9.01 and
+        # 5.07 their own rows despite the pipeline having filtered them out.
+        excluded = frozenset(load_config()["items"]["exclude"])
+        codes = positive["item_code"].dropna().map(
+            lambda raw: _item_codes(raw, excluded))
         for code in sorted({c for row in codes for c in row}):
             match = codes.map(lambda row, c=code: c in row)
             out[f"item {code}"] = with_quiet(positive[match.reindex(
@@ -131,9 +138,43 @@ def slice_frames(df: pd.DataFrame, split_by: list[str] | None = None
     return out
 
 
-def _item_codes(raw: str) -> frozenset[str]:
-    """The individual 8-K item codes inside one stored `item_code` value."""
-    return frozenset(part.strip() for part in str(raw).split(",") if part.strip())
+def _item_codes(raw: str, exclude: frozenset[str] | None = None) -> frozenset[str]:
+    """The individual 8-K item codes inside one stored `item_code` value,
+    minus the ones `config.items.exclude` drops.
+
+    The exclusion has to be applied HERE and not only in `pipeline/events.py`,
+    because splitting the stored string resurrects codes that filtering already
+    removed. `item_code` holds a filing's whole item list, and the excluded
+    codes ride along inside other filings' lists: 9.01 is an attachment marker,
+    not an event type, which is precisely why the plan (§5) excludes it — "it
+    would dominate the label distribution". It did. Before this, the per-item
+    breakdown carried an `item 9.01` row holding 869 of the 1,011 test
+    positives (86%) and an `item 5.07` row holding 29, and those two accounted
+    for 36 of the table's 378 rows — slices for event types this study
+    deliberately does not study.
+
+    Reading the same `items.exclude` list `pipeline/events.py` reads, rather
+    than naming the codes here, keeps the two from drifting apart.
+
+    The more thorough fix is to store the already-filtered list in the frame
+    instead of the raw items string. That is not done because the on-disk
+    `data/processed/features.parquet` carries the raw string, so the code and
+    the 31 MB shared artifact would disagree until it was regenerated — and
+    regenerating it is not a side effect a report-formatting fix gets to have.
+    Dropping the codes at the point of use gives the same table.
+
+    No surviving cell moves: an excluded code only ever ADDED a slice, never
+    changed the membership of another one, so the headline, scheduled and
+    unscheduled rows are untouched.
+
+    `exclude` is passed in by `slice_frames` so the config is read once for the
+    whole frame rather than once per positive row — this is mapped over every
+    positive, and on the real eval frame that is tens of thousands of calls.
+    """
+    excluded = (exclude if exclude is not None
+                else frozenset(load_config()["items"]["exclude"]))
+    return frozenset(part.strip() for part in str(raw).split(",")
+                     if part.strip() and part.strip() not in excluded)
 
 
 def evaluate(df: pd.DataFrame, threshold: float | None = None,
@@ -171,13 +212,24 @@ def evaluate(df: pd.DataFrame, threshold: float | None = None,
     try:
         cal = _calibration_summary(decided)
         brier, skill, ece = cal.brier, cal.brier_skill_score, cal.ece
+        # Carried because the `base_rate` column beside it is a DIFFERENT
+        # number and the row was silently mixing the two. `base_rate` is
+        # per-WINDOW (n_positive / n_windows); calibration is computed per
+        # (window, hour), which is the right unit for it — every hour of a
+        # positive window is labelled 1. A positive is a 48-bar episode while a
+        # quiet negative is a single bar, so on the real eval frame the two
+        # rates differ by about 42x: the `all` row read base_rate = 0.003187
+        # next to brier = 0.13306, and the skill score's baseline — the
+        # forecast Brier is scored against — was the unshown 13.3% per-hour
+        # rate. Both are now on the row, so neither has to be inferred.
+        cal_base_rate = cal.base_rate
     except ScoresAreNotProbabilities:
         # A threshold baseline. nan means "not applicable" here, not "failed";
         # `_calibration_summary` still refuses loudly when called directly.
         # Any OTHER error propagates. This used to be a substring match on the
         # message text, an invisible contract that a reword would have broken
         # silently; the named type makes it explicit on both sides.
-        brier = skill = ece = float("nan")
+        brier = skill = ece = cal_base_rate = float("nan")
 
     return {
         "n_windows": n_windows,
@@ -190,8 +242,43 @@ def evaluate(df: pd.DataFrame, threshold: float | None = None,
         # not capped, so when it exceeds the positives available the ceiling
         # is below 1.0 and precision must be read against it. 15% next to a
         # 21.2% ceiling is 71% of achievable; 15% alone reads as failure.
-        "max_precision": (min(n_positive, budget_n) / budget_n) if budget_n
-                         else float("nan"),
+        #
+        # The denominator is `len(alerted)` — the SAME one precision uses —
+        # and that is the whole point. It used to be `budget_n`, the allowance,
+        # and a ceiling computed over a different denominator than the number
+        # it caps is not a ceiling: 10 rows of the published Phase 10 table had
+        # precision ABOVE their own `max_precision`. Two ways the two
+        # denominators come apart, and the table showed both:
+        #
+        #   a slice        `budget_n` is sized from the slice's ticker-months,
+        #                  and a slice keeps every quiet window (see the module
+        #                  docstring) so its budget stays near the whole
+        #                  frame's — while the alerts it actually receives fall
+        #                  with its positives. `item 1.05`: 1 positive, 5,560
+        #                  alerts, precision 0.000180, "ceiling" 0.000167.
+        #
+        #   tie spill      ties at the budget boundary are admitted together,
+        #                  so `len(alerted)` can exceed the allowance.
+        #
+        # The honest question is "given that THIS many alerts went out, what is
+        # the best precision anyone could have had?", and the answer is that a
+        # flawless detector ranks every positive first and still has to spend
+        # the rest of its alerts on negatives. On the headline `all` rows where
+        # the alerts land exactly on the budget (cusum and volume_zscore, 5,996
+        # of 5,996) the value is UNCHANGED at 0.16861 — the headline does not
+        # move; only rows whose alert count already disagreed with the
+        # allowance do.
+        #
+        # `BudgetResult.max_precision` in metrics.py still divides by the
+        # allowance and so still has the incoherence. That is deliberate for
+        # now, not an oversight: it is pinned by
+        # `test_the_ceiling_is_incoherent_when_the_budget_exceeds_the_windows`,
+        # which asserts `max_precision < precision` in the budget-exceeds-
+        # windows regime — an assertion no coherent ceiling can satisfy. The
+        # report table is what gets published, so it is fixed here; changing
+        # the dataclass needs that test changed with it.
+        "max_precision": (min(n_positive, len(alerted)) / len(alerted))
+                         if len(alerted) else float("nan"),
         "recall": (tp / n_positive) if n_positive else float("nan"),
         "median_lead_trading_h": delay.median_trading_hours,
         "median_lead_wall_h": delay.median_wall_clock_hours,
@@ -199,6 +286,29 @@ def evaluate(df: pd.DataFrame, threshold: float | None = None,
         "brier": brier,
         "brier_skill_score": skill,
         "ece": ece,
+        "calibration_base_rate": cal_base_rate,
+        # `BudgetResult` has carried this since P1-08 and the report threw it
+        # away. In this regime the allowance is larger than the number of
+        # windows, so everything alerts, and precision collapses mechanically
+        # to the base rate whatever the detector does —
+        # `tests/test_baselines_volume_zscore.py` tells a reader this is the
+        # flag to check before quoting a ceiling, and until now the report they
+        # would be reading did not contain it. (No Phase 10 row entered it.)
+        "budget_exceeds_windows": bool(budget_n >= n_windows),
+        # How far the alerts actually issued overran the allowance. 1.0 means
+        # the budget was spent exactly; anything much above it means ties at
+        # the boundary were admitted in a block, so the alert set was settled
+        # by tie-breaking rather than by ranking. `always_quiet` in the Phase
+        # 10 run: 317,198 alerts against a 5,996 budget, a ratio of 53.
+        #
+        # This is a diagnostic column and NOT a widening of `degenerate`.
+        # `degenerate` is a published verdict, and teaching it to fire on tie
+        # spill could reclassify a legitimate detector that merely has a flat
+        # patch at the boundary. A column a reader can see does the same job
+        # with none of that risk: the signal was already being computed here
+        # and thrown away.
+        "tie_spill_ratio": (len(alerted) / budget_n) if budget_n
+                           else float("nan"),
         # TRUE when this row's precision is not evidence of detection ability.
         # Two distinct ways that happens, and the column needs both:
         #
@@ -257,8 +367,17 @@ def report_table(frames: Mapping[str, pd.DataFrame] | pd.DataFrame,
                     "row rather than reporting on zero data.", name, variant,
                 )
                 continue
+            # `max_alerts` has to travel with the threshold it produced.
+            # Dropping it here let `evaluate` re-derive its own budget from
+            # ticker-months x the config rate, so a caller asking for 400
+            # alerts got a threshold sized for 400 and a ceiling sized for
+            # thousands — at max_alerts=400 the table advertised a ceiling of
+            # 1.0 beside a precision of 0.167. Phase 10 never passed it
+            # (`compare.comparison_table` does not), so nothing published is
+            # affected; forwarding it means the two cannot disagree.
             rows.append({"slice": name, "t0_variant": variant,
-                         **evaluate(sliced, threshold=threshold)})
+                         **evaluate(sliced, threshold=threshold,
+                                    max_alerts=max_alerts)})
 
     return pd.DataFrame(rows, columns=COLUMNS)
 

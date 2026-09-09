@@ -214,26 +214,35 @@ def test_name_is_stable_for_the_report(cfg):
 # --------------------------------------------------------------------------
 # A regime worth naming
 # --------------------------------------------------------------------------
-def test_the_ceiling_is_incoherent_when_the_budget_exceeds_the_windows(cfg, frame):
-    """Documenting a real limit of `max_precision`, not asserting it is right.
+def test_the_ceiling_stays_coherent_when_the_budget_exceeds_the_windows(cfg, frame):
+    """This test used to pin an incoherence. The incoherence is now fixed.
 
-    `max_precision` is `min(n_positive, budget) / budget`. When the alert
-    budget is larger than the number of windows, that divides by an allowance
-    which cannot physically be spent, and the "ceiling" comes out BELOW the
-    precision actually achieved — which is incoherent, since nothing can beat
-    a ceiling.
+    `max_precision` was `min(n_positive, budget) / budget` — a ceiling measured
+    on the ALLOWANCE, sitting beside a precision measured on the alerts
+    actually ISSUED. When the budget is larger than the number of windows the
+    allowance cannot physically be spent, so the "ceiling" came out BELOW the
+    precision achieved, which is not something a ceiling can do. The earlier
+    version of this test asserted `max_precision < precision` and said in its
+    own docstring that it was documenting a real limit rather than claiming it
+    was right.
 
-    This is not hypothetical: the budget is sized from ticker-months, so on
-    the real validation slice it was 3,532 against 1,592 windows. The cause is
-    an evaluation frame that is too small rather than a fault in the metric —
-    the true eval population (every in-universe bar, P4-12) has far more
-    windows than the budget. `budget_exceeds_windows` is the flag that says
-    the regime was entered, and it is what a reader should check before
-    quoting a ceiling.
+    The denominator is now the realised alert count, the same one precision
+    uses, so the two are comparable by construction. In this regime everything
+    alerts and every positive is caught, so the detector reaches its ceiling
+    exactly — `max_precision == precision` — which is the honest reading of a
+    frame too small to spend its allowance.
+
+    The regime itself is real and still worth naming: the budget is sized from
+    ticker-months, so on the real validation slice it was 3,532 against 1,592
+    windows. `budget_exceeds_windows` is the flag that says it was entered,
+    and it is now carried into the report table rather than stopping at
+    `BudgetResult`.
     """
     out = VolumeZScore(cfg).predict(frame, threshold=2.5)
     r = precision_at_alert_budget(out)          # real budget, small frame
 
     assert r.budget_exceeds_windows is True
-    assert r.max_precision < r.precision        # the incoherence, pinned
     assert r.threshold == float("-inf")         # everything admitted
+    assert r.max_precision >= r.precision       # a ceiling behaves like one
+    assert r.max_precision == pytest.approx(r.precision), \
+        "everything alerted and every positive was caught, so the ceiling is met"

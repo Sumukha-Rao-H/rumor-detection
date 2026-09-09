@@ -264,3 +264,38 @@ def test_the_ceiling_is_one_when_positives_outnumber_the_budget():
     assert res.n_positive == 10
     assert res.budget_alerts == 3
     assert res.max_precision == pytest.approx(1.0)
+
+
+def test_a_caller_supplied_max_alerts_reaches_the_reported_ceiling(frame) -> None:
+    """`report_table(max_alerts=N)` used to size the threshold from N and the
+    ceiling from something else entirely.
+
+    N was passed to `precision_at_alert_budget` to pick the operating point and
+    then dropped on the way into `evaluate`, whose own budget fell back to
+    ticker-months x the config rate. At `max_alerts=400` the table advertised a
+    ceiling of 1.0 beside a precision of 0.167 — the ceiling was being divided
+    by an allowance thousands of alerts wide while precision was divided by the
+    400 alerts actually issued.
+
+    Phase 10 never passed `max_alerts` (`compare.comparison_table` does not),
+    so nothing published moved; this pins the two together so they cannot
+    disagree again.
+    """
+    from src.eval.report import report_table
+
+    n = 400
+    table = report_table(frame, max_alerts=n)
+    row = table.query("slice == 'all'").iloc[0]
+
+    assert row["n_alerts"] == n, "the operating point must spend exactly N"
+    assert row["max_precision"] == pytest.approx(
+        min(row["n_positive"], n) / n), (
+        "the ceiling must be sized from the same N the threshold was")
+    assert row["precision"] <= row["max_precision"] + 1e-12
+    # `tie_spill_ratio` divides the alerts issued by the allowance, so it is
+    # the column that still catches the dropped argument once the ceiling
+    # shares precision's denominator: N alerts against an allowance of N is 1,
+    # against the config-derived one it is not.
+    assert row["tie_spill_ratio"] == pytest.approx(1.0), (
+        "the row's allowance must be the N the caller asked for, not the one "
+        "ticker-months x the config rate would have produced")

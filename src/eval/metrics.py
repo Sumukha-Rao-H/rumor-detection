@@ -207,10 +207,23 @@ def precision_at_alert_budget(
         n_positive=n_positive,
         true_positives=tp,
         # A flawless detector ranks every positive above every negative, so it
-        # catches min(n_positive, budget) of them and still spends the whole
-        # budget. Guarded against a zero budget, which would otherwise make
-        # the ceiling nan and quietly disappear from the report.
-        max_precision=(min(n_positive, budget) / budget) if budget
+        # catches min(n_positive, realised) of them across the alerts it
+        # actually issued.
+        #
+        # The denominator is `realised`, not `budget`, and that distinction is
+        # the whole point. Dividing by the budget compares a ceiling measured
+        # on the ALLOWANCE against a precision measured on the alerts actually
+        # ISSUED, and those two numbers are routinely different: ties spend
+        # more than the allowance, and a small frame cannot spend it at all.
+        # The result was a "ceiling" that could sit below the precision beside
+        # it — ten rows of the Phase 10 table did exactly that. Nothing can
+        # beat a ceiling, so the number was not one.
+        #
+        # Sharing precision's denominator makes it answer the question a
+        # reader is actually asking: given this many alerts were issued, what
+        # is the best precision that could have come out of them? Guarded
+        # against issuing none, which would otherwise divide by zero.
+        max_precision=(min(n_positive, realised) / realised) if realised
                       else float("nan"),
         precision=(tp / realised) if realised else float("nan"),
         recall=(tp / n_positive) if n_positive else float("nan"),

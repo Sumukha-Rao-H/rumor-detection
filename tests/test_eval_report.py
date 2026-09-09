@@ -440,3 +440,227 @@ def test_a_varying_scorer_that_flags_is_not_degenerate(frame) -> None:
     lively["score"] = np.random.default_rng(0).random(len(lively))
     row = evaluate(lively)
     assert row["degenerate"] is False
+
+
+# --- the ceiling must actually be a ceiling ------------------------------
+
+
+def _one_rare_item_frame() -> pd.DataFrame:
+    """A frame shaped like the real evaluation set, in the one way that broke
+    the ceiling: thousands of quiet windows, few positives, and nearly all of
+    those positives concentrated in a single item code.
+
+    That shape matters because a slice keeps EVERY quiet window (see the module
+    docstring in `report.py`). The rare item's slice therefore has almost the
+    same ticker-months — and so almost the same budget — as the whole frame,
+    while receiving only the alerts its own handful of windows earn. In the
+    published Phase 10 table this was `item 1.05`: one positive, 5,560 alerts,
+    against a whole-frame budget of 5,996.
+    """
+    df = make_synthetic_predictions(**DENSE, signal_strength=2.0, seed=5).copy()
+    positives = df["t0_utc"].notna()
+    windows = sorted(df.loc[positives, "window_id"].unique())
+    # Every positive but one carries the common code; exactly one carries the
+    # rare one, mirroring the single-positive slice that broke.
+    rare, common = windows[0], windows[1:]
+    df.loc[df["window_id"] == rare, "item_code"] = "1.05"
+    df.loc[df["window_id"].isin(common), "item_code"] = "8.01"
+    return df
+
+
+def test_no_row_beats_its_own_ceiling() -> None:
+    """The invariant whose absence let the published table ship wrong.
+
+    `max_precision` is what a flawless detector could have scored on this row.
+    Nothing can beat it, so `precision <= max_precision` must hold on EVERY
+    row of EVERY table — and in `FINAL-test-evaluation.csv` it failed on 10,
+    all of them the one-positive `item 1.05` slice, reporting a precision of
+    0.000180 against a "ceiling" of 0.000167.
+
+    The cause was two denominators: precision divided by the alerts actually
+    issued, the ceiling by the budget the slice was allowed. A ceiling computed
+    over a different denominator than the number it caps is not a ceiling.
+    """
+    table = report_table(_one_rare_item_frame())
+
+    assert "item 1.05" in set(table["slice"]), "the rare-item slice must exist"
+    beaten = table[table["precision"] > table["max_precision"] + 1e-12]
+    assert beaten.empty, (
+        "these rows report a precision above their own ceiling:\n"
+        f"{beaten[['slice', 'n_positive', 'n_alerts', 'precision', 'max_precision']]}"
+    )
+
+
+def test_the_ceiling_shares_precisions_denominator(frame) -> None:
+    """Stated as arithmetic, so the two cannot drift apart again.
+
+    Given `n_alerts` alerts actually issued, a flawless detector spends the
+    first `min(n_positive, n_alerts)` of them on the positives and the rest,
+    unavoidably, on negatives.
+    """
+    table = report_table(frame)
+    for _, row in table.iterrows():
+        if row["n_alerts"] == 0:
+            continue
+        expected = min(row["n_positive"], row["n_alerts"]) / row["n_alerts"]
+        assert row["max_precision"] == pytest.approx(expected), row["slice"]
+
+
+def test_the_headline_row_is_unchanged_when_the_budget_is_spent_exactly(frame) -> None:
+    """The guard on the guard: where `n_alerts` lands exactly on the budget the
+    two denominators agree, so the fix above must move nothing.
+
+    This is the case the published headline is in — cusum and volume_zscore
+    both issued 5,996 alerts against a 5,996 budget — and their ceiling of
+    0.16861 has to stay where it is.
+    """
+    from src.eval.metrics import alert_budget
+    from src.eval.contract import validate_predictions
+
+    validated = validate_predictions(frame)
+    budget = alert_budget(validated)
+    row = report_table(frame).query("slice == 'all'").iloc[0]
+
+    assert row["n_alerts"] == budget, "fixture no longer exercises the exact case"
+    assert row["max_precision"] == pytest.approx(min(row["n_positive"], budget) / budget)
+
+
+# --- excluded item codes never become slices -----------------------------
+
+
+def test_no_slice_is_created_for_an_excluded_item_code() -> None:
+    """`config.items.exclude` drops 9.01 and 5.07, and splitting the stored
+    item string used to put them straight back.
+
+    9.01 is an attachment marker rather than an event type: the plan excludes
+    it precisely because "it would dominate the label distribution", and in the
+    published table it did — an `item 9.01` row held 869 of the 1,011 test
+    positives. The existing multi-item test uses "2.02,8.01", where neither
+    code is excluded, which is why this stayed invisible.
+    """
+    from src.utils.config import load_config
+
+    excluded = load_config()["items"]["exclude"]
+    assert "9.01" in excluded, "fixture assumes the plan's exclusion list"
+
+    rows = []
+    for wid, code, t0 in (("w-rides-along", "2.02,9.01", 1_000),
+                          ("w-plain", "2.02", 2_000),
+                          ("w-quiet", None, None)):
+        for i in range(3):
+            rows.append({
+                "window_id": wid, "ticker": "AAA", "ts_utc": 100 + i,
+                "score": 0.1 * i, "action": "WAIT",
+                "t0_utc": t0, "is_scheduled": None if t0 is None else True,
+                "item_code": code,
+            })
+    df = pd.DataFrame(rows)
+
+    out = slice_frames(df, split_by=["scheduled", "unscheduled", "item_code"])
+
+    assert "item 2.02" in out, "the surviving code must still get its slice"
+    for code in excluded:
+        assert f"item {code}" not in out, (
+            f"{code} is in config.items.exclude — the pipeline dropped it, so "
+            f"the report must not resurrect it as a slice")
+
+    positives = out["item 2.02"][out["item 2.02"]["t0_utc"].notna()]
+    assert set(positives["window_id"]) == {"w-rides-along", "w-plain"}, (
+        "dropping the excluded code must not drop the filing that carried it")
+
+
+# --- two base rates, two columns -----------------------------------------
+
+
+def _short_quiet_windows_frame() -> pd.DataFrame:
+    """Positives are multi-hour episodes, quiet windows are a single bar.
+
+    That is the real eval frame's shape (P4-12) and the reason the two base
+    rates diverge by ~42x there. The default synthetic frame gives every window
+    the same number of hours, which makes the window-level and per-hour rates
+    identical and hides the bug.
+    """
+    df = make_synthetic_predictions(**DENSE, signal_strength=2.0, seed=5)
+    quiet = df["t0_utc"].isna()
+    first_bar = df[quiet].groupby("window_id", sort=False).head(1)
+    out = pd.concat([df[~quiet], first_bar], ignore_index=True)
+    out["score"] = out["score"].rank(pct=True).astype("float64")
+    return out
+
+
+def test_calibration_base_rate_is_the_per_hour_rate_not_the_window_one() -> None:
+    """One row was carrying two different base rates under one name.
+
+    Calibration is computed per (window, hour) — every hour of a positive
+    window is labelled 1 — while the `base_rate` column is per WINDOW. On the
+    real frame a positive is a 48-bar episode and a negative a single bar, so
+    the `all` row read `base_rate = 0.003187` beside `brier = 0.13306`, whose
+    hidden baseline was the 13.3% per-hour rate. Both are now on the row.
+    """
+    df = _short_quiet_windows_frame()
+    table = report_table(df)
+    row = table.query("slice == 'all'").iloc[0]
+
+    assert "calibration_base_rate" in table.columns
+    # The per-hour rate: every hour of a positive window carries the label.
+    per_hour = float(df["t0_utc"].notna().mean())
+    assert row["calibration_base_rate"] == pytest.approx(per_hour)
+    # The per-window rate, which is what `base_rate` has always meant.
+    assert row["base_rate"] == pytest.approx(
+        row["n_positive"] / row["n_windows"])
+    assert row["calibration_base_rate"] > row["base_rate"] * 2, (
+        "the per-hour and per-window rates must be visibly different on a "
+        "frame whose positives are episodes and whose negatives are bars")
+
+
+# --- tie spill is visible ------------------------------------------------
+
+
+def test_tie_spill_ratio_separates_a_ranking_detector_from_a_tied_one(frame) -> None:
+    """`degenerate` misses the general case it was written for.
+
+    A detector whose scores cannot RANK has its alert set decided by
+    tie-breaking rather than by detection. A CUSUM statistic resets to exactly
+    0 whenever drift dominates, so thousands of windows can share the peak
+    score while `nunique()` is still in the thousands and `degenerate` reads
+    False. The signal was already being computed and discarded: alerts issued
+    far above the allowance IS tie spill. On `always_quiet` in the Phase 10 run
+    that ratio was 317,198 / 5,996 = 53.
+
+    Deliberately a diagnostic column and not a widening of `degenerate` —
+    `degenerate` is a published verdict, and firing it on a detector that
+    merely has a flat patch at the budget boundary would reclassify it wrongly.
+    """
+    ranked = evaluate(frame)
+    assert ranked["tie_spill_ratio"] == pytest.approx(1.0, abs=0.01), (
+        "distinct scores spend the budget exactly, so the ratio is 1")
+
+    flat = frame.copy()
+    flat["score"] = 0.0
+    tied = evaluate(flat)
+    assert tied["tie_spill_ratio"] > 10, (
+        "every window ties at the boundary, so the whole frame alerts and the "
+        "ratio must make that visible")
+    assert tied["n_alerts"] > ranked["n_alerts"]
+
+
+def test_tie_spill_does_not_change_the_degenerate_verdict(frame) -> None:
+    """The column is additive: it must not reclassify anything."""
+    assert evaluate(frame)["degenerate"] is False
+    assert evaluate(frame)["budget_exceeds_windows"] is False
+
+
+def test_budget_exceeds_windows_reaches_the_table() -> None:
+    """`BudgetResult` has carried this flag since P1-08 and the report threw it
+    away — while `tests/test_baselines_volume_zscore.py` tells readers it is
+    the thing to check before quoting a ceiling. In this regime the allowance
+    is bigger than the window count, everything alerts, and precision collapses
+    to the base rate whatever the detector does.
+    """
+    sparse = make_synthetic_predictions(n_positive=4, n_quiet=8, n_tickers=12,
+                                        span_days=300, signal_strength=2.0,
+                                        seed=17)
+    table = report_table(sparse)
+
+    assert table.query("slice == 'all'")["budget_exceeds_windows"].all()
+    assert (table["pct_windows_alerted"] == 1.0).all()

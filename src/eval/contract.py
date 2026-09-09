@@ -218,8 +218,20 @@ def actions_from_scores(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     not required to hand this a frame already sorted within each window, so
     the crossing is computed on a `ts_utc`-ordered view and the result is
     reassembled in the caller's original row order.
+
+    The index is reset, deliberately. The crossing is reassembled by index
+    label, and `Series.reindex` raises `ValueError: cannot reindex on an axis
+    with duplicate labels` the moment two rows share one. That is not an exotic
+    input: `validate_predictions` polices duplicate `(window_id, ts_utc)` pairs
+    and says nothing at all about the pandas index, and `report.slice_frames`
+    hands its `"all"` slice straight back to the caller with whatever index the
+    caller built — so a frame concatenated without `ignore_index=True` upstream
+    crashed here rather than being evaluated. Row ORDER is what the docstring
+    above promises and `reset_index(drop=True)` preserves it exactly; only the
+    labels change, and nothing downstream reads them (the metrics regroup by
+    `window_id`).
     """
-    out = df.copy()
+    out = df.reset_index(drop=True)
     chrono = out.sort_values(["window_id", "ts_utc"], kind="stable")
     crossed = chrono["score"] >= threshold
     first = crossed & ~crossed.groupby(chrono["window_id"]).cummax().groupby(

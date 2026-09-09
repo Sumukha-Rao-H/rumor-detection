@@ -274,6 +274,56 @@ def test_actions_from_scores_flags_nothing_when_threshold_unreachable(frame) -> 
     validate_predictions(out)
 
 
+def test_actions_from_scores_survives_a_frame_with_a_duplicated_index(frame) -> None:
+    """A duplicate index label is not a contract violation, so it must not
+    crash.
+
+    `validate_predictions` polices duplicate `(window_id, ts_utc)` pairs and
+    says nothing about the pandas index — nothing in the contract does. But the
+    crossing used to be reassembled with `Series.reindex`, which raises
+    `ValueError: cannot reindex on an axis with duplicate labels` the moment
+    two rows share a label. `report.slice_frames` hands its `"all"` slice back
+    with the caller's own index untouched, so any caller who built a frame by
+    concatenating without `ignore_index=True` hit this instead of getting an
+    evaluation.
+
+    The frame below is valid under every rule the contract enforces. It is
+    built the way the failing one was: two pieces concatenated without
+    `ignore_index=True`, so the labels repeat, and the windows are not in
+    `(window_id, ts_utc)` order, so reassembling the crossing is a real lookup
+    rather than an identity no-op. Windows need not be contiguous — the
+    contract's own ascent check is written to cope with that.
+    """
+    def piece(window_id: str, n_hours: int) -> pd.DataFrame:
+        return pd.DataFrame({
+            "window_id": pd.array([window_id] * n_hours, dtype="string"),
+            "ticker": pd.array(["TKR000"] * n_hours, dtype="string"),
+            "ts_utc": pd.array([100 + i * HOUR for i in range(n_hours)],
+                               dtype="Int64"),
+            "t0_utc": pd.array([pd.NA] * n_hours, dtype="Int64"),
+            "score": [float(i) for i in range(n_hours)],
+            "action": pd.array([WAIT] * n_hours, dtype="string"),
+            "is_scheduled": pd.array([pd.NA] * n_hours, dtype="boolean"),
+            "item_code": pd.array([pd.NA] * n_hours, dtype="string"),
+        })
+
+    # "w2" before "w1", and different lengths, so the chronological view is a
+    # genuine reordering of a duplicated index.
+    duplicated = pd.concat([piece("w2", 2), piece("w1", 3)])
+    assert duplicated.index.has_duplicates
+
+    out = actions_from_scores(duplicated, threshold=1.0)
+
+    assert len(out) == len(duplicated)
+    assert list(out["ts_utc"]) == list(duplicated["ts_utc"]), (
+        "row order must survive the index reset")
+    validate_predictions(out)
+    # And it decided exactly as it would have on a clean index.
+    clean = actions_from_scores(duplicated.reset_index(drop=True), threshold=1.0)
+    assert list(out["action"]) == list(clean["action"])
+    assert (out["action"] == FLAG).sum() == 2, "one first crossing per window"
+
+
 def test_synthetic_is_reproducible() -> None:
     a = make_synthetic_predictions(n_positive=3, n_quiet=3, seed=42)
     b = make_synthetic_predictions(n_positive=3, n_quiet=3, seed=42)
