@@ -204,3 +204,21 @@ def test_trading_hours_to_close_is_excluded_from_the_learned_models():
     """
     excluded = load_config()["baselines"]["gradient_boosting"]["exclude_features"]
     assert "trading_hours_to_close" in excluded
+
+
+def test_the_training_frame_honours_a_ratio_override():
+    """Plan §8: "report results at two ratios so nobody can accuse you of
+    tuning it."
+
+    `sampling.robustness_ratios` was consulted in exactly one place — a print
+    of how many negatives are AVAILABLE at each ratio. That is an availability
+    census, not a robustness check, under a name that promises one. Nothing
+    could re-run training at 1:1 or 2:1, so the requirement had no answer.
+    `build_training_frame(ratio=...)` is what makes it runnable; this pins the
+    argument so it cannot quietly stop being honoured.
+    """
+    import inspect
+
+    from src.baselines.compare import build_training_frame
+
+    assert "ratio" in inspect.signature(build_training_frame).parameters

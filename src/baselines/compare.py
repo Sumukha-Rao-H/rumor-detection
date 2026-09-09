@@ -64,13 +64,25 @@ def conform(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def build_training_frame(cfg: dict, conn) -> pd.DataFrame:
-    """Positives plus 3:1 sampled quiet windows, from the TRAIN split only.
+def build_training_frame(cfg: dict, conn,
+                         ratio: int | None = None) -> pd.DataFrame:
+    """Positives plus sampled quiet windows, from the TRAIN split only.
 
     Only gradient boosting needs this. `negatives_per_positive` is labelled
     "training only" in config for the reason P4-12 gives: fitted at the true
     0.46% base rate a model sees ~216 quiet rows per positive one and can reach
     99.5% accuracy by answering "quiet" forever.
+
+    `ratio` overrides `sampling.negatives_per_positive` for one call, which is
+    what makes plan §8's robustness check runnable: *"decide the sampling rule
+    in week 1, write it in config, and report results at two ratios so nobody
+    can accuse you of tuning it."* Until this argument existed,
+    `sampling.robustness_ratios` was consulted in exactly one place — a print
+    of how many negatives are AVAILABLE at each ratio — which is an
+    availability census, not a robustness check, under a name that promises
+    one. `draw` is seeded and nested (1:1 is a subset of 2:1 is a subset of
+    3:1), so the three frames are genuinely the same experiment at three
+    depths rather than three unrelated samples.
     """
     from src.pipeline import sampling
     from src.pipeline.features import build_quiet_matrix
@@ -84,7 +96,7 @@ def build_training_frame(cfg: dict, conn) -> pd.DataFrame:
     matrix = pd.read_parquet(matrix_path(cfg))
     positives = matrix[(matrix.ts_utc >= lo) & (matrix.ts_utc < hi)].copy()
 
-    ratio = cfg["sampling"]["negatives_per_positive"]
+    ratio = cfg["sampling"]["negatives_per_positive"] if ratio is None else int(ratio)
     candidates = sampling.all_candidates(cfg, conn)
     in_split = {t: a[(a >= lo) & (a < hi)] for t, a in candidates.items()}
     in_split = {t: a for t, a in in_split.items() if len(a)}
@@ -129,8 +141,11 @@ def run_baselines(cfg: dict, conn, frame: pd.DataFrame,
         gb = fitted_gb
         if gb is None:
             gb = GradientBoosting(cfg)
-            print("  fitting gradient boosting on the train split...")
-            gb.fit(build_training_frame(cfg, conn), conn=conn)
+            ratio = args.sampling_ratio or cfg["sampling"]["negatives_per_positive"]
+            print(f"  fitting gradient boosting on the train split "
+                  f"({ratio}:1 negatives)...")
+            gb.fit(build_training_frame(cfg, conn, ratio=args.sampling_ratio),
+                   conn=conn)
         models.append(gb)
 
     named: list[tuple[str, object]] = [(m.name, m) for m in models]
@@ -217,6 +232,14 @@ def main() -> None:
                     help="a P6-03 run directory; repeatable. Each seed gets "
                          "its own row — P6-05 found the policy's score is "
                          "dominated by the seed, and a mean would hide it.")
+    ap.add_argument("--sampling-ratio", type=int, default=None,
+                    help="negatives per positive for the gradient-boosting "
+                         "TRAINING frame, overriding "
+                         "sampling.negatives_per_positive. Plan §8 asks for "
+                         "results at sampling.robustness_ratios so nobody can "
+                         "accuse the ratio of being tuned; run this once per "
+                         "ratio and compare. Affects gradient boosting only — "
+                         "the other baselines never see a training frame.")
     args = ap.parse_args()
 
     cfg = load_config()
