@@ -422,6 +422,23 @@ baselines:
     # genuinely early. volume_zscore.min_wait_hours overrides this per baseline
     # where P5-03's tuning calls for it.
     min_wait_hours: 0
+  random_noise:
+    # The null. A scorer that reads nothing and draws a uniform score per hour.
+    #
+    # Added 2026-09-09 after a review found the evaluation frame gave a
+    # positive episode 48 bars and a quiet window one, while a window scores as
+    # the max over its rows — so a positive got 48 chances to cross the
+    # threshold and a quiet window got one, for the same single alert. Pure
+    # noise then measured 29.6x lift on the Phase 10 shape, beating every tuned
+    # detector in the table. `metrics.window_summary` now gives a quiet window
+    # the same span as an episode, and the null is back at ~1x.
+    #
+    # It stays in the table permanently. "The metric is fixed" is a claim, and
+    # this is the row that lets a reader check it instead of believing it.
+    #
+    # The seed should not matter: a null that moves with its seed has too few
+    # windows to say anything, and the spread across seeds is worth a glance.
+    seed: 42
   always_quiet:
     # The constant every hour is scored. The VALUE is arbitrary by
     # construction: a constant ranker is uninformative at any level, so
@@ -502,7 +519,20 @@ baselines:
     # 5.6x -> 10.7x). Both numbers are reported; see work-log entry 54.
     # Only gradient boosting is affected: the other baselines read volume only.
     # Set to [] to reproduce the contaminated result.
-    exclude_features: [days_since_last_8k, days_since_last_earnings]
+    # trading_hours_to_close added 2026-09-09. Same class of leak as the two
+    # above, but pointing the SAME way at evaluation rather than inverting,
+    # which is worse: the model is rewarded for learning it. A positive window
+    # is the 48 bars strictly before t0, and most 8-Ks are accepted after the
+    # close, so a positive's last bar is almost always the session's last bar.
+    # A negative's anchor is an arbitrary bar. Measured at each window's last
+    # bar, `trading_hours_to_close <= 1` holds for 83.96% of train positives
+    # against 22.41% of train negatives, and 84.6% vs 14.6% on the validation
+    # evaluation frame. On a length-symmetric frame, ranking by
+    # `-trading_hours_to_close` ALONE scores 5.67x lift with no detection
+    # ability whatever — three quarters of the tuned volume z-score's 7.47x.
+    # It encodes how the window was CUT, not what the market did.
+    exclude_features: [days_since_last_8k, days_since_last_earnings,
+                       trading_hours_to_close]
 
 # ------------------------------------------------------------
 # The live monitor (Phase 7)

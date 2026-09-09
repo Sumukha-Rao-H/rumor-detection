@@ -14,6 +14,7 @@ import pytest
 from src.baselines import AlwaysQuiet, CUSUM, VolumeZScore
 from src.baselines.compare import (REPORT_COLUMNS, comparison_table, conform,
                                    render)
+from src.eval.synthetic import make_synthetic_predictions
 from src.utils.config import load_config
 from src.utils.timeutils import date_str_to_ts
 
@@ -145,3 +146,61 @@ def test_conform_casts_to_the_contract_dtypes():
     assert frame["ts_utc"].dtype == "Int64"
     assert frame["t0_utc"].dtype == "Int64"
     assert frame["is_scheduled"].dtype == "boolean"
+
+
+# --------------------------------------------------------------------------
+# The null row
+# --------------------------------------------------------------------------
+
+def test_random_noise_is_in_the_comparison_table():
+    """It is the row a sceptical reader checks first.
+
+    On a frame whose two classes get the same number of chances, a scorer that
+    reads nothing must score the always-quiet floor. If this row ever reports
+    meaningfully more, the evaluation frame has a length asymmetry again and no
+    other row in the table means anything until that is explained.
+    """
+    from src.baselines import RandomNoise
+
+    assert RandomNoise(load_config()).name == "random_noise"
+
+
+def test_random_noise_scores_the_same_frame_the_same_way_twice():
+    """The table is built once per t0 variant. A null that moved between them
+    would read as a finding."""
+    from src.baselines import RandomNoise
+
+    cfg = load_config()
+    frame = make_synthetic_predictions(n_positive=5, n_quiet=40, seed=3)
+    first = RandomNoise(cfg).score(frame)
+    second = RandomNoise(cfg).score(frame)
+    pd.testing.assert_series_equal(first, second)
+
+
+def test_random_noise_reads_no_feature_column():
+    """So a difference between this row and a real baseline can never be blamed
+    on missing history."""
+    from src.baselines import RandomNoise
+
+    cfg = load_config()
+    frame = make_synthetic_predictions(n_positive=5, n_quiet=40, seed=3)
+    stripped = frame.copy()
+    for col in [c for c in stripped.columns if c not in
+                ("window_id", "ticker", "ts_utc", "t0_utc", "score", "action",
+                 "is_scheduled", "item_code")]:
+        stripped[col] = float("nan")
+    pd.testing.assert_series_equal(RandomNoise(cfg).score(frame),
+                                   RandomNoise(cfg).score(stripped))
+
+
+def test_trading_hours_to_close_is_excluded_from_the_learned_models():
+    """It encodes how the window was CUT, not what the market did.
+
+    A positive window ends at t0 and most 8-Ks land after the close, so
+    `trading_hours_to_close <= 1` holds for 84% of positives against ~15-22% of
+    negatives. Ranking by it alone scores 5.67x lift with no detection ability.
+    Unlike `days_since_last_8k` it points the same way at evaluation, so a model
+    that learns it is rewarded rather than merely misled.
+    """
+    excluded = load_config()["baselines"]["gradient_boosting"]["exclude_features"]
+    assert "trading_hours_to_close" in excluded

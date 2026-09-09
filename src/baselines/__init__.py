@@ -10,9 +10,10 @@ from src.baselines.cusum import (CUSUM, CusumOperatingPoint, cusum_statistic,
                                  tune_cusum)
 from src.baselines.gradient_boosting import (FEATURES, GradientBoosting,
                                              label_rows)
+from src.baselines.random_noise import RandomNoise
 from src.baselines.volume_zscore import OperatingPoint, VolumeZScore, tune
 
 __all__ = ["AlwaysQuiet", "Baseline", "CUSUM", "CusumOperatingPoint",
-           "FEATURES", "GradientBoosting", "OperatingPoint", "VolumeZScore",
-           "cusum_statistic", "label_rows", "tune", "tune_cusum",
-           "unscoreable_floor"]
+           "FEATURES", "GradientBoosting", "OperatingPoint", "RandomNoise",
+           "VolumeZScore", "cusum_statistic", "label_rows", "tune",
+           "tune_cusum", "unscoreable_floor"]

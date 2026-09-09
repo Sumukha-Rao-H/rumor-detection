@@ -209,6 +209,11 @@ def test_the_sampling_contaminated_features_are_excluded_by_default(cfg):
     model = GradientBoosting(cfg)
     assert "days_since_last_8k" not in model.features
     assert "days_since_last_earnings" not in model.features
+    # Added 2026-09-09: a positive window ends at t0 and most 8-Ks are accepted
+    # after the close, so this encodes how the window was CUT. Unlike the two
+    # above it points the SAME way at evaluation, so the model is rewarded for
+    # learning it rather than merely misled — 5.67x lift on its own.
+    assert "trading_hours_to_close" not in model.features
     assert "volume_z" in model.features
 
 
@@ -221,7 +226,14 @@ def test_the_exclusion_is_reproducible_both_ways(cfg, frame):
                               "exclude_features": []}}}
     model = GradientBoosting(contaminated)
     assert model.features == FEATURES
-    assert len(GradientBoosting(cfg).features) == len(FEATURES) - 2
+    # Counted from the config's own list rather than hardcoded, so adding an
+    # exclusion is a config decision and not also a test edit — the property
+    # under test is "every excluded column is gone and nothing else is", not
+    # how many there happen to be today.
+    excluded = cfg["baselines"]["gradient_boosting"]["exclude_features"]
+    kept = GradientBoosting(cfg).features
+    assert set(kept) == set(FEATURES) - set(excluded)
+    assert len(kept) == len(FEATURES) - len(excluded)
     # and it still trains and scores with the full set
     out = model.fit(frame).predict(frame, threshold=0.5)
     assert out["score"].between(0.0, 1.0).all()

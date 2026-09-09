@@ -34,6 +34,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.baselines.always_quiet import AlwaysQuiet
+from src.baselines.random_noise import RandomNoise
 from src.baselines.cusum import CUSUM
 from src.baselines.gradient_boosting import GradientBoosting
 from src.baselines.volume_zscore import VolumeZScore
@@ -113,7 +114,14 @@ def run_baselines(cfg: dict, conn, frame: pd.DataFrame,
     policy's score is dominated by its seed — a mean would hide exactly the
     thing the reader needs to see.
     """
-    models: list = [AlwaysQuiet(cfg), VolumeZScore(cfg), CUSUM(cfg)]
+    # RandomNoise is not decoration. It is the null: on a frame whose two
+    # classes get the same number of chances it must score the always-quiet
+    # floor, and if it ever reports meaningfully more, the frame has
+    # developed a length asymmetry again and no other row here means
+    # anything until that is explained. Cheap to carry, and it is the one
+    # row a sceptical reader can check without trusting any of the others.
+    models: list = [AlwaysQuiet(cfg), RandomNoise(cfg), VolumeZScore(cfg),
+                    CUSUM(cfg)]
     if not skip_gb:
         # The training frame does not depend on which t0 variant labels the
         # EVALUATION set, so a caller sweeping variants fits once and passes

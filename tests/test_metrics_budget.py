@@ -13,7 +13,9 @@ from dataclasses import fields
 import pandas as pd
 import pytest
 
-from src.eval.contract import empty_frame
+import numpy as np
+
+from src.eval.contract import WAIT, conform, empty_frame
 from src.eval.metrics import (
     BudgetResult,
     accuracy,
@@ -22,9 +24,13 @@ from src.eval.metrics import (
     window_summary,
 )
 from src.eval.synthetic import make_synthetic_predictions
+from src.utils.config import load_config
+from src.utils.timeutils import date_str_to_ts
 
 # A frame dense enough that the budget is a real constraint: with the sparse
 # defaults the allowance exceeds the window count and every window alerts.
+HOUR = 3600
+
 DENSE = dict(n_positive=40, n_quiet=1500, n_tickers=8, span_days=180)
 
 
@@ -299,3 +305,104 @@ def test_a_caller_supplied_max_alerts_reaches_the_reported_ceiling(frame) -> Non
     assert row["tie_spill_ratio"] == pytest.approx(1.0), (
         "the row's allowance must be the N the caller asked for, not the one "
         "ticker-months x the config rate would have produced")
+
+
+# --------------------------------------------------------------------------
+# The null: a scorer with no information must score chance
+#
+# `test_no_signal_gives_chance_level_precision` above checks this, but only on
+# `synthetic.py`'s frames, where BOTH classes are `horizon` rows long. The real
+# evaluation frame is not that shape: `evalset.build_eval_frame` gives a
+# positive 48 bars and a quiet window a SINGLE bar. A plain max-per-window then
+# hands a positive 48 independent chances to cross the threshold and a quiet
+# window one, at the same one-alert cost — so window LENGTH decides the
+# ranking, not detection.
+#
+# Measured on the Phase 10 shape before the fix, pure random noise reached
+# precision 0.0943 and 29.6x lift, beating every tuned detector in the final
+# table. These tests build the asymmetric shape on purpose, because the
+# symmetric fixtures above cannot see it.
+# --------------------------------------------------------------------------
+
+def _asymmetric_frame(seed: int, n_positive: int = 200,
+                      n_quiet_per_ticker: int = 2000,
+                      n_tickers: int = 12) -> pd.DataFrame:
+    """The real frame's shape: 48-bar episodes, one-bar quiet windows."""
+    horizon = load_config()["decision"]["horizon_hours"]
+    rng = np.random.default_rng(seed)
+    base = date_str_to_ts("2025-09-01")
+    tickers = [f"TKR{i:02d}" for i in range(n_tickers)]
+    blocks = []
+
+    for i in range(n_positive):
+        t0 = base + int(rng.integers(horizon, 20_000)) * HOUR
+        ts = t0 - np.arange(horizon, 0, -1) * HOUR
+        blocks.append(pd.DataFrame({
+            "window_id": f"pos-{i:04d}", "ticker": tickers[i % n_tickers],
+            "ts_utc": ts, "t0_utc": t0, "score": rng.normal(size=horizon),
+            "action": WAIT, "is_scheduled": True, "item_code": "8.01"}))
+
+    for tkr in tickers:
+        ts = base + 40_000 * HOUR + np.arange(n_quiet_per_ticker) * HOUR
+        blocks.append(pd.DataFrame({
+            "window_id": [f"bar:{tkr}:{t}" for t in ts], "ticker": tkr,
+            "ts_utc": ts, "t0_utc": pd.NA,
+            "score": rng.normal(size=n_quiet_per_ticker),
+            "action": WAIT, "is_scheduled": pd.NA, "item_code": pd.NA}))
+
+    return conform(pd.concat(blocks, ignore_index=True))
+
+
+def test_pure_noise_scores_chance_on_the_real_asymmetric_frame() -> None:
+    """THE null. Averaged over seeds, a scorer that knows nothing must land on
+    the base rate — on the frame shape the project actually evaluates, not only
+    on the symmetric synthetic one.
+
+    Before quiet windows were given the same span as an episode, this measured
+    32.7x on exactly this frame.
+    """
+    lifts = []
+    for seed in range(6):
+        r = precision_at_alert_budget(_asymmetric_frame(seed))
+        lifts.append(r.precision / r.base_rate)
+    mean_lift = float(np.mean(lifts))
+    assert 0.5 <= mean_lift <= 2.0, (
+        f"pure noise scored {mean_lift:.2f}x on the asymmetric frame — window "
+        f"length is deciding the ranking again")
+
+
+def test_a_quiet_window_gets_the_same_span_as_an_episode() -> None:
+    """The mechanism behind the null, pinned directly.
+
+    A quiet bar whose own score is low, but which sits just after a high-
+    scoring quiet bar on the same ticker, must inherit that peak — an episode
+    48 bars long is judged on its best hour, so a quiet window has to be too.
+    """
+    horizon = load_config()["decision"]["horizon_hours"]
+    base = date_str_to_ts("2025-09-01")
+    t0 = base + 500 * HOUR
+    pos = pd.DataFrame({
+        "window_id": "pos-0", "ticker": "AAA",
+        "ts_utc": t0 - np.arange(horizon, 0, -1) * HOUR, "t0_utc": t0,
+        "score": 0.0, "action": WAIT, "is_scheduled": True, "item_code": "8.01"})
+    quiet_ts = base + 900 * HOUR + np.arange(3) * HOUR
+    quiet = pd.DataFrame({
+        "window_id": [f"bar:AAA:{t}" for t in quiet_ts], "ticker": "AAA",
+        "ts_utc": quiet_ts, "t0_utc": pd.NA, "score": [9.0, 0.0, 0.0],
+        "action": WAIT, "is_scheduled": pd.NA, "item_code": pd.NA})
+
+    peaks = window_summary(conform(pd.concat([pos, quiet], ignore_index=True)))
+    later = peaks.loc[[f"bar:AAA:{t}" for t in quiet_ts[1:]], "peak_score"]
+    assert (later == 9.0).all(), (
+        "a quiet bar within the horizon of a spike must carry that spike, or "
+        "it is being judged on one hour while episodes are judged on 48")
+
+
+def test_a_frame_whose_classes_already_match_is_left_alone() -> None:
+    """The extension must be a no-op where there is no asymmetry to correct —
+    `synthetic.py` builds both classes `horizon` rows long, and the hand-built
+    frames above build both one row long."""
+    df = make_synthetic_predictions(**DENSE, signal_strength=2.0, seed=5)
+    direct = df.groupby("window_id", sort=False)["score"].max()
+    pd.testing.assert_series_equal(
+        window_summary(df)["peak_score"], direct, check_names=False)
