@@ -37,7 +37,8 @@ import numpy as np
 import pandas as pd
 
 from src.utils.config import load_config
-from src.utils.timeutils import next_market_close, trading_hours_between
+from src.utils.timeutils import (get_market_calendar, next_market_close,
+                                 trading_hours_between)
 
 log = logging.getLogger(__name__)
 
@@ -157,7 +158,14 @@ def realised_volatility(frame: pd.DataFrame,
     cfg = cfg or load_config()
     window = cfg["features"]["volatility_window_h"]
     _assert_sorted(frame.index, "frame index")
-    one_bar = frame["close"].pct_change(1)
+    # `.where(shift(1) > 0)` for the same reason `returns` and
+    # `benchmark_relative` carry it: a zero or negative prior close makes
+    # `pct_change` produce `inf`, and an `inf` inside a rolling std poisons the
+    # next `window` rows as NaN rather than as inf — so it would slip past
+    # `print_matrix_report`'s inf assertion and be explained away by its NaN
+    # table as ordinary warm-up. The frozen snapshot has no such bars today;
+    # this keeps the three return builders honest about the same edge.
+    one_bar = frame["close"].pct_change(1).where(frame["close"].shift(1) > 0)
     return pd.DataFrame(
         {"volatility": one_bar.rolling(window, min_periods=window).std()},
         index=frame.index,
@@ -237,8 +245,18 @@ def _hours_to_close(ts_utc: int, calendar: str) -> float:
     pre-open bar reports a full session ahead of it. A timestamp outside the
     exchange calendar raises, by P1-03's design — a silent fallback would let
     the Phase 7 live monitor conclude the market is permanently shut.
+
+    `calendar` is resolved and passed through, not merely used as a cache key.
+    It used to be the latter only: the body called both helpers with no
+    calendar, so they re-read `market.calendar` from config and a
+    caller-supplied value was silently discarded — `XNYS`, `XLON` and the
+    literal string `"NOT-A-CALENDAR"` all returned the XNYS answer. No number
+    was wrong (config is XNYS and nothing overrides it), but a typo in
+    `market.calendar` passed through a cfg produced plausible numbers instead
+    of an error, and `_session_bounds`' lunch-break refusal could never fire.
     """
-    return trading_hours_between(ts_utc, next_market_close(ts_utc))
+    cal = get_market_calendar(calendar)
+    return trading_hours_between(ts_utc, next_market_close(ts_utc, cal), cal)
 
 
 def _days_since(index: pd.Index, event_times: np.ndarray) -> pd.Series:

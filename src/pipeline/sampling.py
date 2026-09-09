@@ -242,10 +242,18 @@ def report(cfg: dict, conn, ratio: int | None = None) -> dict:
     # returns a plausible-looking number (1,496 tickers x ~3.4 chars = 5,050)
     # that is not the quantity at all.
     available = sum(len(v) for v in candidates.values())
+    # Bounded to the study window, like `eval_decision_points` above. Without
+    # the bound this counted the ~210,000 bars the frozen snapshot deliberately
+    # carries PAST the window end, so `report()` printed a per-bar rate ~9%
+    # below the `base_rate` printed a few lines away from it — two numbers that
+    # read as the same quantity and were not.
     total_bars = conn.execute(
-        "SELECT COUNT(*) FROM bars WHERE interval = ? AND ticker IN "
+        "SELECT COUNT(*) FROM bars WHERE interval = ? "
+        "AND ts_utc BETWEEN ? AND ? AND ticker IN "
         "(SELECT ticker FROM companies WHERE in_universe = 1)",
-        (cfg["market"]["interval"],)).fetchone()[0]
+        (cfg["market"]["interval"],
+         date_str_to_ts(cfg["study_window"]["start"]),
+         date_str_to_ts(cfg["study_window"]["end"]))).fetchone()[0]
 
     wanted = positives * ratio
     return {"positives": positives, "available": available,

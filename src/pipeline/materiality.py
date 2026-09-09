@@ -282,7 +282,12 @@ def print_report(cfg: dict, conn) -> None:
     print(f"  USABLE          : {len(usable):,}  ({len(usable)/len(rows):.1%} of all events)")
 
     if usable:
-        sched = sum(r["is_scheduled"] for r in usable)
+        # `or 0`, matching `events.census` and `events.split_reasons`.
+        # `is_scheduled` is NULL until `events.py` has run, and this module
+        # sets `usable = 1` without consulting it — so `t0 --build` followed
+        # straight by `materiality` (skipping `events`) printed six lines of
+        # report and then died on `int + NoneType`.
+        sched = sum(r["is_scheduled"] or 0 for r in usable)
         print(f"\nusable, split as every headline number must be:")
         print(f"  scheduled   : {sched:,}  ({sched/len(usable):.1%})")
         print(f"  unscheduled : {len(usable)-sched:,}  "

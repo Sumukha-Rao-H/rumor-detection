@@ -126,3 +126,31 @@ def test_including_the_current_return_is_deliberate(cfg):
     shifted = (frame["close"].pct_change(1).shift(1)
                .rolling(w, min_periods=w).std().iloc[-1])
     assert ours > shifted        # the final move is counted, as intended
+
+
+def test_a_negative_close_gives_no_volatility_rather_than_a_plausible_one():
+    """`returns` and `benchmark_relative` both guard against a non-positive
+    prior close; this builder did not.
+
+    A ZERO close turns out not to matter — `pct_change` gives `inf`, and an
+    `inf` inside a rolling std comes back as NaN anyway, so guarded and
+    unguarded agree exactly. A NEGATIVE close is the case that bites: the
+    percentage change from a negative price is a finite number, so the
+    unguarded builder produced a perfectly plausible volatility (1.96 on the
+    fixture below) out of a price that cannot exist, and nothing downstream
+    could tell it from a real one.
+
+    The frozen snapshot has no such bars, so this is a guard against a future
+    feed rather than a live defect — but it is the same guard the two sibling
+    builders already carry, and the asymmetry was the actual finding.
+    """
+    window = load_config()["features"]["volatility_window_h"]
+    closes = list(walk(400, 0.01))
+    closes[200] = -5.0
+    out = realised_volatility(bars(closes))["volatility"]
+
+    assert not np.isinf(out).any()
+    assert np.isnan(out.iloc[201]), (
+        "a return measured from a negative price must be undefined, not a "
+        "finite number that looks like a real reading")
+    assert out.iloc[201 + window:].notna().all(), "and only those are blanked"

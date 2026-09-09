@@ -142,6 +142,25 @@ items:
   unscheduled_focus: ["1.01", "5.02", "8.01", "2.03", "7.01", "1.03", "2.01",
                       "4.01", "4.02", "5.01"]
 
+# ------------------------------------------------------------
+# Event construction (src/pipeline/t0.py)
+# ------------------------------------------------------------
+events:
+  # The credibility ceiling on articles the t0 correction will accept, matching
+  # `news.source_tiers` below. Added 2026-09-09: this was a Python default
+  # repeated across five signatures in `t0.py` plus one `args.tier or 2`, which
+  # is a hardcoded threshold under rule 9 — and the comment on
+  # `features.news_max_tier` already pointed here, at `events:t0_max_tier`, as
+  # though the key existed. It did not; it existed only as a `meta`-table
+  # provenance string. So changing `features.news_max_tier` silently did NOT
+  # move the t0 ceiling with it, and Phase 8's ablation would then have been
+  # measuring the gap between two whitelists rather than the news channel —
+  # exactly the failure that comment exists to prevent.
+  #
+  # 2 is the value every stored build used; `meta` records it, so this changes
+  # nothing that has already been computed.
+  t0_max_tier: 2
+
 # The positive-count census (P4-05). Thresholds live here, not in source.
 census:
   # Issue 28: events are not announcements. Reported at several gaps because
@@ -157,7 +176,12 @@ materiality:
   # this, routine dividend declarations and credit-facility amendments become
   # "positives" and the target is mostly noise.
   window_hours: 24                 # measured from t0 forward
-  min_abs_return: 0.03             # |return| vs the last pre-t0 close
+  # |return| measured from the last price strictly BEFORE t0 to the price
+  # after the announcement. "The last pre-t0 close" is what this said until
+  # 2026-09-09 and it was wrong: when t0 falls mid-bar the straddling bar's
+  # OPEN is used, because that bar's close is already contaminated by the
+  # announcement. Fixing that is what moved the usable count by -154.
+  min_abs_return: 0.03
   benchmark_relative: true         # subtract the benchmark's move over the same span
 
 # ------------------------------------------------------------
@@ -325,7 +349,8 @@ features:
   # window's coverage count is measured over exactly the period that made it
   # quiet.
   news_windows_h: [24, 168]
-  # Same credibility ceiling as the t0 correction (`events:t0_max_tier`). A
+  # Same credibility ceiling as the t0 correction — `events.t0_max_tier`,
+  # which is now a real key above rather than a name this comment invented. A
   # coverage feature that counted sources the t0 rule rejects would make the
   # ablation measure the gap between two whitelists, not the news channel.
   news_max_tier: 2

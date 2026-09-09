@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.utils.timeutils import date_str_to_ts
+
 from src.pipeline.features import context_signals
 from src.utils.config import load_config
 from src.utils.timeutils import iso_utc_to_ts
@@ -197,3 +199,22 @@ def test_context_signals_pass_the_leakage_detector(cfg):
     filings = np.array([MID - 5 * DAY])
     assert_no_lookahead(lambda f: context_signals(f, filings, cfg=cfg),
                         bars(stamps))
+
+
+def test_hours_to_close_honours_the_calendar_it_is_given():
+    """The argument used to be a cache key and nothing else.
+
+    `_hours_to_close` called both helpers with no calendar, so they re-read
+    `market.calendar` from config and a caller-supplied value was silently
+    discarded — XNYS, XLON and the literal string "NOT-A-CALENDAR" all returned
+    the XNYS answer. Nothing was wrong in production (config is XNYS and no
+    caller overrides it), but a typo in `market.calendar` passed through a cfg
+    produced plausible numbers instead of an error.
+    """
+    from src.pipeline.features import _hours_to_close
+
+    ts = date_str_to_ts("2025-09-03") + 15 * 3600      # inside both sessions
+    assert _hours_to_close(ts, "XNYS") != _hours_to_close(ts, "XLON")
+
+    with pytest.raises(Exception):
+        _hours_to_close(ts, "NOT-A-CALENDAR")

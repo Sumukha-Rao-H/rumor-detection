@@ -124,12 +124,16 @@ def match_filing(cfg: dict, conn, ticker: str, acceptance_utc: int,
       `no_news_in_lookback`  the ticker is covered, nothing landed in the
                              window — the intended, uninteresting baseline.
       `no_news_for_ticker`   nothing is stored for this ticker at all. That is
-                             a COVERAGE HOLE, not a measurement: it is also
-                             exactly how a lost article shows up here (news is
-                             keyed on url alone, so an article first stored
-                             under another ticker is invisible to this query).
-                             Counted separately so it reads as a defect rather
+                             a COVERAGE HOLE, not a measurement, so it is
+                             counted separately — it reads as a defect rather
                              than as a normal fallback.
+                             (It USED to double as the symptom of a lost
+                             article, back when `news` was keyed on url alone
+                             and a story first stored under another ticker was
+                             invisible here. The key is `(url, ticker)` now and
+                             36,836 URLs in the database are genuinely shared
+                             across tickers, so that failure mode is gone and
+                             this reason means only what it says.)
     """
     lo, hi = lookback_window(cfg, acceptance_utc)
     news_utc = db.earliest_news_ts(conn, ticker, lo, hi, max_tier=max_tier)
@@ -509,7 +513,12 @@ def main() -> None:
                         format="%(asctime)s [%(levelname)s] %(message)s")
     cfg = load_config()
     conn = db.get_conn(cfg["paths"]["db"])
-    tier = None if args.tier == "any" else int(args.tier or 2)
+    # The default comes from config, not from a literal repeated across five
+    # signatures. `--tier` still overrides it, and `--tier any` still means no
+    # ceiling; the function defaults below stay as they are so no test or
+    # caller changes behaviour.
+    tier = (None if args.tier == "any"
+            else int(args.tier if args.tier else cfg["events"]["t0_max_tier"]))
     if args.build:
         write_events(cfg, conn, max_tier=tier)
         stored_gap_report(cfg, conn)
