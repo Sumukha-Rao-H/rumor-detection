@@ -144,7 +144,14 @@ class EdgarClient:
         for attempt in range(1, self.max_retries + 1):
             self.limiter.wait()  # before every attempt, retries included
             try:
-                resp = self.session.get(url, timeout=30)
+                # Redirects are NOT followed. requests would chase the chain
+                # inside this one call, and those extra hops never pass
+                # `self.limiter` — so a single redirect momentarily doubles the
+                # request rate the config promised SEC (rule 10). A redirect
+                # off data.sec.gov is also the documented failure shape here:
+                # the body at the far end is the rate-threshold page, and
+                # following it would hand us an HTTP 200 carrying nothing.
+                resp = self.session.get(url, timeout=30, allow_redirects=False)
             except requests.RequestException as exc:
                 log.warning("EDGAR request failed (%d/%d) for %s: %s",
                             attempt, self.max_retries, url, exc)
@@ -156,6 +163,20 @@ class EdgarClient:
                             resp.status_code, attempt, self.max_retries, url)
                 backoff.sleep(f"HTTP {resp.status_code} from {url}")
                 continue
+
+            if 300 <= resp.status_code < 400:
+                # Named separately from the generic non-200 below because the
+                # destination is the whole diagnosis: a hop to an SEC error or
+                # rate-threshold page looks nothing like a hop to a moved JSON
+                # file, and the bare status code cannot tell them apart.
+                location = (getattr(resp, "headers", None) or {}).get(
+                    "Location", "no Location header")
+                raise EdgarRequestError(
+                    f"HTTP {resp.status_code} redirect from EDGAR for {url} "
+                    f"-> {location} — not followed, because the extra hop is "
+                    f"not paced by the rate limiter and a redirect body is "
+                    f"the classic 200-carrying-nothing failure"
+                )
 
             if resp.status_code != 200:
                 # 404 and 403 are facts about the URL. Retrying wastes budget.
@@ -566,21 +587,53 @@ def filing_rows(cfg: dict, records: list[dict], cik: str,
     return rows
 
 
+def page_selection_floor_ts(cfg: dict) -> int:
+    """The oldest filing date a collection run has to reach back to.
+
+    NOT `study_window.start`, deliberately. `filings` is read by two things
+    with different appetites: the study itself, which only cares about the
+    window, and `src/pipeline/universe.py`, whose `require_prior_8k` rule keeps
+    a company only if it filed an 8-K in
+    `[start - universe.prior_8k_lookback_days, start)` — a year of history
+    strictly BEFORE the window.
+
+    Fetching only the window would leave that year unfetched for the heaviest
+    filers, whose `filings.recent` block holds barely a few weeks. Their prior
+    8-Ks live in older-filings pages nobody asked for, so `classify` sees no
+    prior 8-K and drops them: measured against the cached submissions payloads,
+    that silently removes JPM, MS, C, GS, BAC, BLK and WFC — the seven largest
+    US financials — from the universe, with no error anywhere.
+
+    The floor is widened; the window is not. `pages_to_fetch` selects a few
+    extra pages (11 for JPMorgan, none for ~6,100 other companies) and every
+    downstream in-window filter is untouched. Do not "tidy" this back to
+    `study_window.start`: the two consumers of this table genuinely need
+    different spans, and the wider one has to win.
+    """
+    return (date_str_to_ts(cfg["study_window"]["start"])
+            - cfg["universe"]["prior_8k_lookback_days"] * 86400)
+
+
 def collect_company(cfg: dict, conn, client: EdgarClient, cik: str,
-                    ticker: str | None, force: bool = False) -> tuple[int, int]:
+                    ticker: str | None,
+                    force: bool = False) -> tuple[int, int, int]:
     """Fetch one company's submissions and store its 8-K rows.
 
-    Returns `(records fetched, new rows)`. The record count is what the
-    run-level guard watches: a company with no 8-Ks is ordinary, but a company
-    with no records at all means the endpoint gave us nothing.
+    Returns `(records fetched, 8-K rows parsed, new rows)`. All three are what
+    the run-level guard watches, and they mean different things: a company with
+    no 8-Ks is ordinary, a company with no records at all means the endpoint
+    gave us nothing, and rows-parsed-but-none-new just means the table was
+    already complete.
     """
-    records = fetch_company_filings(cfg, client, cik, force=force)
+    records = fetch_company_filings(cfg, client, cik,
+                                    since_ts=page_selection_floor_ts(cfg),
+                                    force=force)
     rows = filing_rows(cfg, records, cik, ticker)
     new = db.upsert_filings(conn, rows)
     log.info("%s (%s): %d records fetched, %d %s rows, %d new",
              ticker or "?", cik, len(records), len(rows),
              "/".join(cfg["edgar"]["forms"]), new)
-    return len(records), new
+    return len(records), len(rows), new
 
 
 # --------------------------------------------------------------------------
@@ -629,14 +682,15 @@ def collect_many(cfg: dict, conn, client: EdgarClient | None = None,
         log.info("resume: skipping %d companies already collected",
                  sum(1 for c in companies if c["cik"] in skip))
 
-    total_records = total_new = failed = attempted = 0
+    total_records = total_forms = total_new = failed = attempted = 0
     for company in companies:
         cik, ticker = company["cik"], company["ticker"]
         if cik in skip:
             continue
         attempted += 1
         try:
-            records, new = collect_company(cfg, conn, client, cik, ticker, force=force)
+            records, forms, new = collect_company(cfg, conn, client, cik,
+                                                  ticker, force=force)
         except Exception as exc:
             failed += 1
             log.exception("failed to collect %s (%s) — continuing", ticker, cik)
@@ -649,21 +703,30 @@ def collect_many(cfg: dict, conn, client: EdgarClient | None = None,
         db.set_fetch_state(conn, FETCH_SOURCE, cik, "ok",
                            records=records, rows_written=new)
         total_records += records
+        total_forms += forms
         total_new += new
 
     n_filings = conn.execute("SELECT COUNT(*) FROM filings").fetchone()[0]
     log.info("Done. %d companies attempted (%d failed); %d records parsed, "
-             "%d new rows; filings table now holds %d.",
-             attempted, failed, total_records, total_new, n_filings)
+             "%d %s rows, %d new rows; filings table now holds %d.",
+             attempted, failed, total_records,
+             total_forms, "/".join(cfg["edgar"]["forms"]),
+             total_new, n_filings)
 
     # The silent-failure guard. A 200 carrying redirect HTML already raises in
     # get_json; this catches the other shape of the same failure — every
     # response valid JSON, and nothing in any of them. `total_records` (every
-    # form fetched) catches a dead endpoint; `total_new` (actual 8-K rows
-    # written) catches the narrower case where EDGAR answers with real data
-    # for every company but none of it matches `edgar.forms` — a config typo
-    # or a schema change would otherwise leave `filings` frozen forever with
-    # every run exiting 0.
+    # form fetched) catches a dead endpoint; `total_forms` (8-K rows PARSED)
+    # catches the narrower case where EDGAR answers with real data for every
+    # company but none of it matches `edgar.forms` — a config typo or a schema
+    # change would otherwise leave `filings` frozen forever with every run
+    # exiting 0.
+    #
+    # `total_new` is deliberately NOT the thing checked. It is what the upsert
+    # reported as genuinely new, so it is legitimately 0 on every clean re-run
+    # of an already-complete table — and the guard used to read it, which made
+    # the second run of any finished collection exit non-zero while claiming
+    # nothing had matched `edgar.forms`. Parsed, not new, is the question here.
     if cfg["logging"]["fail_on_zero_records"]:
         if attempted and failed == attempted:
             raise SystemExit(
@@ -676,7 +739,7 @@ def collect_many(cfg: dict, conn, client: EdgarClient | None = None,
                 f"response carrying nothing usable. Do not treat this run as "
                 f"successful."
             )
-        if attempted and total_records > 0 and total_new == 0:
+        if attempted and total_records > 0 and total_forms == 0:
             raise SystemExit(
                 f"{total_records} records parsed across {attempted} "
                 f"companies but ZERO matched edgar.forms {cfg['edgar']['forms']} "
@@ -686,7 +749,7 @@ def collect_many(cfg: dict, conn, client: EdgarClient | None = None,
     elif attempted and total_records == 0:
         log.error("ZERO records parsed across %d companies "
                   "(logging.fail_on_zero_records is off)", attempted)
-    elif attempted and total_new == 0:
+    elif attempted and total_forms == 0:
         log.error("%d records parsed across %d companies but ZERO matched "
                   "edgar.forms %s (logging.fail_on_zero_records is off)",
                   total_records, attempted, cfg["edgar"]["forms"])
@@ -905,6 +968,15 @@ _LEGAL_SUFFIX = re.compile(
 #: match on it would be worse than no match at all.
 MIN_STEM_PREFIX = 5
 
+#: How many proposals are worth verifying for one successor. A common stem can
+#: return hundreds, and each one costs a submissions fetch. Exceeding this is
+#: reported UNRESOLVED rather than verified as a prefix: checking the first N
+#: of a longer list can leave exactly one survivor and read as a confident
+#: link, when the real predecessor was number N+1 and never looked at. A wrong
+#: link writes another company's 8-Ks under this ticker and is invisible in the
+#: output, so "too many to check" has to be an answer of its own.
+MAX_PREDECESSOR_CANDIDATES = 20
+
 
 def name_stem(name: str) -> str:
     """A company name reduced to the part that identifies it."""
@@ -1042,7 +1114,17 @@ def verify_predecessor(cfg: dict, conn, client: EdgarClient, candidate_cik: str,
     # who holds a ticker TODAY is `company_tickers_exchange.json`, which is
     # what `companies` was built from and what the check above uses. Trusting
     # the submissions field here rejected two real predecessors.
-    if successor_sic and submissions.get("sic") != successor_sic:
+    if not successor_sic:
+        # Without the successor's own SIC there is nothing to compare against,
+        # and the remaining conditions ("no ticker of its own", "filed an 8-K
+        # before the window") are satisfied by thousands of CIKs — so skipping
+        # the SIC check does not weaken verification a little, it removes the
+        # only industry evidence there is. 480 of 6,135 cached submissions
+        # payloads (7.8%) carry an empty or absent `sic`, so this is a real
+        # path, not a theoretical one. Unverifiable is reported, never assumed.
+        return False, ("successor has no SIC to compare against — cannot "
+                       "verify, and the remaining checks are too weak alone")
+    if submissions.get("sic") != successor_sic:
         return False, (f"SIC {submissions.get('sic')} != successor's "
                        f"{successor_sic}")
     records = _submission_records(client, submissions)
@@ -1104,9 +1186,26 @@ def link_predecessors(cfg: dict, conn, client: EdgarClient | None = None,
     for row, submissions in successors:
         name = submissions.get("name", "")
         proposals = propose_predecessors(name, lookup, row["cik"])
+        if len(proposals) > MAX_PREDECESSOR_CANDIDATES:
+            # Reported, not truncated. See MAX_PREDECESSOR_CANDIDATES: a
+            # prefix of a long list can leave one survivor that reads as a
+            # confident link while the real predecessor sat past the cut.
+            unresolved.append({
+                "ticker": row["ticker"], "successor": row["cik"], "name": name,
+                "accepted": 0,
+                "reasons": [f"{len(proposals)} name candidates, more than the "
+                            f"{MAX_PREDECESSOR_CANDIDATES} this will verify — "
+                            f"checking only the first of them could link the "
+                            f"wrong company, so none were checked"],
+            })
+            log.warning("UNRESOLVED %s (%s) %r: %d candidate(s) proposed, "
+                        "over the %d cap — reported, not truncated",
+                        row["ticker"], row["cik"], name, len(proposals),
+                        MAX_PREDECESSOR_CANDIDATES)
+            continue
         accepted = []
         reasons = []
-        for cand_name, cand_cik in proposals[:20]:
+        for cand_name, cand_cik in proposals:
             ok, why = verify_predecessor(cfg, conn, client, cand_cik,
                                          submissions.get("sic"), window_start)
             reasons.append(f"{cand_name} ({cand_cik}): {why}")

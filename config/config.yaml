@@ -197,6 +197,12 @@ market:
   # is still allowed, so the Phase 7 live monitor keeps working. --force is the
   # deliberate override.
   snapshot_frozen: true
+  # yfinance's limit, not ours: it serves roughly 730 days of intraday bars and
+  # refuses (or silently truncates) anything older, so a request that reaches
+  # further back is clamped to this floor. 729 rather than 730 keeps a day of
+  # margin against the boundary moving while a multi-hour run is in flight.
+  # Applied only to `interval` above — daily bars have no such ceiling.
+  hourly_max_lookback_days: 729
   calendar: "XNYS"                 # exchange_calendars code for NYSE/Nasdaq hours
 
 # ------------------------------------------------------------
@@ -259,6 +265,14 @@ news:
                                    # (see src/utils/ratelimit.py Backoff). Mirrors
                                    # edgar.backoff_base_s — same pattern, same key
                                    # shape, so it is not a hardcoded threshold.
+  max_retries: 5                   # attempts per (ticker, window) against GDELT
+                                   # and Finnhub before giving up on that pair
+                                   # and moving on. 5 was the value hardcoded in
+                                   # both fetchers, kept unchanged so behaviour
+                                   # does not move — it is here so a run against
+                                   # a flaky endpoint can be made more or less
+                                   # patient without editing code. Mirrors
+                                   # edgar.max_retries.
   # What "the news is public" means for the t0 correction — TIERED, because a
   # wire-only list would apply to almost nothing on free data.
   #

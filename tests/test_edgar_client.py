@@ -35,7 +35,7 @@ class FakeSession:
         self.calls: list[str] = []
         self.headers: dict[str, str] = {}
 
-    def get(self, url, timeout=None):
+    def get(self, url, timeout=None, allow_redirects=None):
         self.calls.append(url)
         if not self.responses:
             raise AssertionError(f"unscripted request to {url}")

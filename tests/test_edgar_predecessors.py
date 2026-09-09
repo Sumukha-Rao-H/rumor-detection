@@ -16,9 +16,10 @@ import copy
 import pytest
 
 from src import db
+from src.collectors import edgar
 from src.collectors.edgar import (
-    EdgarRequestError, is_successor, link_predecessors, name_stem,
-    propose_predecessors, verify_predecessor,
+    MAX_PREDECESSOR_CANDIDATES, EdgarRequestError, is_successor,
+    link_predecessors, name_stem, propose_predecessors, verify_predecessor,
 )
 from src.utils.config import load_config
 from src.utils.timeutils import date_str_to_ts, iso_utc_to_ts
@@ -163,6 +164,21 @@ def test_a_candidate_with_a_different_sic_is_rejected(cfg, conn):
     assert not ok and "SIC" in why
 
 
+def test_a_successor_with_no_sic_cannot_verify_anything(cfg, conn):
+    """The SIC test used to be skipped when the SUCCESSOR had no `sic` of its
+    own, which quietly reduced verification to "has no ticker" + "filed an 8-K
+    before the window" — conditions thousands of CIKs satisfy. 480 of the 6,135
+    cached submissions payloads (7.8%) carry an empty or absent `sic`, so this
+    is a real path. Unverifiable has to be reported, not assumed."""
+    client = FakeClient({"0001605607": submissions(
+        ["8-K"], sic="6798", acceptances=["2020-02-02T20:00:00Z"])})
+    for successor_sic in (None, ""):
+        ok, why = verify_predecessor(cfg, conn, client, "0001605607",
+                                     successor_sic, WINDOW_START)
+        assert not ok
+        assert "no SIC" in why
+
+
 def test_a_candidate_that_already_has_its_own_ticker_is_rejected(cfg, conn):
     """If it were in `companies` it would already be collected."""
     db.upsert_companies(conn, [{"cik": "0000320193", "ticker": "AAPL",
@@ -305,6 +321,40 @@ def test_every_candidate_fetch_failing_raises(cfg, conn):
     client = FakeClient({"0002115436": EdgarRequestError("HTTP 503 from EDGAR")})
     with pytest.raises(SystemExit, match="EVERY one of 1"):
         link_predecessors(cfg, conn, client=client)
+
+
+def test_more_candidates_than_the_cap_is_reported_not_truncated(cfg, conn,
+                                                               monkeypatch):
+    """A prefix of a long candidate list is worse than no answer.
+
+    Verifying only the first N can leave exactly one survivor, which reads as a
+    confident link, while the real predecessor sat at N+1 and was never looked
+    at. A wrong link stores another company's CIK under this ticker, so its
+    8-Ks are collected as this company's — and nothing in the output shows it.
+    "Too many to check" has to be an answer of its own.
+    """
+    db.upsert_companies(conn, [{"cik": "0002115436", "ticker": "XOM",
+                                "name": "Common Holdings", "exchange": "NYSE"}])
+    db.upsert_filings(conn, [
+        _no_history_filing("0002115436", "XOM", WINDOW_START + 3600)])
+    client = FakeClient({"0002115436": submissions(
+        ["8-K12B"], name="Common Holdings Corp")})
+
+    crowded = [(f"COMMON HOLDINGS {i} CORP", f"{i:010d}")
+               for i in range(MAX_PREDECESSOR_CANDIDATES + 1)]
+    monkeypatch.setattr(edgar, "load_cik_lookup", lambda cfg_, client_: {})
+    monkeypatch.setattr(edgar, "propose_predecessors",
+                        lambda name, lookup, cik: crowded)
+
+    result = link_predecessors(cfg, conn, client=client, dry_run=True)
+
+    assert result["linked"] == []
+    assert len(result["unresolved"]) == 1
+    assert "more than the" in result["unresolved"][0]["reasons"][0]
+    # ...and nothing was written under the successor's ticker.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM companies WHERE successor_cik IS NOT NULL"
+    ).fetchone()[0] == 0
 
 
 def test_partial_candidate_fetch_failures_are_counted_not_dropped(cfg, conn):

@@ -172,7 +172,7 @@ def fetch_gdelt(cfg: dict, session: requests.Session, query: str,
                 start_ts: int, end_ts: int) -> list[dict]:
     ncfg = cfg["news"]
     backoff = Backoff(base_s=ncfg["backoff_base_s"])
-    for _ in range(5):
+    for _ in range(ncfg["max_retries"]):
         try:
             resp = session.get(ncfg["gdelt_base"], params={
                 "query": query,
@@ -228,7 +228,7 @@ def fetch_finnhub(cfg: dict, session: requests.Session, api_key: str,
         "token": api_key,
     }
     backoff = Backoff(base_s=ncfg["backoff_base_s"])
-    for _ in range(5):
+    for _ in range(ncfg["max_retries"]):
         try:
             resp = session.get(f"{base}/company-news", params=params, timeout=30)
             if resp.status_code in (429, 503):
@@ -381,6 +381,17 @@ def collect_targets(cfg: dict, conn, targets: list[tuple[str, int, int, int]],
     re-fetch tens of thousands of permanently quiet weeks. A quiet week is a
     real answer. A delisted ticker was not.
 
+    But that `ok` is only a real answer if the run itself was real, so the
+    zero-parse pairs are held back and written only once the run-level guard
+    below has passed. Committing them as they happened made the rule-8 failure
+    mode survivable in the worst way: an expired Finnhub key answers HTTP 200
+    with `[]` for everything, run 1 marks all N pairs `ok` and then raises
+    loudly — and the `--resume` the CLI recommends skips all N, attempts
+    nothing, trips no guard, and exits 0 with `news` still empty and the state
+    permanently claiming those weeks were collected. Every filing in them
+    silently loses its t0 correction. Buffering costs a Ctrl-C the quiet pairs'
+    state, which is a few cheap re-fetches.
+
     `KeyboardInterrupt` is deliberately not caught, so Ctrl-C stops the run
     with every pair collected so far already committed.
     """
@@ -394,6 +405,8 @@ def collect_targets(cfg: dict, conn, targets: list[tuple[str, int, int, int]],
                  sum(1 for t in targets if f"{t[0]}@{t[1]}" in skip), len(targets))
 
     total = attempted = failed = 0
+    #: Pairs that parsed nothing. Their `ok` rows are written after the guard.
+    quiet: list[str] = []
     for ticker, idx, win_start, win_end in targets:
         key = f"{ticker}@{idx}"
         if key in skip:
@@ -412,7 +425,10 @@ def collect_targets(cfg: dict, conn, targets: list[tuple[str, int, int, int]],
         # After the upsert, never before: a crash between the two re-fetches one
         # pair, which is cheap. The reverse order would mark a pair done whose
         # articles never landed.
-        db.set_fetch_state(conn, FETCH_SOURCE, key, "ok", records=parsed)
+        if parsed:
+            db.set_fetch_state(conn, FETCH_SOURCE, key, "ok", records=parsed)
+        else:
+            quiet.append(key)
         total += parsed
 
     log.info("Backfill done. %d pair(s) attempted (%d failed); %d record(s) "
@@ -428,6 +444,14 @@ def collect_targets(cfg: dict, conn, targets: list[tuple[str, int, int, int]],
             f"pairs attempted. One quiet week is normal; all of them means the "
             f"endpoint is broken. Do not treat this run as successful."
         )
+
+    # Only now: the run answered with something, so a pair that answered with
+    # nothing is a genuinely quiet week and is recorded as the permanent `ok`
+    # the docstring describes. Had the guard fired, these were never written,
+    # so the next `--resume` comes back to them instead of skipping them for
+    # ever on the strength of a broken run.
+    for key in quiet:
+        db.set_fetch_state(conn, FETCH_SOURCE, key, "ok", records=0)
     return total
 
 

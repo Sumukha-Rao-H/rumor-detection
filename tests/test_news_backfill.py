@@ -231,6 +231,56 @@ def test_guard_fires_when_every_attempted_pair_parsed_zero(cfg, conn,
         collect_targets(cfg, conn, targets, ["finnhub"])
 
 
+def test_a_run_that_parsed_nothing_leaves_its_pairs_resumable(cfg, conn,
+                                                              monkeypatch):
+    """The failure mode the guard exists for, survived in the worst way.
+
+    A quiet week is recorded as a permanent `ok` on purpose — re-fetching tens
+    of thousands of them on every resume would be absurd. But that `ok` used to
+    be committed as each pair happened, BEFORE the run-level guard ran. So an
+    expired Finnhub key answering HTTP 200 with `[]` for everything marked all
+    N pairs `ok` and then raised loudly; the `--resume` the CLI recommends then
+    skipped all N, attempted nothing, tripped no guard and exited 0 with `news`
+    still empty — and the state permanently claimed those weeks were collected,
+    so no later run would ever fetch them. Every filing in them silently loses
+    its t0 correction, which is the project's headline contribution.
+    """
+    targets = seeded(cfg, conn)
+    monkeypatch.setattr(news, "collect", FakeCollect(per_call=0))
+    with pytest.raises(SystemExit, match="ZERO records"):
+        collect_targets(cfg, conn, targets, ["finnhub"])
+
+    # Nothing was banked, so the endpoint coming back is all it takes.
+    assert db.completed_keys(conn, FETCH_SOURCE) == set()
+    monkeypatch.setattr(news, "collect", FakeCollect())
+    assert collect_targets(cfg, conn, targets, ["finnhub"], resume=True) > 0
+
+
+def test_a_genuinely_quiet_week_is_still_banked_when_the_run_was_real(
+        cfg, conn, monkeypatch):
+    """The other half: buffering must not cost the permanent-answer rule.
+
+    If the run as a whole parsed something, a pair that parsed nothing really
+    was a quiet week, and a resume must not come back for it."""
+    targets = seeded(cfg, conn)
+    calls = []
+
+    def one_loud_pair_then_silence(cfg_, conn_, ticker, query, start, end,
+                                   apis, **kw):
+        calls.append(ticker)
+        if len(calls) > 1:
+            return 0
+        db.upsert_news(conn_, [{"url": "http://x/1", "ticker": ticker,
+                                "title": "t", "published_utc": start,
+                                "api": "finnhub"}])
+        return 1
+
+    monkeypatch.setattr(news, "collect", one_loud_pair_then_silence)
+    collect_targets(cfg, conn, targets, ["finnhub"])
+    assert db.completed_keys(conn, FETCH_SOURCE) == {f"{t[0]}@{t[1]}"
+                                                    for t in targets}
+
+
 def test_guard_silent_when_everything_was_skipped(cfg, conn, monkeypatch):
     """A completed backfill re-run attempted nothing, so it failed at nothing."""
     targets = seeded(cfg, conn)

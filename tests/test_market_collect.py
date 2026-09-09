@@ -43,9 +43,16 @@ def fresh_db(tmp_path, name):
     return db.get_conn(tmp_path / name)
 
 
-def frame(start: str, days: int) -> pd.DataFrame:
-    """A daily OHLCV frame with a naive index, the shape yfinance returns."""
-    idx = pd.DatetimeIndex(pd.date_range(start, periods=days, freq="D"))
+def frame(start: str, days: int, tz: str = "UTC") -> pd.DataFrame:
+    """A daily OHLCV frame with a tz-aware index, the shape yfinance returns.
+
+    yfinance localizes every frame to the exchange timezone before handing it
+    back, and `df_to_rows` now refuses a naive index outright rather than
+    guessing it is UTC — so a naive frame here would be testing a shape that
+    cannot reach the collector. UTC keeps the epoch seconds identical to what
+    the old naive-localized-as-UTC helper produced.
+    """
+    idx = pd.DatetimeIndex(pd.date_range(start, periods=days, freq="D", tz=tz))
     return pd.DataFrame(
         {"Open": [10.0] * days, "High": [11.0] * days, "Low": [9.0] * days,
          "Close": [10.5] * days, "Volume": [1_000_000] * days},
@@ -305,6 +312,28 @@ def test_swapped_start_end_fails_loudly(cfg, tmp_path, monkeypatch):
     with pytest.raises(SystemExit, match="is not before --end"):
         collect_many(cfg, conn, ["AAPL"], date_str_to_ts("2026-01-01"),
                     date_str_to_ts("2025-01-01"), "1d")
+
+
+def test_an_hourly_window_older_than_yfinance_serves_fails_loudly(
+        cfg, tmp_path, monkeypatch):
+    """The same silent no-op, reached a different way.
+
+    `clamp_start` used to run per ticker INSIDE `collect_ticker`, and for a 60m
+    window entirely older than yfinance's intraday history it pushed the start
+    past the end — producing `attempted=False`, which the zero-record guard
+    excludes from its denominator by design. Every ticker then logged the false
+    line "cache already covers window" against a completely empty database and
+    the run exited 0. Clamping once, before the range check, makes it the same
+    malformed range as a swapped --start/--end, which was already refused.
+    """
+    yf = FakeYF({})
+    patch_yf(monkeypatch, yf)
+    conn = fresh_db(tmp_path, "too-old.db")
+    with pytest.raises(SystemExit, match="is not before --end"):
+        collect_many(cfg, conn, ["AAPL"], date_str_to_ts("2020-01-01"),
+                     date_str_to_ts("2020-06-01"), cfg["market"]["interval"])
+    assert yf.calls == [], "nothing should have been fetched"
+    assert conn.execute("SELECT COUNT(*) FROM bars").fetchone()[0] == 0
 
 
 def test_limiter_waits_once_per_request_and_never_for_a_cached_ticker(

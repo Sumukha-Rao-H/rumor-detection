@@ -42,7 +42,6 @@ from src.utils.timeutils import (
 
 log = logging.getLogger(__name__)
 
-HOURLY_MAX_LOOKBACK_S = 729 * 86400  # yfinance serves ~730 days of 60m bars
 DAY_S = 86400
 
 #: Namespace prefix for this collector's rows in `fetch_state`. The interval is
@@ -90,23 +89,26 @@ def df_to_rows(df: pd.DataFrame, ticker: str, interval: str) -> list[tuple]:
         return []
     idx = df.index
     if getattr(idx, "tz", None) is None:
-        # Defensive fallback only — verified against the installed yfinance
-        # 1.5.2 (`yfinance/utils.py::set_df_tz`) that both intervals this
-        # collector actually issues ('1d' and '60m') always come back
-        # tz-aware (localized to the exchange timezone before yfinance ever
-        # hands the frame back), so this branch should not fire in practice.
-        # It is kept rather than removed in case a future yfinance version or
-        # a different feed reintroduces a naive index — but naive here would
-        # represent EXCHANGE-LOCAL time (e.g. NYSE), not UTC, so localizing
-        # it as UTC is a known-wrong guess, not a safe default. Warn loudly
-        # so a silent multi-hour shift doesn't go unnoticed.
-        log.warning("%s [%s]: yfinance returned a tz-naive index — treating "
-                    "it as UTC, but it may actually be exchange-local time. "
-                    "This path is not expected with the installed yfinance; "
-                    "investigate before trusting these bars.", ticker, interval)
-        idx = idx.tz_localize("UTC")
-    else:
-        idx = idx.tz_convert("UTC")
+        # Verified against the installed yfinance 1.5.2
+        # (`yfinance/utils.py::set_df_tz`) that both intervals this collector
+        # issues ('1d' and '60m') always come back tz-aware, localized to the
+        # exchange timezone, so this is not a path a healthy fetch reaches.
+        # If a future yfinance or a different feed does hand back a naive
+        # index, the value is EXCHANGE-LOCAL time, not UTC — calling it UTC
+        # shifts every bar four or five hours, and `upsert_bars` sets OHLCV
+        # unconditionally on conflict, so those wrong bars would overwrite the
+        # frozen snapshot with nothing in the data to show it happened.
+        # Refuse, the way `timeutils.iso_utc_to_ts` refuses to guess UTC
+        # (AGENTS rule 3). `collect_many`'s per-ticker `except Exception`
+        # turns this into a recorded `failed` state for one ticker rather
+        # than a dead run.
+        raise ValueError(
+            f"{ticker} [{interval}]: yfinance returned a tz-naive index. "
+            f"That value is exchange-local time, not UTC — refusing to guess, "
+            f"because storing it as UTC shifts every bar by the exchange's "
+            f"offset and silently restates the frozen snapshot."
+        )
+    idx = idx.tz_convert("UTC")
     rows = {}
     skipped_nan = 0
     dup = 0
@@ -142,14 +144,21 @@ def df_to_rows(df: pd.DataFrame, ticker: str, interval: str) -> list[tuple]:
     return list(rows.values())
 
 
-def clamp_start(start_ts: int, interval: str, now_ts: int) -> int:
-    """Enforce yfinance's history window for intraday bars."""
-    if interval == "60m":
-        floor = now_ts - HOURLY_MAX_LOOKBACK_S
-        if start_ts < floor:
-            log.warning("60m bars only go back ~730 days — clamping start "
-                        "%s -> %s", ts_to_iso(start_ts), ts_to_iso(floor))
-            return floor
+def clamp_start(cfg: dict, start_ts: int, interval: str, now_ts: int) -> int:
+    """Enforce yfinance's history window for intraday bars.
+
+    Both the interval and the lookback come from config. The interval used to
+    be the literal `"60m"`, which meant changing `market.interval` alone turned
+    the clamp off without a word — the one edit most likely to need it.
+    """
+    if interval != cfg["market"]["interval"]:
+        return start_ts
+    floor = now_ts - cfg["market"]["hourly_max_lookback_days"] * DAY_S
+    if start_ts < floor:
+        log.warning("%s bars only go back %d days — clamping start %s -> %s",
+                    interval, cfg["market"]["hourly_max_lookback_days"],
+                    ts_to_iso(start_ts), ts_to_iso(floor))
+        return floor
     return start_ts
 
 
@@ -230,9 +239,12 @@ def collect_ticker(conn, ticker: str, start_ts: int, end_ts: int,
     to be later than the requested end), silently skipping the fetch. `force`
     bypasses this cache check entirely, matching its documented purpose of
     re-downloading even data that looks already covered.
+
+    `start_ts` arrives already clamped to yfinance's intraday history window:
+    `collect_many` does that once, before its range check, so a window lying
+    entirely outside that history fails there loudly instead of reaching here
+    and being reported as "cache already covers window".
     """
-    now = utc_now_ts()
-    start_ts = clamp_start(start_ts, interval, now)
     if not force:
         cached_min = _earliest_bar_ts(conn, ticker, interval)
         cached_max = db.latest_bar_ts(conn, ticker, interval)
@@ -266,6 +278,15 @@ def collect_many(cfg: dict, conn, tickers: list[str], start_ts: int,
     `KeyboardInterrupt` is deliberately not caught (`except Exception` does not
     cover it), so Ctrl-C stops the run with everything collected so far saved.
     """
+    # Clamped HERE, before the range check, not per ticker inside
+    # `collect_ticker`. The clamp can push `start_ts` past `end_ts` — a 60m
+    # window entirely older than yfinance's intraday history does exactly that
+    # — and done per ticker that turned every ticker into attempted=False,
+    # which the guard below excludes from its denominator by design. The run
+    # then logged "cache already covers window" for every symbol against an
+    # empty database and exited 0. Clamping once makes it the same malformed
+    # range as a swapped --start/--end, which the check below already refuses.
+    start_ts = clamp_start(cfg, start_ts, interval, utc_now_ts())
     if start_ts >= end_ts:
         # A swapped/typo'd --start/--end used to be indistinguishable from a
         # legitimate "cache already covers window" no-op: every ticker would
@@ -275,7 +296,10 @@ def collect_many(cfg: dict, conn, tickers: list[str], start_ts: int,
         raise SystemExit(
             f"--start ({ts_to_iso(start_ts)}) is not before --end "
             f"({ts_to_iso(end_ts)}) — refusing an inverted or empty date "
-            f"range instead of silently fetching nothing."
+            f"range instead of silently fetching nothing. For {interval} bars "
+            f"the start is first clamped to yfinance's "
+            f"{cfg['market']['hourly_max_lookback_days']}-day intraday "
+            f"history, so a window entirely older than that lands here too."
         )
     source = fetch_source(interval)
     skip = db.completed_keys(conn, source) if resume else set()

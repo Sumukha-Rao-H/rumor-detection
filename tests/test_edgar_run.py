@@ -16,8 +16,12 @@ import json
 import pytest
 
 from src import db
-from src.collectors.edgar import EdgarClient, EdgarRequestError, collect_many
+from src.collectors.edgar import (
+    EdgarClient, EdgarRequestError, collect_many, page_selection_floor_ts,
+    pages_to_fetch,
+)
 from src.utils.config import load_config
+from src.utils.timeutils import date_str_to_ts, ts_to_dt
 
 
 APPLE_8K = {
@@ -92,7 +96,7 @@ def test_redirect_html_raises_instead_of_reporting_success(cfg, tmp_path):
     class HtmlSession:
         headers: dict = {}
 
-        def get(self, url, timeout=None):
+        def get(self, url, timeout=None, allow_redirects=None):
             class R:
                 status_code = 200
                 content = html
@@ -250,6 +254,40 @@ def test_real_data_for_every_company_but_none_of_the_configured_forms_raises(cfg
         collect_many(cfg, conn, client=client)
 
 
+def test_a_clean_rerun_of_a_complete_table_is_not_a_failure(cfg, conn):
+    """The gap that let the guard read the wrong counter for so long.
+
+    Every other guard test starts from an empty `filings` table, where "rows
+    parsed" and "rows new" happen to be the same number. On the second run of
+    an already-complete table they diverge: every 8-K is parsed again and the
+    upsert reports none of them as new. The guard used to watch the new count,
+    so a finished collection raised "ZERO matched edgar.forms" — factually
+    false, since every record matched — every single time it was re-run.
+    """
+    payloads = {"0000320193": submissions(APPLE_8K),
+                "0000789019": submissions({**APPLE_8K, "accessionNumber": "m-1"}),
+                "0001318605": submissions({**APPLE_8K, "accessionNumber": "t-1"})}
+    assert collect_many(cfg, conn, client=FakeClient(payloads)) == 3
+
+    assert collect_many(cfg, conn, client=FakeClient(payloads)) == 0, (
+        "nothing is new the second time — that is a complete table, not a "
+        "broken endpoint")
+    assert conn.execute("SELECT COUNT(*) FROM filings").fetchone()[0] == 3
+
+
+def test_a_resumed_rerun_of_a_complete_table_is_also_silent(cfg, conn):
+    """`--resume` masked the bug rather than fixing it: skipped companies never
+    reach `attempted += 1`, so the guard was never armed. It must stay silent
+    for the right reason now, and still collect nothing new."""
+    payloads = {"0000320193": submissions(APPLE_8K),
+                "0000789019": submissions({**APPLE_8K, "accessionNumber": "m-1"}),
+                "0001318605": submissions({**APPLE_8K, "accessionNumber": "t-1"})}
+    collect_many(cfg, conn, client=FakeClient(payloads))
+    second = FakeClient(payloads)
+    assert collect_many(cfg, conn, client=second, resume=True) == 0
+    assert second.calls == []
+
+
 def test_the_total_new_guard_respects_the_config_flag(cfg, conn):
     form4 = {"accessionNumber": "x-1", "form": "4", "items": "",
              "acceptanceDateTime": "2026-01-02T20:00:00.000Z",
@@ -277,6 +315,70 @@ def test_force_reaches_the_filings_collection_path(cfg, conn):
     collect_many(cfg, conn, client=client, tickers=["AAPL"], force=True)
     assert seen_force and all(seen_force), (
         "force=True on collect_many must reach every client.get_json call")
+
+
+# -- the page-selection floor (what the universe filter needs) --------------
+
+def test_the_page_floor_reaches_back_past_the_window_for_the_universe(cfg):
+    """`filings` feeds the study AND `universe.require_prior_8k`, which asks
+    for an 8-K in the year BEFORE the window. Fetching only the window leaves
+    that year unfetched for heavy filers and drops them from the universe."""
+    start = date_str_to_ts(cfg["study_window"]["start"])
+    floor = page_selection_floor_ts(cfg)
+    assert floor == start - cfg["universe"]["prior_8k_lookback_days"] * 86400
+    assert floor < start
+
+
+def test_a_page_inside_the_prior_8k_lookback_is_selected(cfg):
+    """The JPMorgan case, at `pages_to_fetch` level: a page that ends inside
+    [start - prior_8k_lookback_days, start) holds exactly the prior 8-K the
+    universe filter looks for, and used to be skipped as "before the window"."""
+    start = date_str_to_ts(cfg["study_window"]["start"])
+    end = date_str_to_ts(cfg["study_window"]["end"])
+    floor = page_selection_floor_ts(cfg)
+    prior = [{"name": "prior.json",
+              "filingFrom": ts_to_dt(floor + 10 * 86400).strftime("%Y-%m-%d"),
+              "filingTo": ts_to_dt(start - 10 * 86400).strftime("%Y-%m-%d")}]
+
+    assert pages_to_fetch(prior, start, end) == [], (
+        "keyed on the study window alone, this page is invisible")
+    assert pages_to_fetch(prior, floor, end) == ["prior.json"]
+
+
+def test_collect_many_actually_passes_the_widened_floor(cfg, conn):
+    """The floor is only worth anything if the collection path uses it — the
+    obvious "tidy-up" is to hand `fetch_company_filings` the study window."""
+    seen = {}
+
+    class PageCapturingClient(FakeClient):
+        def get_json(self, url, force=False):
+            if url.endswith("prior.json"):
+                seen["fetched"] = True
+                return {"form": ["8-K"],
+                        "accessionNumber": ["prior-1"],
+                        "items": ["1.01"],
+                        "acceptanceDateTime": ["2025-01-02T20:00:00.000Z"],
+                        "filingDate": ["2025-01-02"],
+                        "reportDate": ["2025-01-02"],
+                        "primaryDocument": ["p.htm"]}
+            return super().get_json(url, force=force)
+
+    start = date_str_to_ts(cfg["study_window"]["start"])
+    floor = page_selection_floor_ts(cfg)
+    payload = submissions(APPLE_8K)
+    payload["filings"]["files"] = [{
+        "name": "prior.json",
+        "filingFrom": ts_to_dt(floor + 10 * 86400).strftime("%Y-%m-%d"),
+        "filingTo": ts_to_dt(start - 10 * 86400).strftime("%Y-%m-%d")}]
+
+    collect_many(cfg, conn, client=PageCapturingClient({"0000320193": payload}),
+                 tickers=["AAPL"])
+    assert seen.get("fetched"), (
+        "the page holding the prior 8-K was never fetched — the universe "
+        "filter will see no prior 8-K and drop this company")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM filings WHERE accession_no = 'prior-1'"
+    ).fetchone()[0] == 1
 
 
 # -- the module has to actually run ----------------------------------------

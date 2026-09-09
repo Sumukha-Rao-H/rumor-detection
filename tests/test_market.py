@@ -1,11 +1,24 @@
 """Market collector tests — DataFrame conversion and window logic, no network."""
 
 import pandas as pd
+import pytest
 
-from src.collectors.market import HOURLY_MAX_LOOKBACK_S, clamp_start, df_to_rows
+from src.collectors.market import clamp_start, df_to_rows
+from src.utils.config import load_config
 
 
-def make_df(index, tz=None):
+@pytest.fixture(scope="module")
+def cfg():
+    return load_config()
+
+
+def make_df(index, tz="UTC"):
+    """yfinance always hands back a tz-aware index, so the default is one.
+
+    Passing `tz=None` builds the naive frame `df_to_rows` now refuses; every
+    other test here is about NaN handling or duplicate stamps and wants an
+    ordinary frame.
+    """
     idx = pd.DatetimeIndex(index, tz=tz)
     return pd.DataFrame(
         {"Open": [1.0] * len(idx), "High": [2.0] * len(idx),
@@ -24,17 +37,18 @@ def test_df_to_rows_converts_tz_aware_to_utc_epoch():
     assert ts == int(pd.Timestamp("2025-06-02 13:30:00", tz="UTC").timestamp())
 
 
-def test_df_to_rows_localizes_naive_index_as_utc(caplog):
-    """Defensive fallback only: verified against the installed yfinance 1.5.2
-    that both '1d' and '60m' — the only intervals this collector uses — always
-    come back tz-aware, so this path is not expected to fire in production.
-    It must still warn loudly if it ever does, since naive-as-UTC is a guess
-    (the naive value would really be exchange-local time)."""
-    df = make_df(["2025-06-02"])
-    with caplog.at_level("WARNING"):
-        rows = df_to_rows(df, "TSLA", "1d")
-    assert rows[0][1] == int(pd.Timestamp("2025-06-02", tz="UTC").timestamp())
-    assert "tz-naive" in caplog.text
+def test_a_tz_naive_frame_is_refused_rather_than_stored_shifted():
+    """A naive index from yfinance is EXCHANGE-LOCAL time, not UTC.
+
+    It used to be localized as UTC with a warning, which stored every bar four
+    or five hours off. `upsert_bars` sets OHLCV unconditionally on conflict, so
+    that guess would rewrite the frozen snapshot with wrong prices and nothing
+    in the data to show it. Refuse instead, the way `timeutils.iso_utc_to_ts`
+    refuses — a warning nobody reads is not a guard.
+    """
+    df = make_df(["2025-06-02"], tz=None)
+    with pytest.raises(ValueError, match="tz-naive"):
+        df_to_rows(df, "TSLA", "1d")
 
 
 def test_df_to_rows_handles_a_real_tz_aware_daily_frame():
@@ -76,10 +90,25 @@ def test_df_to_rows_dedupes_duplicate_timestamps_and_warns(caplog):
     assert "duplicate" in caplog.text
 
 
-def test_clamp_start_only_for_hourly():
+def test_clamp_start_only_for_hourly(cfg):
+    now = 2_000_000_000
+    lookback = cfg["market"]["hourly_max_lookback_days"] * 86400
+    old = now - 3 * 365 * 86400
+    assert clamp_start(cfg, old, "60m", now) == now - lookback
+    assert clamp_start(cfg, old, "1d", now) == old
+    recent = now - 86400
+    assert clamp_start(cfg, recent, "60m", now) == recent
+
+
+def test_clamp_start_follows_market_interval_rather_than_a_literal(cfg):
+    """The clamp used to key on the literal "60m", so editing
+    `market.interval` alone switched it off without a word — silently asking
+    yfinance for intraday history it does not serve."""
     now = 2_000_000_000
     old = now - 3 * 365 * 86400
-    assert clamp_start(old, "60m", now) == now - HOURLY_MAX_LOOKBACK_S
-    assert clamp_start(old, "1d", now) == old
-    recent = now - 86400
-    assert clamp_start(recent, "60m", now) == recent
+    moved = {**cfg, "market": {**cfg["market"], "interval": "30m"}}
+    assert clamp_start(moved, old, "60m", now) == old, (
+        "60m is no longer the configured intraday interval")
+    lookback = cfg["market"]["hourly_max_lookback_days"] * 86400
+    assert clamp_start(moved, old, "30m", now) == now - lookback, (
+        "the clamp must follow whatever market.interval says")
