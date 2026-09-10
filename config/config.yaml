@@ -464,6 +464,17 @@ baselines:
     # The seed should not matter: a null that moves with its seed has too few
     # windows to say anything, and the spread across seeds is worth a glance.
     seed: 42
+    # One draw is not an error bar. On the Phase 10 shape a null draw has
+    # E[TP] ~ 19.1 with sd ~ 4.4, so chance alone puts a single row anywhere
+    # between about 0.55x and 1.45x lift. A lone row reading 1.4x cannot then
+    # be told apart from a real residual asymmetry of that size — the null
+    # catches the 29.6x artefact above but cannot certify the absence of a
+    # 1.5x one. So the comparison emits one row per seed here, named
+    # random_noise[<seed>], and the SPREAD across them is what a reader
+    # compares a real detector against. Five is enough to see the width
+    # without cluttering the table, and each row costs one score vector
+    # because this baseline reads no features.
+    seeds: [42, 43, 44, 45, 46]
   always_quiet:
     # The constant every hour is scored. The VALUE is arbitrary by
     # construction: a constant ranker is uninformative at any level, so
@@ -479,8 +490,15 @@ baselines:
     # at the alert budget is rank-based and does not move with it.
     # Notably close to the 2.5 that was originally guessed.
     threshold: 2.648
-    # 0 won the sweep: the alert budget already prices a false alarm, so
-    # suppressing early flags only cost precision here.
+    # 0 won the sweep — but NOT on precision, and the reason matters because
+    # it was recorded wrongly for a while. `precision_at_alert_budget` ranks
+    # windows by peak_score and never reads the `action` column, while
+    # min_wait_hours only ever rewrites `action`. Precision is therefore
+    # IDENTICAL at every point of the grid below, by construction, and a test
+    # pins that. `tune` breaks the resulting tie on median lead time, so 0 won
+    # because it flags at the earliest crossing rather than because it was
+    # more precise. The sweep is kept — the knob does move lead time and the
+    # action distribution, which are reported — but it is chosen on lead time.
     min_wait_hours: 0
     # Swept on validation. Bounded by the 48-bar decision horizon: waiting
     # longer than the window is identical to never flagging, which

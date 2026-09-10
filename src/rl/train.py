@@ -22,8 +22,8 @@ it can be argued with. Episodes here are short and finite, so undiscounted
 returns are well defined and there is no convergence reason to discount.
 Leaving gamma at 1.0 keeps the reward table the only thing deciding timing.
 
-**CPU by default.** The observation is 11 floats and the network is two small
-hidden layers; at that size GPU kernel-launch overhead dominates and CPU is
+**CPU by default.** The observation is ten floats (the P5-05 exclusion having
+taken `trading_hours_to_close` out) and the network is two small hidden layers; at that size GPU kernel-launch overhead dominates and CPU is
 usually faster, which SB3 warns about directly. `rl.device` selects, so a
 machine that can see a card can try it.
 
@@ -40,6 +40,7 @@ import json
 import platform
 import subprocess
 import time
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +49,14 @@ import pandas as pd
 from src.rl.env import FootprintEnv, observation_features
 from src.utils.config import load_config
 from src.utils.timeutils import utc_now_ts
+
+#: How many of the most recent steps `final_flag_rate` is measured over.
+#: Not in config on purpose: it is a reporting window, not a knob that changes
+#: what is trained, and nothing downstream reads it. 10,000 steps is a few
+#: dozen rollouts at the configured `n_steps` — long enough that the rate is
+#: not one batch's noise, short enough that a run's last minutes cannot be
+#: diluted by its first hour.
+FINAL_WINDOW_STEPS = 10_000
 
 
 def _git_state() -> dict:
@@ -127,19 +136,41 @@ def _callback_class():
         healthy while the agent has stopped acting entirely. P6-04's whole job
         is watching this, and the tracker already carries a risk that the
         report's `degenerate` column cannot detect it either.
+
+        Two rates, because the lifetime one cannot show a collapse
+        ---------------------------------------------------------
+        `flag_rate` accumulates from step 0 and never windows, so over 300,000
+        steps it is dominated by early exploration: a policy that flagged on
+        half its steps for the first fifty thousand and has not flagged since
+        still reports a healthy-looking average, which is precisely the run
+        this callback exists to catch. `final_flag_rate` is the same quantity
+        over the last `FINAL_WINDOW_STEPS`, and the gap between the two is the
+        collapse made visible. Both go in the manifest; neither replaces the
+        other, because the lifetime figure is what a reproducibility record
+        needs and the trailing one is what a diagnosis needs.
+
+        Both count SAMPLED actions — what PPO actually did while exploring, not
+        what its argmax would do. The deterministic behaviour that evaluation
+        reports is `PolicyBaseline.own_action_distribution`, and the two are
+        different questions.
         """
 
-        def __init__(self) -> None:
+        def __init__(self, final_window: int = FINAL_WINDOW_STEPS) -> None:
             super().__init__()
             self.counts = {0: 0, 1: 0}
+            # A ring of the most recent actions. Bounded, so memory does not
+            # grow with the run length however long it goes.
+            self.recent: deque[int] = deque(maxlen=int(final_window))
 
         def _on_step(self) -> bool:
             for action in np.atleast_1d(self.locals.get("actions", [])):
                 self.counts[int(action)] = self.counts.get(int(action), 0) + 1
+                self.recent.append(int(action))
             total = sum(self.counts.values())
             if total and self.n_calls % 100 == 0:
                 flag_rate = self.counts.get(1, 0) / total
                 self.logger.record("policy/flag_rate", flag_rate)
+                self.logger.record("policy/final_flag_rate", self.final_flag_rate)
                 self.logger.record("policy/n_flag", self.counts.get(1, 0))
                 self.logger.record("policy/n_wait", self.counts.get(0, 0))
             return True
@@ -148,6 +179,13 @@ def _callback_class():
         def flag_rate(self) -> float:
             total = sum(self.counts.values())
             return (self.counts.get(1, 0) / total) if total else float("nan")
+
+        @property
+        def final_flag_rate(self) -> float:
+            """The flag rate over the most recent `final_window` steps."""
+            if not self.recent:
+                return float("nan")
+            return sum(self.recent) / len(self.recent)
 
     return ActionDistributionCallback
 
@@ -233,6 +271,10 @@ def train(cfg: dict, frame: pd.DataFrame, conn=None,
     model.save(run_dir / "policy")
     manifest["elapsed_s"] = round(elapsed, 1)
     manifest["flag_rate"] = callback.flag_rate
+    # Recorded beside the lifetime rate, never instead of it: a policy that
+    # flagged half the time early and never flags now has two very different
+    # numbers here, and that difference is the whole diagnosis.
+    manifest["final_flag_rate"] = callback.final_flag_rate
     (run_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True))
     return model, manifest, callback
@@ -260,7 +302,9 @@ def main() -> None:
         verbose=args.verbose)
 
     print(f"\ntrained in {manifest['elapsed_s']}s on {manifest['rl_config'].get('device')}")
-    print(f"flag rate during training: {callback.flag_rate:.4f}")
+    print(f"flag rate during training: {callback.flag_rate:.4f} lifetime, "
+          f"{callback.final_flag_rate:.4f} over the last "
+          f"{FINAL_WINDOW_STEPS:,} steps")
     print(f"seed {manifest['seed']}; manifest and policy under the run directory")
 
 

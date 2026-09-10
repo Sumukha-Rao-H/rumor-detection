@@ -81,8 +81,17 @@ def reward_landscape(cfg: dict, base_rate: float, horizon: int | None = None,
     # Flag at the first hour: the whole early bonus, and no waiting cost.
     always_flag = p * (r["r_correct_flag"] + r["r_early_bonus"]) + \
         (1 - p) * r["r_false_alarm"]
-    # Wait through the window: the full step cost, plus a miss on positives.
-    wait_cost = h * r["r_wait"]
+    # Wait through the window: the step cost, plus a miss on positives.
+    #
+    # (h - 1), not h. The env pays `r_wait` only on a WAIT that leaves the
+    # episode running. The WAIT that runs the window out returns `r_missed` on
+    # a positive and 0.0 on a quiet one, and no step cost alongside it — see
+    # `FootprintEnv.step`. So sitting out an h-bar window costs h-1 steps, not
+    # h. The env's reading is the coherent one and this function was the one
+    # that was off. The arithmetic difference is 0.005 at the configured table
+    # and changes no verdict, but the derivation recorded in `config.reward`
+    # has to be reproducible from here or it is not a derivation.
+    wait_cost = (h - 1) * r["r_wait"]
     always_wait = p * (wait_cost + r["r_missed"]) + (1 - p) * wait_cost
     # Perfect selectivity: flag positives immediately, wait out the quiet ones.
     oracle = p * (r["r_correct_flag"] + r["r_early_bonus"]) + (1 - p) * wait_cost

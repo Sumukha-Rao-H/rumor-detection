@@ -35,11 +35,59 @@ def test_always_flag_matches_the_hand_calculation(cfg):
 
 
 def test_always_wait_matches_the_hand_calculation(cfg):
+    """(h - 1) step costs, not h.
+
+    `FootprintEnv.step` pays `r_wait` only on a WAIT that leaves the episode
+    running; the WAIT that runs an h-bar window out returns `r_missed` on a
+    positive and 0.0 on a quiet one, with no step cost beside it. So waiting
+    out a window costs h-1 steps. The env's reading is the coherent one and
+    `reward_landscape` was the one that was off by a step, which overstated
+    always-WAIT by 0.005 at the configured table — no verdict moves, but the
+    derivation recorded in `config.reward` has to be reproducible from this
+    function.
+    """
     p = reward_landscape(cfg, base_rate=0.25)
     r = cfg["reward"]
-    cost = cfg["decision"]["horizon_hours"] * r["r_wait"]
+    cost = (cfg["decision"]["horizon_hours"] - 1) * r["r_wait"]
     expected = 0.25 * (cost + r["r_missed"]) + 0.75 * cost
     assert p.always_wait == pytest.approx(expected)
+
+
+def test_the_wait_cost_is_the_one_the_env_actually_pays(cfg):
+    """Tied to the env rather than to a second copy of the arithmetic.
+
+    A quiet window is walked to its end with WAIT and the rewards summed. That
+    total is what always-WAIT earns on a quiet window, and it is what
+    `reward_landscape` must report at base rate 0 — otherwise the landscape
+    describes a reward table nobody is training against.
+    """
+    import pandas as pd
+
+    from src.rl.env import WAIT, FootprintEnv, observation_features
+    from src.utils.timeutils import date_str_to_ts
+
+    bars = 5
+    feats = observation_features(cfg)
+    base = date_str_to_ts("2025-10-01")
+    rows = []
+    for h in range(bars):
+        row = {"window_id": "Q0", "ticker": "T0", "ts_utc": base + h * 3600,
+               "t0_utc": None, "is_scheduled": None, "item_code": None}
+        row.update({f: 0.0 for f in feats})
+        rows.append(row)
+    frame = pd.DataFrame(rows).astype({
+        "window_id": "string", "ticker": "string", "ts_utc": "Int64",
+        "t0_utc": "Int64", "is_scheduled": "boolean", "item_code": "string"})
+
+    env = FootprintEnv(cfg, frame)
+    env.reset()
+    total, terminated = 0.0, False
+    while not terminated:
+        _, reward, terminated, _, _ = env.step(WAIT)
+        total += reward
+
+    landscape = reward_landscape(cfg, base_rate=0.0, horizon=bars)
+    assert landscape.always_wait == pytest.approx(total)
 
 
 def test_the_oracle_beats_both_degenerate_strategies(cfg):

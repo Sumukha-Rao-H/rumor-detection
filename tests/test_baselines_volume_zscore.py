@@ -246,3 +246,35 @@ def test_the_ceiling_stays_coherent_when_the_budget_exceeds_the_windows(cfg, fra
     assert r.max_precision >= r.precision       # a ceiling behaves like one
     assert r.max_precision == pytest.approx(r.precision), \
         "everything alerted and every positive was caught, so the ceiling is met"
+
+
+def test_precision_at_the_budget_is_invariant_across_the_min_wait_grid(cfg, frame):
+    """The property the tuning docstring used to describe wrongly.
+
+    It read: min_wait_hours is "genuinely swept, because suppressing flags in a
+    window's opening hours changes *which* windows alert and therefore does
+    move precision." It cannot. `precision_at_alert_budget` ranks windows by
+    `peak_score` and never reads `action`, and `min_wait_hours` only ever
+    rewrites `action` — the same docstring says exactly that twelve lines
+    earlier about the threshold. So precision is identical at every point of
+    the grid by construction, and `tune`'s key `(precision, lead, -wait)`
+    settles the winner entirely on the lead-time tie-break.
+
+    The sweep is honest and stays: the knob really does move lead time and the
+    action distribution, both of which are reported. Its stated reason was not,
+    so the property is pinned here rather than explained wrongly there.
+    """
+    grid = list(cfg["baselines"]["volume_zscore"]["min_wait_hours_grid"])
+    precisions, flags = {}, {}
+    for wait in grid + [999]:
+        out = VolumeZScore(cfg, min_wait_hours=wait).predict(frame,
+                                                             threshold=2.5)
+        precisions[wait] = precision_at_alert_budget(out).precision
+        flags[wait] = int((out["action"] == contract.FLAG).sum())
+
+    assert len(set(precisions.values())) == 1, precisions
+    # And not vacuously: the knob really is rewriting `action` underneath. A
+    # wait longer than the window suppresses every flag, and precision does
+    # not move by so much as a decimal.
+    assert flags[grid[0]] > 0
+    assert flags[999] == 0

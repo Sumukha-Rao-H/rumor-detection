@@ -25,9 +25,21 @@ If this row ever reports meaningfully more than the always-quiet floor, the
 evaluation frame has developed an asymmetry again and **no other row in the
 table means anything** until that is explained.
 
-The seed comes from config so the row is reproducible. Its value should not
-matter — a null that moves with its seed is a null with too few windows to say
-anything — and the spread across seeds is itself worth a glance.
+One seed is not enough
+----------------------
+"Its value should not matter" is a claim about sampling noise, and on the
+Phase 10 shape it is not quite true: a null draw there has E[TP] ~ 19.1 with
+sd ~ 4.4, which is a lift anywhere from about 0.55x to 1.45x at two standard
+deviations from chance alone. A single row reading 1.4x is therefore
+indistinguishable from a real residual asymmetry of that size. The null as
+built catches a 29.6x artefact; it cannot on its own certify the absence of a
+1.5x one.
+
+So `compare.run_baselines` emits this baseline once per seed in
+`baselines.random_noise.seeds`, as separate rows named `random_noise[42]` and
+so on — the same convention the per-seed policy rows already use. The spread
+across those rows IS the error bar, and reading it is how a reader tells noise
+from a finding. It reads no feature, so each extra row costs one score vector.
 """
 
 from __future__ import annotations
@@ -49,11 +61,17 @@ class RandomNoise(Baseline):
 
     name = "random_noise"
 
-    def __init__(self, cfg: dict | None = None) -> None:
+    def __init__(self, cfg: dict | None = None,
+                 seed: int | None = None) -> None:
         super().__init__(cfg)
-        self.seed = int(
-            self.cfg.get("baselines", {}).get("random_noise", {}).get("seed", 0)
-        )
+        noise = self.cfg.get("baselines", {}).get("random_noise", {})
+        self.seed = int(noise.get("seed", 0) if seed is None else seed)
+        if seed is not None:
+            # An explicitly seeded draw is one point in the spread, not "the"
+            # null, so it says which point it is. The unseeded construction
+            # keeps the bare name, because that is what every existing caller
+            # and the config's single `seed` entry mean by it.
+            self.name = f"random_noise[{self.seed}]"
 
     def score(self, frame: pd.DataFrame) -> pd.Series:
         """Uniform noise, seeded per call.

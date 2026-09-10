@@ -277,8 +277,14 @@ def print_report(cfg: dict, conn, ratio: int | None = None) -> None:
     print(f"\n-- evaluation set (P4-12, true base rate) --")
     print(f"decision points  : {ev['decision_points']:,} in-universe bars")
     print(f"positives        : {ev['positives']:,}")
+    # Labelled as an argument, not as a score. The figure is worth showing —
+    # it is the clearest statement of why AGENTS.md rule 7 bans accuracy — but
+    # phrased as "always-quiet accuracy 99.7%" it reads like a result and could
+    # be lifted into a report as one. Phrased this way it cannot.
     print(f"base rate        : {ev['base_rate']:.3%}  "
-          f"(always-quiet accuracy {ev['always_quiet_accuracy']:.1%})")
+          f"(what accuracy would say: "
+          f"{ev['always_quiet_accuracy']:.1%} — which is why we do not "
+          f"report it)")
     print(f"\n-- training sample --")
     print(f"positives        : {r['positives']:,}")
     print(f"quiet windows    : {r['available']:,} available across "

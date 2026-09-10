@@ -48,7 +48,18 @@ REPORT_COLUMNS = [
     "baseline", "slice", "t0_variant", "n_windows", "n_positive", "base_rate",
     "precision", "max_precision", "lift", "recall", "n_alerts",
     "median_lead_trading_h", "degenerate",
+    # Plan §6: the action distribution beside the score, every time. These two
+    # are the detector's OWN rule, not the budget's — `pct_windows_alerted`
+    # above is derived at the alert budget and so describes the harness (it
+    # came out 0.0189 for every row of the Phase 10 table). NaN for a detector
+    # that has no rule of its own; see `Baseline.own_action_distribution`.
+    "policy_flag_rate", "policy_pct_windows_alerted",
 ]
+
+#: The slices every printed view walks, in reading order. AGENTS.md rule 7 —
+#: "every number split scheduled vs unscheduled" — makes the last two
+#: mandatory; `all` is kept first because it is the row a reader orients on.
+SLICES = ("all", "scheduled", "unscheduled")
 
 CONTRACT_DTYPES = {
     "window_id": "string", "ticker": "string", "ts_utc": "Int64",
@@ -111,15 +122,36 @@ def build_training_frame(cfg: dict, conn,
     return conform(pd.concat([positives, quiet], ignore_index=True))
 
 
+def noise_seeds(cfg: dict) -> list[int]:
+    """The seeds the null is drawn at — a spread, not a single point.
+
+    One draw is not an error bar. On the Phase 10 shape a null draw has
+    E[TP] ~ 19.1 with sd ~ 4.4, so sampling noise alone puts one row anywhere
+    between roughly 0.55x and 1.45x lift; a lone row reading 1.4x cannot be
+    told apart from a real residual asymmetry of that size. Falls back to the
+    single configured `seed` so a config without the list still produces the
+    null rather than dropping it.
+    """
+    noise = cfg.get("baselines", {}).get("random_noise", {})
+    seeds = noise.get("seeds") or [noise.get("seed", 0)]
+    return [int(s) for s in seeds]
+
+
 def run_baselines(cfg: dict, conn, frame: pd.DataFrame,
                   skip_gb: bool = False,
                   fitted_gb: "GradientBoosting | None" = None,
-                  policy_runs: list[str] | None = None
-                  ) -> dict[str, pd.DataFrame]:
+                  policy_runs: list[str] | None = None,
+                  sampling_ratio: int | None = None
+                  ) -> tuple[dict[str, pd.DataFrame], dict[str, object]]:
     """Every detector's prediction frame, from one evaluation frame.
 
     Each is scored through `Baseline.predict`, so all of them get the same
     contract validation, the same unscoreable handling and the same seal check.
+
+    Returns the predictions **and the models that produced them**, keyed by the
+    same label. `comparison_table` needs the models, not only their output, to
+    ask each one what it would do on its own decision rule — plan §6's
+    degeneracy check, which no column derived at the alert budget can answer.
 
     `policy_runs` are P6-03 run directories. Each becomes its **own row**
     rather than being averaged into one, because P6-05's finding is that the
@@ -132,8 +164,15 @@ def run_baselines(cfg: dict, conn, frame: pd.DataFrame,
     # developed a length asymmetry again and no other row here means
     # anything until that is explained. Cheap to carry, and it is the one
     # row a sceptical reader can check without trusting any of the others.
-    models: list = [AlwaysQuiet(cfg), RandomNoise(cfg), VolumeZScore(cfg),
-                    CUSUM(cfg)]
+    #
+    # One row per seed, named the way the per-seed policy rows already are.
+    # The null's own docstring says its seed "should not matter"; at this
+    # sample size that is a claim with a measurable width, so the table shows
+    # the width instead of asserting it. Each extra row is one score vector —
+    # this baseline reads no features.
+    models: list = [AlwaysQuiet(cfg)]
+    models += [RandomNoise(cfg, seed=s) for s in noise_seeds(cfg)]
+    models += [VolumeZScore(cfg), CUSUM(cfg)]
     if not skip_gb:
         # The training frame does not depend on which t0 variant labels the
         # EVALUATION set, so a caller sweeping variants fits once and passes
@@ -141,10 +180,10 @@ def run_baselines(cfg: dict, conn, frame: pd.DataFrame,
         gb = fitted_gb
         if gb is None:
             gb = GradientBoosting(cfg)
-            ratio = args.sampling_ratio or cfg["sampling"]["negatives_per_positive"]
+            ratio = sampling_ratio or cfg["sampling"]["negatives_per_positive"]
             print(f"  fitting gradient boosting on the train split "
                   f"({ratio}:1 negatives)...")
-            gb.fit(build_training_frame(cfg, conn, ratio=args.sampling_ratio),
+            gb.fit(build_training_frame(cfg, conn, ratio=sampling_ratio),
                    conn=conn)
         models.append(gb)
 
@@ -154,21 +193,34 @@ def run_baselines(cfg: dict, conn, frame: pd.DataFrame,
         label = f"rl_policy[{Path(run).name.split('-')[-1]}]"
         named.append((label, load_policy(cfg, run)))
 
-    out = {}
+    out, used = {}, {}
     for label, model in named:
         # A finite placeholder: precision at the budget is rank-based, and
         # `evaluate` re-derives the operating point from the frame anyway.
         out[label] = model.predict(frame, threshold=float("inf"),
                                    conn=conn, context=f"compare/{label}")
-    return out
+        used[label] = model
+    return out, used
+
+
+#: What a detector with no decision rule of its own answers for the plan §6
+#: columns. Used when a table is built without its models — the tests do that,
+#: and a table cannot invent a rule it was never handed.
+_NO_OWN_RULE = {"flag_rate": float("nan"), "pct_windows_alerted": float("nan")}
 
 
 def comparison_table(cfg: dict, predictions: dict[str, pd.DataFrame],
-                     variant: str) -> pd.DataFrame:
+                     variant: str,
+                     models: dict[str, object] | None = None) -> pd.DataFrame:
     """One row per (baseline x slice), sharing one operating point per baseline.
 
     Slices come from `config.eval.split_by` — every number split scheduled vs
     unscheduled, never pooled, per the code standards' fourth rule.
+
+    `models` is what `run_baselines` returns beside the predictions. Given it,
+    every row also carries what that detector would do on its OWN rule rather
+    than at the alert budget, which is plan §6's degeneracy check and the one
+    thing the budgeted columns structurally cannot answer.
     """
     from src.eval.report import slice_frames
 
@@ -179,12 +231,17 @@ def comparison_table(cfg: dict, predictions: dict[str, pd.DataFrame],
         # to every slice — so slices are comparable to each other rather than
         # each getting its own flattering cut.
         threshold = precision_at_alert_budget(frame).threshold
+        model = (models or {}).get(name)
         for slice_name, sliced in slice_frames(frame).items():
             if sliced.empty:
                 continue
+            own = (model.own_action_distribution(sliced) if model is not None
+                   else _NO_OWN_RULE)
             row = {"baseline": name, "slice": slice_name,
                    "t0_variant": variant,
-                   **evaluate(sliced, threshold=threshold)}
+                   **evaluate(sliced, threshold=threshold),
+                   "policy_flag_rate": own["flag_rate"],
+                   "policy_pct_windows_alerted": own["pct_windows_alerted"]}
             rows.append(row)
         if name == AlwaysQuiet(cfg).name:
             floor = next(r for r in rows
@@ -207,11 +264,22 @@ def comparison_table(cfg: dict, predictions: dict[str, pd.DataFrame],
 
 
 def render(table: pd.DataFrame, slice_name: str = "all") -> str:
-    """The headline view: one row per baseline, on one slice."""
+    """The headline view: one row per baseline, on ONE slice.
+
+    One slice, so callers have to say which. `main` prints all three in turn —
+    AGENTS.md rule 7 wants every headline number split scheduled vs
+    unscheduled, and for a long time the run log this reads out to carried the
+    pooled rows only. Pooling is not neutral: gradient boosting scores 0.00475
+    scheduled against 0.01642 unscheduled and `rl_policy[seed43]` inverts that
+    ordering, so the pooled row hides the finding rather than summarising it.
+    """
     view = table[table["slice"] == slice_name].copy()
     view = view.sort_values("precision", ascending=False)
     cols = ["baseline", "t0_variant", "precision", "max_precision", "lift",
-            "recall", "median_lead_trading_h", "n_alerts", "degenerate"]
+            "recall", "median_lead_trading_h", "n_alerts", "degenerate",
+            # Plan §6, beside the score rather than in a separate report.
+            "policy_flag_rate"]
+    cols = [c for c in cols if c in view.columns]
     return view[cols].to_string(index=False,
                                 float_format=lambda v: f"{v:.5f}")
 
@@ -256,11 +324,23 @@ def main() -> None:
             gb = GradientBoosting(cfg)
             print("  fitting gradient boosting on the train split...")
             gb.fit(build_training_frame(cfg, conn), conn=conn)
-        predictions = run_baselines(cfg, conn, frame, skip_gb=args.skip_gb,
-                                    fitted_gb=gb, policy_runs=args.policy_runs)
-        table = comparison_table(cfg, predictions, variant)
+        predictions, models = run_baselines(
+            cfg, conn, frame, skip_gb=args.skip_gb, fitted_gb=gb,
+            policy_runs=args.policy_runs,
+            sampling_ratio=args.sampling_ratio)
+        table = comparison_table(cfg, predictions, variant, models=models)
         tables.append(table)
-        print(render(table))
+        # All three slices, not just the pooled one. AGENTS.md rule 7: every
+        # headline number is split scheduled vs unscheduled. This print is what
+        # the run log records and therefore what a report would be written
+        # from, so printing only `all` here made the log itself violate the
+        # rule however carefully `comparison_table` split the rows.
+        for slice_name in SLICES:
+            print(f"\n-- slice: {slice_name} --")
+            if not (table["slice"] == slice_name).any():
+                print("  (no rows in this slice)")
+                continue
+            print(render(table, slice_name))
 
     full = pd.concat(tables, ignore_index=True)
     if args.out:
@@ -268,11 +348,20 @@ def main() -> None:
         print(f"\nwrote {args.out}")
 
     if len(variants) > 1:
-        print("\n=== what the news correction buys (slice: all) ===")
-        head = full[full["slice"] == "all"]
-        pivot = head.pivot(index="baseline", columns="t0_variant",
-                           values=["precision", "median_lead_trading_h"])
-        print(pivot.to_string(float_format=lambda v: f"{v:.5f}"))
+        # Split here too, and for the same reason: the news correction is the
+        # project's headline contribution, so "what it buys" is exactly the
+        # kind of number rule 7 is about. The pivot is cheap — it reshapes rows
+        # already computed — so there is no reason to report only the pooled
+        # one.
+        for slice_name in SLICES:
+            head = full[full["slice"] == slice_name]
+            if head.empty:
+                continue
+            print(f"\n=== what the news correction buys "
+                  f"(slice: {slice_name}) ===")
+            pivot = head.pivot(index="baseline", columns="t0_variant",
+                               values=["precision", "median_lead_trading_h"])
+            print(pivot.to_string(float_format=lambda v: f"{v:.5f}"))
 
     print(f"\ntotal {time.time() - started:.0f}s")
 

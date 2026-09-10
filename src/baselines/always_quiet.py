@@ -21,8 +21,16 @@ anything.
 
 Accuracy is not computed here, despite being what the module is about.
 `metrics.accuracy()` raises on purpose; the trap is stated — base rate,
-recall, zero flags — never calculated. A number that rewards the degenerate
-answer does not get computed just because the degenerate answer is under test.
+recall, zero flags — **never reported as a result**. A number that rewards the
+degenerate answer does not become a finding just because the degenerate answer
+is under test.
+
+"Never calculated" would be too strong, and was: `sampling.eval_decision_points`
+does compute what accuracy would say, and `sampling.print_report` prints it,
+labelled so it cannot be quoted as a metric. That is the same rhetorical move
+this module makes by existing — showing the reader the 99.7% and why it is
+worthless is the argument for the headline metric. What must never happen is
+the figure appearing in a results table as though it measured something.
 """
 
 from __future__ import annotations

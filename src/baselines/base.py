@@ -110,6 +110,27 @@ class Baseline(ABC):
         """
         return self
 
+    def own_action_distribution(self, frame: pd.DataFrame) -> dict:
+        """What this detector would do on its OWN decision rule, not the budget's.
+
+        Plan §6 asks for the action distribution beside every score, because
+        the most likely failure of a learned agent is a degenerate policy that
+        never acts and still looks healthy on reward. The comparison table's
+        `pct_windows_alerted` cannot answer it: that is derived at the alert
+        budget, so it describes the harness and comes out the same for every
+        row.
+
+        Only a detector with a decision rule of its own can answer, and here
+        that is the learned policy — its score is P(FLAG) and its own rule is
+        the argmax. A threshold baseline has no such rule: its operating point
+        IS whatever cut the budget hands it. So the default answers NaN rather
+        than inventing a rule, and the column stays honest for every row while
+        still being one call every model responds to.
+        """
+        return {"n_steps": len(frame), "n_flag": float("nan"),
+                "n_wait": float("nan"), "flag_rate": float("nan"),
+                "pct_windows_alerted": float("nan")}
+
     # -- what every baseline gets for free -------------------------------
     def _common(self) -> dict:
         return self.cfg.get("baselines", {}).get("common", {})

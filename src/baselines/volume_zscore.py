@@ -23,9 +23,16 @@ action distribution. So the two knobs are settled differently:
 * **threshold** — set to the budget-implied cut the metric itself returns on
   the tuning frame, so the operating point spends exactly the allowance it is
   given. Derived and reported, never guessed.
-* **`min_wait_hours`** — genuinely swept, because suppressing flags in a
-  window's opening hours changes *which* windows alert and therefore does move
-  precision.
+* **`min_wait_hours`** — genuinely swept, but **not on precision**, and the
+  distinction is the same one made three paragraphs up. `min_wait_hours` only
+  rewrites the `action` column, and `precision_at_alert_budget` never reads
+  `action` — it ranks windows by `peak_score`. So precision is *invariant*
+  across the grid by construction, and a test pins that rather than leaving it
+  to be believed. What the sweep actually decides is lead time and the action
+  distribution, and `tune`'s key `(precision, lead, -wait)` therefore settles
+  it entirely on the lead-time tie-break: 0 wins because it flags at the
+  earliest crossing. The sweep is honest and stays; the reason it used to give
+  was not.
 
 Tuning uses the sampled 3:1 frame, whose config comment reads "training only".
 The headline comparison at the true base rate (0.284%, every in-universe bar)
@@ -117,12 +124,18 @@ def tune(cfg: dict, frame: pd.DataFrame, conn=None,
 
     1. For each candidate `min_wait_hours` in the configured grid, score the
        frame and compute `precision_at_alert_budget`. Precision is rank-based,
-       so the candidate's threshold does not affect it.
-    2. Rank candidates by precision. Ties break on **longer median lead time**
-       — between two equally precise operating points the earlier warning is
-       the more useful one, and lead time is the project's second headline.
-       A remaining tie breaks on the smaller `min_wait_hours`, so the result
-       is deterministic rather than dependent on dict order.
+       so neither the candidate's threshold nor its wait affects it — the
+       metric ranks on `peak_score` and `min_wait_hours` only rewrites
+       `action`. Every candidate therefore returns the *same* precision, and
+       that is a property of the metric rather than a finding about the data.
+    2. Rank candidates by precision. Because step 1 ties them all, the winner
+       is in practice decided by the next key: **longer median lead time** —
+       between two equally precise operating points the earlier warning is the
+       more useful one, and lead time is the project's second headline. A
+       remaining tie breaks on the smaller `min_wait_hours`, so the result is
+       deterministic rather than dependent on dict order. Precision is kept as
+       the first key anyway, so that a future change which *does* move it
+       cannot be silently outvoted by lead time.
     3. The threshold is then the budget-implied cut the metric returns for the
        winning candidate, so the reported operating point spends exactly its
        allowance.
