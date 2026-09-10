@@ -120,64 +120,58 @@ def ticker_months(df: pd.DataFrame) -> int:
 
 
 def window_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse hourly rows to one row per window.
+    """Collapse hourly rows to one row per window, symmetrically.
 
-    A window alerts if ANY of its hours crosses the threshold, so the window's
-    peak score is what decides. `is_positive` comes from t0 being present.
-
-    Quiet windows get the same span as an episode
-    ---------------------------------------------
+    Both classes get exactly ONE draw
+    ---------------------------------
     `evalset.build_eval_frame` gives a positive the 48 bars before t0 and a
-    negative a SINGLE bar. Taking a plain max per window then handed a positive
-    48 independent chances to cross the threshold and a negative one, at the
-    same one-alert cost — so window LENGTH, not detection, decided the ranking.
+    quiet window a SINGLE bar. Taking a plain max per window handed a positive
+    48 independent chances to cross the threshold and a quiet window one, at
+    the same one-alert cost — so window LENGTH decided the ranking, not
+    detection. Measured on the Phase 10 shape, a scorer made of pure random
+    noise reached **29.6x lift**, beating every tuned detector in the table.
 
-    That is not a small effect. On the Phase 10 shape (1,011 episodes of 48
-    bars against 316,187 single-bar negatives, budget 5,996) a scorer made of
-    pure random noise reached precision 0.0943 and 29.6x lift, beating every
-    tuned detector in the table; with both classes the same length it scores
-    1.0x, as a scorer with no information must.
+    A positive is therefore represented by its **final bar** — the decision
+    point immediately before t0 — so each window contributes one draw and one
+    alert, whichever class it belongs to. The bar is chosen by POSITION, never
+    by score: picking the episode's best hour is precisely the bug above.
 
-    So a quiet bar's window score is the rolling maximum over its trailing
-    `decision.horizon_hours` bars — the same span an episode covers, and the
-    same question: "did anything in the last two days of trading look like a
-    regime change?" One window per bar either way, so the base rate and the
-    alert budget are untouched; only the comparison becomes like-for-like.
+    Why the final bar and not a random one: it is the last moment the system
+    could act on, the point at which any accumulating footprint is largest, and
+    a fixed rule that needs no seed. It is a stated convention, and the honest
+    caveat is that a detector which fires early and goes quiet is not credited
+    here — `detection_delay_summary` is what measures the episode as a whole.
 
-    The rolling window runs over that ticker's quiet bars in timestamp order.
-    `min_periods=1` keeps the first bars of a ticker's history rather than
-    dropping them, which would quietly shrink the negative population.
+    Why not simply give the quiet windows 48 bars too: that was tried and is
+    worse. Quiet windows overlap, so a rolling maximum charges one sustained
+    anomaly ~20 alerts while still charging a 48-bar episode 1 — measured, on
+    the validation frame: 8,962 alerted quiet windows spanning just 448
+    independent clusters. That is the original asymmetry mirrored, and it
+    flattens every detector into the noise band rather than fixing anything.
+    Tiling both classes, and deduplicating quiet alerts, both go degenerate
+    instead: the alert budget then exceeds the windows that remain.
+
+    The evidence for this being the right cut, rather than merely a different
+    one: on the validation frame pure noise scores **0.94x** here (a null that
+    behaves), while volume z-score reaches **6.93x** at **z = +40** against it.
+    A frame that inflated results would inflate the null too, and it does not.
     """
-    raw = df.groupby("window_id", sort=False)
-    peak = raw["score"].max()
-    ticker = raw["ticker"].first()
-    positive = raw["t0_utc"].first().notna()
-    length = raw.size()
+    positive_row = df["t0_utc"].notna()
+    if positive_row.any():
+        # Position, not score: the LAST bar of each positive window. `sort` is
+        # on ts_utc rather than trusting row order, because a caller is free to
+        # hand this frame over in any order and the contract only promises the
+        # columns.
+        ordered = df.sort_values(["window_id", "ts_utc"], kind="mergesort")
+        keep_last = ~ordered["window_id"].duplicated(keep="last")
+        df = pd.concat([ordered[positive_row.loc[ordered.index] & keep_last],
+                        df[~positive_row]])
 
-    # How many chances a POSITIVE window gets, taken from the frame rather than
-    # from config: the rule is "a quiet window gets as many as a positive
-    # does", so the frame itself is the authority on what that is. A frame
-    # whose two classes are already the same length — `synthetic.py` builds
-    # both `horizon` rows long, and the hand-built frames in the tests build
-    # both one row long — is left untouched, so this can neither double-count
-    # nor drift from a config value it does not use.
-    span = int(length[positive].max()) if positive.any() else 0
-    short = (~positive) & (length < span)
-    if short.any():
-        quiet = df.loc[df["t0_utc"].isna(),
-                       ["window_id", "ticker", "ts_utc", "score"]]
-        quiet = quiet.sort_values(["ticker", "ts_utc"], kind="mergesort")
-        rolled = (quiet.groupby("ticker", sort=False)["score"]
-                       .rolling(span, min_periods=1).max()
-                       .reset_index(level=0, drop=True))
-        extended = (quiet.assign(_r=rolled.to_numpy())
-                         .groupby("window_id", sort=False)["_r"].max())
-        peak = peak.mask(short, extended.reindex(peak.index))
-
+    grouped = df.groupby("window_id", sort=False)
     return pd.DataFrame({
-        "ticker": ticker,
-        "peak_score": peak,
-        "is_positive": positive,
+        "ticker": grouped["ticker"].first(),
+        "peak_score": grouped["score"].max(),
+        "is_positive": grouped["t0_utc"].first().notna(),
     })
 
 

@@ -52,8 +52,14 @@ def test_full_chain_runs_and_renders(frame) -> None:
     delay = detection_delay_summary(decided)
     table = report_table(frame)
 
-    # the stages agree with each other
-    assert delay.n_detections == budget.true_positives
+    # the stages agree with each other — as a superset, not an equality.
+    # The budget scores a positive at its DECISION POINT (one draw, one alert,
+    # symmetric with a quiet bar); the delay summary counts it detected if the
+    # detector flagged at ANY hour of the episode, which is what a lead time
+    # means. So every decision-point detection is also an episode detection and
+    # the reverse does not hold.
+    assert delay.n_detections >= budget.true_positives
+    assert delay.n_detections + delay.n_missed == delay.n_positive
 
     # and it renders — a table that computes but cannot be printed is not a report
     rendered = table.to_string(index=False)
@@ -179,7 +185,14 @@ def test_degenerate_policy_survives_every_metric(frame) -> None:
 def test_numbers_are_internally_consistent(frame) -> None:
     table = report_table(frame)
     row = table[table["slice"] == "all"].iloc[0]
-    assert row["n_missed"] == row["n_positive"] - round(row["recall"] * row["n_positive"])
+    # Within each family, not across them. `recall` is a decision-point
+    # quantity (was the episode flagged at the bar before t0, the one draw the
+    # budget charges it for); the episode counts ask whether it was flagged at
+    # ANY hour of its window, which is what lead time means. The two do not
+    # reconcile and the column names now say which is which.
+    assert row["n_episodes_missed"] == (row["n_positive"]
+                                        - row["n_episodes_detected"])
+    assert row["n_episodes_detected"] >= round(row["recall"] * row["n_positive"])
     assert 0.0 <= row["precision"] <= 1.0
     assert 0.0 <= row["recall"] <= 1.0
     assert row["median_lead_trading_h"] <= row["median_lead_wall_h"]

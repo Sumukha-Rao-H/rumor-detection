@@ -237,12 +237,33 @@ def test_summary_quartiles_are_ordered() -> None:
 
 def test_pipeline_from_budget_threshold_to_delay() -> None:
     """The real sequence: budget picks a threshold, threshold picks flags,
-    flags give lead times."""
+    flags give lead times.
+
+    These two now count DIFFERENT things, on purpose, and the inequality below
+    is the honest relationship rather than a weakened equality.
+
+    `true_positives` comes from the budget, which scores a positive at its
+    DECISION POINT — the bar before t0 — so that an episode and a quiet bar
+    each get one draw and cost one alert. Without that symmetry a 48-bar
+    episode had 48 chances to cross against a quiet bar's one, and pure noise
+    scored 29.6x lift.
+
+    `n_detections` comes from the episode: it counts a positive as detected if
+    the detector flagged at ANY hour of its window, which is what lead time has
+    to mean — a detector that fires 20 hours early and goes quiet has still
+    given 20 hours of warning.
+
+    So episode detections are a superset of decision-point detections, and the
+    two are reported as separate quantities rather than one number pretending
+    to be both. On this fixture it is 36 against 7.
+    """
     df = make_synthetic_predictions(n_positive=40, n_quiet=1500, n_tickers=8,
                                     span_days=180, signal_strength=2.0, seed=5)
     r = precision_at_alert_budget(df)
     s = detection_delay_summary(actions_from_scores(df, r.threshold))
-    assert s.n_detections == r.true_positives
+    assert s.n_detections >= r.true_positives, (
+        "an episode flagged at its decision point is flagged at some hour of "
+        "it, so episode detections cannot be the smaller count")
     assert s.median_trading_hours <= s.median_wall_clock_hours
 
 

@@ -53,7 +53,16 @@ log = logging.getLogger(__name__)
 COLUMNS = [
     "slice", "t0_variant", "n_windows", "n_positive", "base_rate",
     "threshold", "n_alerts", "precision", "max_precision", "recall",
-    "median_lead_trading_h", "median_lead_wall_h", "n_missed",
+    # The EPISODE family. These answer a different question from `recall` and
+    # `precision` above, which are decision-point quantities, and the names say
+    # so rather than leaving a reader to discover it: a positive is scored at
+    # its decision point for the budget (one draw, one alert, symmetric with a
+    # quiet bar) but counted as detected here if the detector flagged at ANY
+    # hour of its 48-bar window, which is what a lead time has to mean. Episode
+    # detections are therefore a superset of decision-point ones, and
+    # `n_episodes_missed` will not reconcile with `recall`. It is not meant to.
+    "median_lead_trading_h", "median_lead_wall_h",
+    "n_episodes_detected", "n_episodes_missed",
     "n_wait_hours", "n_flag_hours", "pct_hours_flagged", "pct_windows_alerted",
     "brier", "brier_skill_score", "ece", "calibration_base_rate",
     "budget_exceeds_windows", "tie_spill_ratio", "degenerate",
@@ -282,7 +291,8 @@ def evaluate(df: pd.DataFrame, threshold: float | None = None,
         "recall": (tp / n_positive) if n_positive else float("nan"),
         "median_lead_trading_h": delay.median_trading_hours,
         "median_lead_wall_h": delay.median_wall_clock_hours,
-        "n_missed": delay.n_missed,
+        "n_episodes_detected": delay.n_detections,
+        "n_episodes_missed": delay.n_missed,
         "brier": brier,
         "brier_skill_score": skill,
         "ece": ece,

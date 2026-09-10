@@ -201,9 +201,23 @@ def test_ticker_months_counts_distinct_pairs() -> None:
 
 
 def test_window_summary_collapses_hours(frame) -> None:
+    """One row per window, and a positive represented by its FINAL bar.
+
+    The second assertion used to be `peak_score.max() == score.max()`, which
+    held while a window scored as the maximum over all its hours. That IS the
+    length asymmetry: it gave a 48-bar episode 48 chances against a quiet bar's
+    one. A positive is now its decision point — the bar before t0 — so the
+    frame's single highest score need not survive collapsing, and asserting
+    that it does would re-pin the bug.
+    """
     s = window_summary(frame)
     assert len(s) == frame["window_id"].nunique()
-    assert s["peak_score"].max() == frame["score"].max()
+
+    pos = frame[frame["t0_utc"].notna()]
+    final = (pos.sort_values("ts_utc").groupby("window_id").tail(1)
+                .set_index("window_id")["score"])
+    pd.testing.assert_series_equal(
+        s.loc[final.index, "peak_score"], final, check_names=False)
 
 
 def test_invalid_frame_is_rejected(frame) -> None:
@@ -371,38 +385,44 @@ def test_pure_noise_scores_chance_on_the_real_asymmetric_frame() -> None:
         f"length is deciding the ranking again")
 
 
-def test_a_quiet_window_gets_the_same_span_as_an_episode() -> None:
-    """The mechanism behind the null, pinned directly.
+def test_a_positive_is_represented_by_its_decision_point_not_its_best_hour() -> None:
+    """Chosen by POSITION, never by score.
 
-    A quiet bar whose own score is low, but which sits just after a high-
-    scoring quiet bar on the same ticker, must inherit that peak — an episode
-    48 bars long is judged on its best hour, so a quiet window has to be too.
+    Picking the episode's loudest hour is exactly the bug — it is what gave a
+    positive 48 draws against a quiet bar's one. An episode whose best hour is
+    early and whose decision point is quiet must score quiet.
     """
     horizon = load_config()["decision"]["horizon_hours"]
     base = date_str_to_ts("2025-09-01")
     t0 = base + 500 * HOUR
+    loud_early = np.zeros(horizon)
+    loud_early[0] = 99.0                       # the best hour, farthest from t0
     pos = pd.DataFrame({
         "window_id": "pos-0", "ticker": "AAA",
         "ts_utc": t0 - np.arange(horizon, 0, -1) * HOUR, "t0_utc": t0,
-        "score": 0.0, "action": WAIT, "is_scheduled": True, "item_code": "8.01"})
-    quiet_ts = base + 900 * HOUR + np.arange(3) * HOUR
+        "score": loud_early, "action": WAIT, "is_scheduled": True,
+        "item_code": "8.01"})
     quiet = pd.DataFrame({
-        "window_id": [f"bar:AAA:{t}" for t in quiet_ts], "ticker": "AAA",
-        "ts_utc": quiet_ts, "t0_utc": pd.NA, "score": [9.0, 0.0, 0.0],
-        "action": WAIT, "is_scheduled": pd.NA, "item_code": pd.NA})
+        "window_id": ["bar:AAA:1"], "ticker": ["AAA"],
+        "ts_utc": [base + 900 * HOUR], "t0_utc": [pd.NA], "score": [1.0],
+        "action": [WAIT], "is_scheduled": [pd.NA], "item_code": [pd.NA]})
 
     peaks = window_summary(conform(pd.concat([pos, quiet], ignore_index=True)))
-    later = peaks.loc[[f"bar:AAA:{t}" for t in quiet_ts[1:]], "peak_score"]
-    assert (later == 9.0).all(), (
-        "a quiet bar within the horizon of a spike must carry that spike, or "
-        "it is being judged on one hour while episodes are judged on 48")
+    assert peaks.loc["pos-0", "peak_score"] == 0.0, (
+        "the episode scored its loudest hour instead of its decision point")
 
 
-def test_a_frame_whose_classes_already_match_is_left_alone() -> None:
-    """The extension must be a no-op where there is no asymmetry to correct —
-    `synthetic.py` builds both classes `horizon` rows long, and the hand-built
-    frames above build both one row long."""
+def test_a_quiet_window_is_left_exactly_as_it_is() -> None:
+    """Quiet windows are already one bar and collapsing must not touch them.
+
+    Extending them to 48 instead was tried and is worse: quiet windows overlap,
+    so a rolling maximum charges one sustained anomaly ~20 alerts while a
+    48-bar episode still costs 1 — the original asymmetry, mirrored.
+    """
     df = make_synthetic_predictions(**DENSE, signal_strength=2.0, seed=5)
-    direct = df.groupby("window_id", sort=False)["score"].max()
+    quiet_ids = df.loc[df["t0_utc"].isna(), "window_id"].unique()
+    direct = (df[df["window_id"].isin(quiet_ids)]
+              .groupby("window_id", sort=False)["score"].max())
     pd.testing.assert_series_equal(
-        window_summary(df)["peak_score"], direct, check_names=False)
+        window_summary(df).loc[direct.index, "peak_score"], direct,
+        check_names=False)
