@@ -34,6 +34,28 @@
 # is a decision to take deliberately and record, not a free upgrade to take
 # because it is now free.
 #
+# DETECTOR CORRECTED 2026-09-11 — READ THIS BEFORE ANALYSING THE ALERT LOG
+#
+# The CUSUM parameters changed: `baselines.cusum.threshold` 1.0 -> 1.5. Alerts
+# raised from 2026-09-11 onward come from a different detector than everything
+# before them, and the log must be split on that date before the two stretches
+# are compared.
+#
+# This is a CORRECTION, not a tuning tweak, which is why it was made despite
+# the pre-registration argument below. With `reset_after_alarm`, the threshold
+# also caps how much evidence the statistic may carry, so a threshold BELOW the
+# drift (1.0 < 1.5) meant the statistic could never accumulate: six consecutive
+# 2-sigma bars peaked at 1.0 while one 4.5-sigma bar reached 3.0. That is the
+# inverse of what a change detector is for, and it made the live CUSUM a
+# shifted per-bar z-score under a change detector's name. Continuing to collect
+# forward-looking evidence from a detector known to be broken would be worse
+# than the discontinuity.
+#
+# Same treatment as the coverage change below: nothing is hidden, every row
+# carries `raised_utc`, and the pre-2026-09-11 series can be reconstructed
+# exactly by filtering on it. No threshold was moved to improve a result — the
+# constraint (h >= k) is now enforced in `tune_cusum` and pinned by a test.
+#
 # COVERAGE WIDENED 2026-09-07 — READ THIS BEFORE ANALYSING THE ALERT LOG
 # Until 2026-09-07 the run passed --max-tickers 400. That was never a sample:
 # it is `ORDER BY ticker LIMIT 400`, the alphabetical head of the universe, so
