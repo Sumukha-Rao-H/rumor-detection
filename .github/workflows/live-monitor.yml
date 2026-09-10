@@ -250,6 +250,15 @@ jobs:
       # of `live-log/alerts.csv`, and the file is append-only and hash-chained:
       # replaying our commit on top of someone else's work cannot reorder or
       # rewrite an existing row, and `--verify` would catch it if it did.
+      #
+      # `--verify` would NOT catch a truncated tail or a whole detector
+      # deleted: the chain links each row to its predecessor and nothing to the
+      # head, so what remains after a truncation is internally consistent. That
+      # case is covered instead by `export_csv`, which reads the file it is
+      # about to overwrite and exits loudly if any detector's row count would
+      # fall — so a partial restore fails the job in the step above rather than
+      # being committed here — and by this file's own git history.
+      #
       # `--autostash` covers the run.log left in the tree by `tee`.
       - name: Commit the alert log
         run: |

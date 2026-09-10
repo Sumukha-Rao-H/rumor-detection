@@ -41,11 +41,30 @@ _REASON = {
     "trading_hours_to_close": lambda v: f"{v:.1f}h to close",
 }
 
-#: Reading order for a triage analyst: the volume anomaly first, then whether
-#: the move was market-wide, then how quiet the company had been.
-_ORDER = ["volume_z", "ret_rel_4h", "ret_rel_24h", "ret_4h", "ret_24h",
-          "days_since_last_8k", "hours_since_news", "news_count_24h",
-          "volatility", "trading_hours_to_close"]
+#: Reading order for a triage analyst, as SLOTS rather than a flat list: one
+#: reason per idea, first available alternative wins.
+#:
+#: `UI-context.md` rule 1 names four things that must be in the row — volume
+#: multiple, benchmark-relative move, hours since the last 8-K, news coverage —
+#: and a flat list could not deliver them. It ran volume_z, ret_rel_4h,
+#: ret_rel_24h, ret_4h and stopped at four, so on the 513 alerts that have a
+#: benchmark-relative move the four slots went to volume plus three restatements
+#: of the same move, and 8-K recency never appeared at all. Grouping the returns
+#: into one "the move" slot spends each of the four on a different idea.
+_SLOTS = (
+    ("volume_z",),
+    # The move, benchmark-relative where we have it. `ret_rel_*` is missing on
+    # 1,520 of the 2,033 logged alerts — bars scored past the benchmark's own
+    # newest bar — so the raw return is the fallback rather than a second slot.
+    ("ret_rel_4h", "ret_rel_24h", "ret_4h", "ret_24h"),
+    ("days_since_last_8k",),
+    ("hours_since_news", "news_count_24h"),
+    # Beyond the four rule 1 requires, for the expanded view.
+    ("ret_120h",),
+    ("volatility",),
+    ("trading_hours_to_close",),
+    ("days_since_last_earnings",),
+)
 
 
 def _reasons(row: pd.Series, limit: int = 4) -> list[str]:
@@ -56,19 +75,29 @@ def _reasons(row: pd.Series, limit: int = 4) -> list[str]:
     is that a human can sanity-check it in half a minute.
     """
     out = []
-    for key in _ORDER:
-        if key in row.index and pd.notna(row.get(key)):
-            out.append(_REASON[key](row[key]))
+    for slot in _SLOTS:
+        for key in slot:
+            if key in row.index and pd.notna(row.get(key)):
+                out.append(_REASON[key](row[key]))
+                break                      # one reason per idea, not three
         if len(out) >= limit:
             break
     return out or ["no features recorded for this alert"]
 
 
 def _outcome(row: pd.Series) -> tuple[str, str]:
-    filed = row.get("filed")
-    if pd.isna(filed):
-        return "open", "window still open"
-    return ("filed", "8-K followed") if filed == 1 else ("none", "no 8-K in window")
+    """(state, words) for one alert — four states, not three.
+
+    The state is read from the column `data.alerts_with_outcomes` derives from
+    the alert's own timestamp against the answerable edge. It used to be read
+    from the join alone, which conflated "the window has not closed" with "this
+    database holds no outcome row" and so labelled 1,236 alerts pending whose
+    windows had closed weeks earlier.
+    """
+    state = row.get("outcome_state")
+    if not isinstance(state, str) or state not in data.OUTCOME_WORDS:
+        state = "unscored"
+    return state, data.OUTCOME_WORDS[state]
 
 
 # --------------------------------------------------------------------------
@@ -84,31 +113,50 @@ def _queue_stats(view: pd.DataFrame, all_rows: pd.DataFrame) -> None:
     and universe size are real (rule 6) but they are context for a result, not
     the first question a queue poses. They now sit in the strip below.
     """
-    resolved, filed, rate = data.hit_rate(view)
+    split = data.split_hit_rates(view)
+    resolved = split["resolved"]
+    hours = data.window_hours()
     strongest = view.apply(
         lambda r: ui.strength(r["score"], r["threshold"])[2], axis=1).max() \
         if not view.empty else float("nan")
-    open_n = int(view["filed"].isna().sum()) if "filed" in view else len(view)
+    state = (view["outcome_state"] if "outcome_state" in view
+             else pd.Series("unscored", index=view.index))
+    open_n = int((state == "open").sum())
+    unscored_n = int((state == "unscored").sum())
 
-    c = st.columns(4)
+    c = st.columns(5)
     # No `delta` here: Streamlit renders one with a directional arrow, and an
     # arrow beside "of 2,033 logged" reads as a trend when it is a denominator.
     c[0].metric(f"In view · of {ui.num(len(all_rows))}", ui.num(len(view)),
                 help="Alerts matching the filters above, out of every alert "
                      "ever logged.")
     c[1].metric("Awaiting outcome", ui.num(open_n),
-                help="The 48-hour window has not closed, so these cannot be "
-                     "graded yet. They are excluded from the hit rate rather "
-                     "than counted as misses.")
-    c[2].metric("Strongest", f"{strongest:.1f}×" if pd.notna(strongest) else "—",
+                help=f"The {hours}-hour window (wall-clock) has not closed yet, "
+                     f"so these cannot be graded. They are excluded from the "
+                     f"hit rate rather than counted as misses.")
+    c[2].metric("Not scored", ui.num(unscored_n),
+                help="The window closed, but this database holds no outcome "
+                     "row for the alert. Not a miss and not pending — an "
+                     "answer nobody has looked up. Kept as its own count so "
+                     "the hit rate's denominator is not mistaken for the set "
+                     "of alerts that could be graded.")
+    c[3].metric("Strongest", f"{strongest:.1f}×" if pd.notna(strongest) else "—",
                 help="Highest multiple of its own alert threshold in this view. "
                      "NOT a probability.")
-    c[3].metric("Hit rate", ui.pct(rate, 1) if rate is not None else "—",
-                help=(f"{filed} of {resolved} closed windows were followed by "
-                      f"an 8-K within 48 hours." if resolved else
-                      "No window in this view has closed yet, so there is no "
-                      "rate to quote. An empty figure is reported rather than "
-                      "a flattering one."))
+    # Rule 7: unscheduled is the headline, never the pooled figure. Results
+    # announcements are published weeks in advance and would carry the number.
+    c[4].metric("Unscheduled hit rate",
+                ui.pct(split["unscheduled_rate"], 1)
+                if split["unscheduled_rate"] is not None else "—",
+                help=(f"{split['unscheduled']} of {resolved} graded alerts were "
+                      f"followed by an UNSCHEDULED 8-K within {hours} hours. A "
+                      f"further {split['scheduled']} were followed by a "
+                      f"scheduled one (a results announcement); pooled that is "
+                      f"{ui.pct(split['pooled'], 1)}, which this project does "
+                      f"not report as one number." if resolved else
+                      "No alert in this view has both a closed window and an "
+                      "outcome on record, so there is no rate to quote. An "
+                      "empty figure is reported rather than a flattering one."))
 
 
 def _volume_trend(df: pd.DataFrame) -> None:
@@ -149,7 +197,8 @@ def alerts_today() -> None:
                          ["All detectors"] + sorted(df["detector"].unique()),
                          label_visibility="collapsed")
     state = c3.selectbox("Outcome",
-                         ["All outcomes", "8-K followed", "No 8-K", "Window open"],
+                         ["All outcomes", "8-K followed", "No 8-K",
+                          "Window open", "Not scored"],
                          label_visibility="collapsed")
 
     cutoff = {"Latest session": newest - (newest % DAY),
@@ -158,8 +207,11 @@ def alerts_today() -> None:
     if which != "All detectors":
         view = view[view["detector"] == which]
     if state != "All outcomes":
-        want = {"8-K followed": 1.0, "No 8-K": 0.0}.get(state)
-        view = view[view["filed"].isna()] if want is None else view[view["filed"] == want]
+        # Filter on the derived state, not on `filed`: "window open" and "not
+        # scored" both show a missing `filed` and are different answers.
+        want = {"8-K followed": "filed", "No 8-K": "none",
+                "Window open": "open", "Not scored": "unscored"}[state]
+        view = view[view["outcome_state"] == want]
 
     _queue_stats(view, df)
     if view.empty:
@@ -212,6 +264,20 @@ def alerts_today() -> None:
                    "and the 90th percentile at 4.3×. Extreme ≥10×, Strong ≥4×, "
                    "Elevated ≥2×. Select a row above to open it.")
 
+    # Rule 1 names four reasons. Two of them are not always available, and
+    # saying so once is better than leaving a reader to wonder which alerts are
+    # missing an explanation and why.
+    st.caption(
+        "**Why some rows show fewer than four reasons.** Rule 1 asks for four: "
+        "volume multiple, benchmark-relative move, hours since the last 8-K, "
+        "and news coverage. **News coverage is absent from every live alert** — "
+        "`features.include_news_coverage` is off in the config, because whether "
+        "the news channel helps is the Phase 8 experiment and the live monitor "
+        "runs the same arm every earlier phase ran. And the benchmark-relative "
+        "move is recorded on 513 of the 2,033 logged alerts; the rest were "
+        "scored on bars past the benchmark's own newest bar, and show the raw "
+        "return instead. Neither gap is filled with a fabricated value.")
+
     with st.expander("Alert volume over time — is today unusual?"):
         _volume_trend(df)
         st.caption("One step in this series is ours, not the market's: coverage "
@@ -259,23 +325,38 @@ def ticker_detail() -> None:
     ui.stat(s[1], "Strength", f"{mult:.1f}×", f"{words} — {mult:.1f}× threshold")
     ui.stat(s[2], "Flagged", dt.datetime.fromtimestamp(
         int(flagged), dt.timezone.utc).strftime("%d %b %H:%M"), ui.utc(flagged))
+    hours = data.window_hours()
     ui.stat(s[3], "Outcome", {"filed": "8-K followed", "none": "No 8-K",
-                              "open": "Pending"}[state],
-            "within 48 trading hours")
+                              "open": "Pending", "unscored": "Not scored"}[state],
+            # Wall-clock, not trading hours. `outcome_window_hours` is elapsed
+            # time — a company can file overnight or at a weekend — and calling
+            # it trading hours would stretch two days into about seven.
+            f"within {hours} hours (wall-clock)")
 
     live = state == "open"
     if live:
-        ui.note("This alert's window is still open, so <b>nothing after the "
-                "flagged hour is shown</b>. Revealing what happened next would "
+        ui.note("This alert's window is still open, so **nothing after the "
+                "flagged hour is shown**. Revealing what happened next would "
                 "turn a surveillance tool into a hindsight demo.")
 
-    hi = int(flagged) if live else int(flagged) + 48 * HOUR
+    hi = int(flagged) if live else int(flagged) + hours * HOUR
     lo = int(flagged) - 30 * DAY
     price = data.bars(ticker, lo, hi)
 
-    if price.empty:
+    if not data.db_present():
+        # This screen is the one that genuinely needs the database: bars, news
+        # and filing history all live there and none of them are in the
+        # committed CSV. Say so plainly instead of rendering three empty panels.
+        ui.note("**No local database, so the evidence panels below are empty.** "
+                "The alert and its recorded features come from the committed "
+                "log, but the price bars, the news timeline and the filing "
+                "history are read from `paths.db`, which is a rebuildable cache "
+                "and is not committed. Rebuild it with the Phase 2 and 3 "
+                "collectors, or restore the bootstrap snapshot.")
+    elif price.empty:
         ui.note("No price bars stored for this window.")
-    else:
+
+    if not price.empty:
         ts = pd.to_datetime(price["ts_utc"], unit="s", utc=True)
         marker = dt.datetime.fromtimestamp(int(flagged), dt.timezone.utc)
         sev = ui.MARKER
@@ -405,33 +486,78 @@ def _feature_table(row: pd.Series, price: pd.DataFrame) -> None:
 # --------------------------------------------------------------------------
 # P9-04 — evaluation
 # --------------------------------------------------------------------------
+#: The Phase 10 artifacts, newest first. The corrected file is preferred and
+#: the original is the fallback, never the other way round: it fixes three
+#: defects derivable from the run's own stored counts — a `max_precision`
+#: ceiling ten rows beat, `degenerate = False` on all 42 `always_quiet` rows,
+#: and 36 rows for item codes that `config.items.exclude` drops. Showing the
+#: superseded file made the screen contradict itself, captioning "a detector
+#: that cannot detect shows as `degenerate`" above a table of `False`.
+_PHASE10 = (
+    ("phase10/FINAL-test-evaluation-corrected.csv",
+     "**Phase 10 final evaluation on the sealed test set**, run once on "
+     "2026-09-08, with the arithmetic corrections of 2026-09-09 applied "
+     "(`FINAL-test-evaluation-corrected.csv` — see `CORRECTION-NOTE.md` beside "
+     "it). No model was re-scored and the sealed test set was not touched "
+     "again."),
+    ("phase10/FINAL-test-evaluation.csv",
+     "**Phase 10 final evaluation on the sealed test set**, run once on "
+     "2026-09-08 — the ORIGINAL file. The corrected artifact is not present, "
+     "so three known defects stand in the numbers below: the `max_precision` "
+     "ceiling is measured on the allowance rather than the alerts issued, "
+     "`always_quiet` reads `degenerate = False` when it emits one constant "
+     "score, and excluded item codes 9.01 and 5.07 still have rows."),
+)
+
+#: Kept as a standing caption rather than a footnote, because it disqualifies a
+#: column that is on screen. Quoted from `CORRECTION-NOTE.md`.
+_LIFT_CAVEAT = (
+    "**The `lift vs floor` column predates the evaluation-frame fix and is "
+    "pending recomputation.** Both Phase 10 files were produced under a frame "
+    "that rewarded window length rather than detection: a positive episode got "
+    "48 bars and a quiet window got one, while a window scores as the maximum "
+    "over its rows. Measured on that exact shape, **a scorer made of pure "
+    "random noise reaches precision 0.0943 and 29.6× lift, beating every "
+    "detector in the table**; with both classes the same length the same noise "
+    "scores 1.0×. The metric is fixed in commit `61083d4`, which also adds a "
+    "permanent `random_noise` row so the null is visible in every future table, "
+    "but no phase has been re-run. The figures are kept and labelled rather "
+    "than deleted — precision, recall and the counts are unaffected."
+)
+
+
 def evaluation() -> None:
-    table = data.comparison("phase10/FINAL-test-evaluation.csv")
-    final = not table.empty
-    if not final:
+    table = pd.DataFrame()
+    source = ""
+    for name, caption in _PHASE10:
+        table = data.comparison(name)
+        if not table.empty:
+            source = caption
+            break
+    if table.empty:
         table = data.comparison("p8-without-news-val.csv")
     if table.empty:
         table = data.comparison("baseline-comparison-val.csv")
     if table.empty:
         ui.note("No comparison table built yet. Run "
-                "<code>python -m src.baselines.compare --split val --out …</code>")
+                "`python -m src.baselines.compare --split val --out …`")
         return
 
     ui.note(
-        "<b>Plain accuracy is not reported anywhere, by design.</b> Only ~0.285% "
+        "**Plain accuracy is not reported anywhere, by design.** Only ~0.285% "
         "of hours precede an event, so a system that always says \"nothing is "
-        "coming\" is <b>99.71%</b> accurate and useless. The function that would "
+        "coming\" is **99.71%** accurate and useless. The function that would "
         "compute it raises an error instead. The headline is precision at the "
         "fixed alert budget.")
     ui.note(
-        "<b>Scheduled and unscheduled are never pooled.</b> Scheduled events — "
+        "**Scheduled and unscheduled are never pooled.** Scheduled events — "
         "results announcements — have dates published weeks ahead, so a run-up "
         "before one is far less interesting. Unscheduled events are the real "
         "target, and pooling would let the easy half carry the number.")
+    st.warning(_LIFT_CAVEAT)
 
-    if final:
-        st.caption("Source: **Phase 10 final evaluation on the sealed test "
-                   "set**, run once on 2026-09-08.")
+    if source:
+        st.caption(f"Source: {source}")
 
     c1, c2 = st.columns([1, 2])
     variants = sorted(table["t0_variant"].unique())
@@ -474,7 +600,12 @@ def evaluation() -> None:
         st.success(
             f"**{top['baseline']}** leads this slice at "
             f"**{ui.pct(top['precision'], 3)}** precision"
-            + (f", {lift:.1f}× the do-nothing floor" if lift else "")
+            # The lift is quoted with its disqualifier attached, not silently.
+            # A bare "22.1× the do-nothing floor" reads as the finding, and
+            # pure noise scores 29.6× on this evaluation frame.
+            + (f", {lift:.1f}× the do-nothing floor — a figure the caveat above "
+               f"disqualifies until the evaluation frame is recomputed, since "
+               f"pure noise reaches 29.6× on this frame" if lift else "")
             + f", against a ceiling of {ui.pct(top['max_precision'], 2)}. "
             f"**If a simple baseline wins, it is shown winning** — that is the "
             f"finding, not something to hide.")
@@ -544,22 +675,90 @@ def monitor_log() -> None:
         ui.note("The live alert log is empty.")
         return
 
-    resolved, filed, rate = data.hit_rate(df)
-    c = st.columns(4)
-    ui.stat(c[0], "Alerts logged", ui.num(len(df)), "append-only, hash-chained")
-    ui.stat(c[1], "Windows closed", ui.num(resolved), "48 trading hours elapsed")
-    ui.stat(c[2], "Followed by an 8-K", ui.num(filed), "within the window")
-    ui.stat(c[3], "Hit rate", ui.pct(rate, 1) if rate is not None else "—",
-            "of closed windows only")
+    hours = data.window_hours()
+    split = data.split_hit_rates(df)
+    cov = data.coverage()
 
-    ui.note(ui.honest_rate(resolved, filed, rate))
+    c = st.columns(4)
+    ui.stat(c[0], "Alerts logged", ui.num(cov["logged"]),
+            "append-only, hash-chained, committed to git after every run")
+    ui.stat(c[1], "Windows closed", ui.num(cov["answerable"]),
+            f"{hours} hours (wall-clock) elapsed, so an answer exists")
+    ui.stat(c[2], "Graded here", ui.num(cov["graded"]),
+            "closed AND with an outcome row in this database")
+    ui.stat(c[3], "Not scored", ui.num(cov["unscored"]),
+            "closed, but no outcome row here — an answer nobody looked up")
+
+    # Rule 7, on the live screen as much as the offline one: the unscheduled
+    # figure first and at least equal prominence, never a single pooled rate.
+    ui.section("Hit rate — split scheduled vs unscheduled",
+               f"Of the {cov['graded']:,} alerts this database can grade, how "
+               f"many were followed by an 8-K within {hours} hours "
+               f"(wall-clock). The denominator is the same for both halves: an "
+               f"alert followed by nothing is a miss either way, and there is "
+               f"no event to attach a slice to.")
+    h = st.columns(3)
+    ui.stat(h[0], "Unscheduled — the headline",
+            ui.pct(split["unscheduled_rate"], 1)
+            if split["unscheduled_rate"] is not None else "—",
+            f"{split['unscheduled']} of {split['resolved']} graded alerts. "
+            f"Genuinely unscheduled disclosures are the target of the whole "
+            f"project.")
+    ui.stat(h[1], "Scheduled (item "
+            + ", ".join(data.config()["items"]["scheduled"]) + ")",
+            ui.pct(split["scheduled_rate"], 1)
+            if split["scheduled_rate"] is not None else "—",
+            f"{split['scheduled']} of {split['resolved']} graded alerts. "
+            f"Results announcements, whose dates are published weeks ahead — "
+            f"the easy half.")
+    ui.stat(h[2], "Pooled (not the headline)",
+            ui.pct(split["pooled"], 1) if split["pooled"] is not None else "—",
+            f"{split['filed']} of {split['resolved']}. Shown for completeness "
+            f"and never quoted alone: it is more than double the unscheduled "
+            f"figure, which is exactly why the two are kept apart.")
+
+    ui.note(ui.honest_rate(split, hours))
+
+    if cov["unscored"]:
+        ui.note(
+            f"**The committed log and this database disagree, and the gap is "
+            f"the denominator.** `live-log/alerts.csv` holds "
+            f"**{cov['logged']:,}** alerts; **{cov['answerable']:,}** of them "
+            f"have a window that closed long enough ago to be answerable, and "
+            f"this database holds an outcome row for **{cov['graded']:,}** of "
+            f"those. The remaining **{cov['unscored']:,}** are shown as *not "
+            f"scored*, not as pending: their windows closed, nobody has looked "
+            f"the answer up here, and calling that \"still open\" would present "
+            f"a rate measured on "
+            f"{cov['graded'] / cov['answerable']:.1%} of the gradeable alerts "
+            f"as if it were measured on all of them. Run "
+            f"`python -m src.live.outcomes` against a database holding the "
+            f"filings to close the gap.")
+
     ui.note(
-        "<b>Append-only, and checkably so.</b> Every row carries a hash of "
-        "itself and of the row before it, so the log cannot be edited after the "
-        "fact without breaking the chain — verify with "
-        "<code>python -m src.live.alertlog --verify</code>. The monitor "
-        "re-scores a rolling 48-bar window each run and suppresses "
-        "re-detections by natural key, so a repeated scan writes nothing.")
+        f"**The live rate is not comparable to the offline precision figures.** "
+        f"Offline, each event gets one {hours}-bar window and at most one FLAG "
+        f"inside it, so precision counts one alert per event-window. Live, "
+        f"`window_id` is `live:<ticker>:<ts>` — **every bar is its own window, "
+        f"with no dedupe** — so one sustained anomaly writes several alerts and "
+        f"several denominator entries. Measured on this log, cusum's 1,105 "
+        f"alerts span 593 distinct {hours}-hour ticker-clusters, 1.86 alerts "
+        f"per cluster. The two numbers answer different questions and neither "
+        f"is adjusted to match the other.")
+
+    ui.note(
+        "**Append-only, and checkably so — with one gap named.** Every row "
+        "carries a hash of itself and of the row before it, so an edit to a "
+        "logged row, a row removed from the middle, and a row inserted out of "
+        "order are all caught — verify with `python -m src.live.alertlog "
+        "--verify`. What the chain does **not** prove is that the log is "
+        "complete: nothing anchors the head, so truncating the newest rows or "
+        "dropping a whole detector leaves a chain that still verifies. Two "
+        "things cover that instead — git's own history of this file, and an "
+        "export that refuses to write a log with fewer rows per detector than "
+        "the one it would overwrite. The monitor re-scores a rolling 48-bar "
+        "window each run and suppresses re-detections by natural key, so a "
+        "repeated scan writes nothing.")
 
     ui.section("The log", "Bar time and notice time are separate columns on "
                           "purpose: the monitor runs once a day after the "
@@ -572,9 +771,18 @@ def monitor_log() -> None:
         "detector": df["detector"],
         "score": df["score"].map(lambda v: f"{v:.3f}"),
         "threshold": df["threshold"].map(lambda v: f"{v:.3f}"),
-        "outcome": df["filed"].map({1.0: "8-K followed", 0.0: "no 8-K"})
-                              .fillna("window open"),
+        "outcome": df["outcome_state"].map(data.OUTCOME_WORDS),
+        # Rule 7 reaches the table too, not just the figures above it.
+        "8-K type": data.outcome_slice(df),
         "lead (trading h)": df.get("lead_trading_h", pd.Series(index=df.index))
                               .map(lambda v: "—" if pd.isna(v) else f"{v:.1f}"),
     })
     st.dataframe(show, width="stretch", hide_index=True, height=460)
+    st.caption(
+        "**`lead (trading h)` really is trading hours** — rule 3, the same unit "
+        "every other lead-time figure in this project uses — while the "
+        f"{hours}-hour outcome window above is wall-clock. They are different "
+        "clocks on purpose: a company can file overnight or at a weekend, so "
+        "\"did a filing follow within two days\" is a question about elapsed "
+        "time, but \"how much warning was there\" is only meaningful in hours "
+        "the market was open.")

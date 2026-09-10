@@ -128,16 +128,29 @@ def strength(score: float, threshold: float) -> tuple[str, str, float]:
     return "marginal", "Marginal", mult
 
 
-def honest_rate(resolved: int, filed: int, rate) -> str:
-    """The calibration line rule 8 asks for, stated without flattery."""
-    if not resolved or rate is None:
-        return ("No alert has a closed 48-hour window yet, so there is no hit "
-                "rate to quote. An empty figure is reported rather than a "
-                "flattering one.")
-    return (f"**{filed} of {resolved}** resolved alerts ({pct(rate, 1)}) were "
-            f"followed by an 8-K within 48 hours. Alerts whose window is still "
-            f"open are excluded from both sides — otherwise the figure would "
-            f"drift with how recently the monitor last ran.")
+def honest_rate(split: dict, hours: int) -> str:
+    """The calibration line rule 8 asks for, split as rule 7 requires.
+
+    It takes the whole split rather than a pooled rate because a pooled rate is
+    the thing this project may not report. The unscheduled figure is stated
+    first and named as the headline: results announcements have dates published
+    weeks ahead, so an alert before one is the easy half, and quoting the
+    pooled number alone would let that half carry the claim.
+    """
+    if not split["resolved"] or split["pooled"] is None:
+        return (f"No alert has both a closed {hours}-hour window and an "
+                f"outcome recorded here, so there is no hit rate to quote. An "
+                f"empty figure is reported rather than a flattering one.")
+    return (
+        f"**{split['unscheduled']} of {split['resolved']}** graded alerts "
+        f"({pct(split['unscheduled_rate'], 1)}) were followed by an "
+        f"**unscheduled** 8-K within {hours} hours — the number this project "
+        f"exists to produce. A further **{split['scheduled']}** "
+        f"({pct(split['scheduled_rate'], 1)}) were followed by a scheduled "
+        f"one, a results announcement whose date was published weeks ahead. "
+        f"Pooled that is {pct(split['pooled'], 1)}, which is why the two are "
+        f"never reported as one number. Alerts with no outcome recorded are "
+        f"excluded from both sides.")
 
 
 def section(title: str, explain: str = "") -> None:
@@ -214,6 +227,12 @@ def note(text: str) -> None:
 
     Several of these carry binding rules, and a rule a reader must expand to
     find is a rule the screen does not really make.
+
+    **MARKDOWN, NOT HTML.** `st.info` has no `unsafe_allow_html` parameter and
+    escapes tags, so five notices — including the two carrying rules 4 and 5 —
+    rendered as the literal text `<b>Scheduled and unscheduled are never
+    pooled.</b>` on screen. Emphasis is `**bold**` and a command is `` `code` ``
+    here; `test_no_notice_renders_raw_html_as_text` holds the line.
     """
     st.info(text)
 
@@ -237,4 +256,8 @@ def budget_strip(b: dict) -> None:
         f"the allowance). The budget is the operational constraint the whole "
         f"system is tuned to, fixed before any model existed so it cannot have "
         f"been chosen to flatter a result; precision is measured at exactly it."
-    )
+        + ("" if b["universe"] is not None else
+           " The universe and the allowance read **—** because there is no "
+           "local database: it is a rebuildable cache and is not committed, "
+           "while the alert log beside it is. The alerts counted above come "
+           "from that committed log and are real."))

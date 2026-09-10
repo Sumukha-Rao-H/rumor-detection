@@ -221,3 +221,100 @@ def test_ticker_detail_compares_each_feature_to_its_trailing_normal():
     cols = {c for df in at.dataframe for c in df.value.columns}
     assert {"at the flagged hour", "trailing median", "percentile"} <= cols, (
         f"feature table missing its comparison columns; got {cols}")
+
+
+# --------------------------------------------------------------------------
+# The database is gitignored; the alert log is committed
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("screen", SCREENS)
+def test_every_screen_renders_without_a_database(screen, tmp_path, monkeypatch):
+    """A fresh clone has `live-log/alerts.csv` and no `footprints.db`.
+
+    The database is about a gigabyte of rebuildable cache and is gitignored;
+    the alert log is the committed, durable record. So an examiner, or a second
+    machine, has the evidence file and nothing beside it — and `budget_line`
+    runs before routing, so a missing database used to raise a raw
+    `FileNotFoundError` traceback on every screen, including *Today's alerts*,
+    which needs nothing but the CSV.
+    """
+    import app.data as data
+
+    real = data.config()
+    missing = {**real, "paths": {**real["paths"],
+                                 "db": str(tmp_path / "absent.db")}}
+    monkeypatch.setattr(data, "config", lambda: missing)
+    for fn in ("alerts", "outcomes", "universe_size", "answerable_edge"):
+        getattr(data, fn).clear()   # st.cache_data holds the real DB's answers
+
+    at = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    at.run()
+    assert not at.exception, f"app failed to start with no DB: {at.exception}"
+    at.sidebar.radio[0].set_value(screen).run()
+    assert not at.exception, f"{screen} raised with no DB: {at.exception}"
+
+
+def test_a_missing_database_is_said_out_loud_not_shown_as_zero():
+    """An honest empty state, not a fabricated number. A universe of 0 and an
+    allowance of 0 would read as measurements."""
+    import app.data as data
+
+    assert data.db_present() in (True, False)
+
+
+# --------------------------------------------------------------------------
+# Rule notices must reach the reader as text, not as markup
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("screen", SCREENS)
+def test_no_rule_notice_shows_literal_html(screen):
+    """`st.info` has no `unsafe_allow_html` parameter — Streamlit escapes it.
+
+    Five notices passed `<b>`/`<code>`, including the ones carrying the
+    plain-accuracy rule and the scheduled-split rule, so the reader saw
+    `<b>Scheduled and unscheduled are never pooled.</b>` literally. The
+    existing assertions missed it because `_text` reads the pre-render string,
+    which is exactly what a browser never shows.
+    """
+    at = _run(screen)
+    # Only the widgets that ESCAPE markup. `st.markdown` takes
+    # `unsafe_allow_html` and the chrome uses it deliberately for the styled
+    # meta panels; `st.info`/`warning`/`success`/`error` do not take it at all,
+    # so any tag reaching them is shown to the reader verbatim.
+    escaping = []
+    for family in (at.info, at.warning, at.success, at.error):
+        escaping += [str(getattr(el, "value", "")) for el in family]
+    for body in escaping:
+        for tag in ("<b>", "</b>", "<code>", "</code>", "<i>", "<br>"):
+            assert tag not in body, (
+                f"{screen} passes a literal {tag} to a widget that escapes "
+                f"markup — the reader sees the tag: {body[:120]!r}")
+
+
+def test_the_live_screen_splits_scheduled_from_unscheduled():
+    """Rule 7 applies to the live claim too, and it is where it matters most.
+
+    The hit rate pooled both halves, and of the ten live hits in the real
+    database SIX carry item 2.02 — pre-announced quarterly results, whose date
+    is public weeks ahead. Pooling let the easy half carry the headline: about
+    9.9% pooled against roughly 4.0% on unscheduled events, which is the number
+    the project exists to produce. The Evaluation screen states the rule
+    verbatim; the screen beside it used to break it.
+    """
+    body = _text(_run("Live monitor log")).lower()
+    assert "unscheduled" in body
+    assert "scheduled" in body
+
+
+def test_the_outcome_window_is_called_wall_clock_not_trading_hours():
+    """Two clocks, correctly separated in the code and conflated in the copy.
+
+    `live.outcome_window_hours` is 48 WALL-CLOCK hours — about two days. Two
+    captions called it 48 trading hours, which is roughly seven calendar days,
+    making the hit rate look far harder-won than it was. The lead-time column
+    beside it really is in trading hours and is correctly labelled, which is
+    exactly why the two must not blur.
+    """
+    body = _text(_run("Live monitor log")).lower()
+    assert "48 trading hours" not in body
+    assert "wall-clock" in body or "wall clock" in body

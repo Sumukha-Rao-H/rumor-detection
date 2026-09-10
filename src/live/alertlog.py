@@ -20,10 +20,30 @@ So three rules, each enforced rather than intended:
    and reports the first break.
 
 The chain **detects** tampering; it does not prevent it. Anyone with the SQLite
-file can rewrite it and recompute every hash. What it rules out is the
-realistic failure — a well-meaning later edit, a partial restore, a row quietly
-dropped — and it turns "never edited after the fact" from a promise into
-something a reader can check with one command.
+file can rewrite it and recompute every hash. What it rules out is a row whose
+contents were changed, a row removed from the middle, and a row inserted out of
+order — and it turns "no logged row was edited after the fact" from a promise
+into something a reader can check with one command.
+
+**What the chain cannot see, stated plainly.** Each row links to its
+predecessor, but *nothing anchors the head*. So the chain is silent about
+anything that removes or adds rows at the end. Measured against the real
+2,033-row log: editing a score, editing a timestamp, blanking a row's features,
+deleting a mid-chain row and truncating the *oldest* rows are all caught, while
+**dropping the newest 105 rows, deleting an entire detector's chain, and
+appending a back-dated row all verify CLEAN**. Completeness is a different
+property from internal consistency and the hashes only carry the second.
+
+Two things cover the gap instead, and neither is a hash:
+
+- **git.** `export_csv` writes `live-log/alerts.csv` and the scheduled job
+  commits it after every cycle, so the file's length has an external history
+  kept by a service nobody in this project controls.
+- **`export_csv` refuses to shrink.** Before overwriting, it reads the existing
+  file's per-detector row counts and exits loudly if any count would fall. The
+  export runs last in every cycle, so a database restored from a partial backup
+  — the realistic way rows go missing — cannot quietly overwrite the fuller
+  record with a shorter one.
 
 Usage:
   python -m src.live.alertlog --verify
@@ -123,9 +143,16 @@ def verify_chain(conn, detector: str | None = None) -> dict:
     Returns `{detector: {"rows": n, "ok": bool, "broken_at": seq|None,
     "reason": str|None}}`.
 
-    Three things break a chain, and all three are what "never edited" is meant
-    to exclude: a row whose contents were changed, a row removed from the
-    middle, and a row inserted out of order.
+    Three things break a chain, and all three are what "no logged row was
+    edited" is meant to exclude: a row whose contents were changed, a row
+    removed from the middle, and a row inserted out of order.
+
+    **It cannot see a truncated tail.** Nothing anchors the head of the chain,
+    so dropping the newest rows — or an entire detector — leaves what remains
+    internally consistent and this function reports it clean. That is a real
+    limit, not an oversight to work around here: anchoring the head would need
+    a witness outside the database, which is what `export_csv`'s shrink guard
+    and the committed CSV's git history provide.
     """
     names = ([detector] if detector else
              [r[0] for r in conn.execute(
@@ -190,6 +217,28 @@ CSV_COLUMNS = ("alert_id", "ts_utc", "raised_utc", "ticker", "detector",
                "score", "threshold", "features", "seq", "prev_sha", "row_sha")
 
 
+def csv_detector_counts(path) -> dict[str, int]:
+    """Rows per detector in an exported log. `{}` if there is no readable file.
+
+    Deliberately forgiving about a missing or unreadable file: the guard below
+    is there to catch a log that got SHORTER, and "there is nothing to compare
+    against" is the first export, not a shrink.
+    """
+    import csv
+    from collections import Counter
+    from pathlib import Path
+
+    path = Path(path)
+    if not path.exists():
+        return {}
+    try:
+        with path.open(newline="", encoding="utf-8") as fh:
+            return dict(Counter(r["detector"] for r in csv.DictReader(fh)
+                                if r.get("detector")))
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return {}
+
+
 def export_csv(conn, path) -> int:
     """Write the whole log to CSV. Returns rows written.
 
@@ -203,8 +252,20 @@ def export_csv(conn, path) -> int:
     internal consistency; git proves *when* each row appeared. Together they
     make "this alert was recorded before the outcome was known" checkable by
     someone who does not trust the author.
+
+    **The shrink guard is the head anchor the chain lacks.** `verify_chain`
+    links each row to its predecessor and nothing to the head, so a truncated
+    tail or a deleted detector verifies clean. This export runs last in every
+    cycle and is the only writer of the committed file, so it is the one place
+    that can compare "what we are about to write" against "what is already on
+    record". If any detector would lose rows, the export refuses and exits
+    loudly — the same treatment `catchup.main` gives a broken chain — rather
+    than overwriting a fuller record with a shorter one. The realistic way this
+    fires is a database restored from a partial backup, which is exactly the
+    failure the log's own hashes cannot see.
     """
     import csv
+    from collections import Counter
     from pathlib import Path
 
     path = Path(path)
@@ -212,6 +273,23 @@ def export_csv(conn, path) -> int:
     rows = conn.execute(
         f"SELECT {', '.join(CSV_COLUMNS)} FROM alerts "
         f"ORDER BY detector, seq").fetchall()
+
+    before = csv_detector_counts(path)
+    after = Counter(r["detector"] for r in rows)
+    shrunk = {name: (n, after.get(name, 0)) for name, n in before.items()
+              if after.get(name, 0) < n}
+    if shrunk:
+        detail = "; ".join(f"{name}: {was:,} on record, {now:,} to write"
+                           for name, (was, now) in sorted(shrunk.items()))
+        raise SystemExit(
+            f"refusing to export {path}: the log would LOSE rows ({detail}). "
+            f"The alert log is append-only, so a shorter export means the "
+            f"database is incomplete — a partial restore, a dropped detector, "
+            f"or a truncated tail. The hash chain cannot see any of those, "
+            f"which is why this check exists. Restore the full log with "
+            f"`import_csv` before exporting again; the committed file is the "
+            f"durable record and has not been touched.")
+
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh, lineterminator="\n")
         writer.writerow(CSV_COLUMNS)
@@ -278,6 +356,14 @@ def main() -> None:
             print(f"  {name:20s} {r['rows']:6,d} rows  {mark}")
             if not r["ok"]:
                 print(f"      {r['reason']}")
+        # Said here rather than left to the docstring: a reader who runs this
+        # to check the log deserves to know what a clean result does not cover.
+        print("\n  note: the chain links each row to its predecessor and\n"
+              "  nothing to the head, so it catches an edited row, a row\n"
+              "  removed from the middle and a row inserted out of order --\n"
+              "  but NOT a truncated tail or a whole detector deleted.\n"
+              "  Completeness is covered by the committed CSV's git history\n"
+              "  and by export_csv refusing to write a shorter log.")
 
     if args.tail:
         print(f"\nlast {args.tail}:")

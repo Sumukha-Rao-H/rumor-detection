@@ -178,3 +178,78 @@ def test_summary_counts_per_detector(conn):
     assert s["cusum"]["alerts"] == 4
     assert s["volume_zscore"]["alerts"] == 1
     assert s["cusum"]["first_utc"] == BASE
+
+
+# --------------------------------------------------------------------------
+# What the chain CANNOT see, and what covers it instead
+# --------------------------------------------------------------------------
+
+def test_a_truncated_tail_verifies_clean_because_nothing_anchors_the_head(conn):
+    """Documenting a real limit, not endorsing it.
+
+    Each row links to its predecessor and nothing links the head, so dropping
+    the NEWEST rows leaves what remains internally consistent. Measured against
+    the real 2,033-row log, deleting the last 105 rows verifies clean — as does
+    deleting an entire detector's chain, which simply stops being walked.
+
+    This is asserted so the limit is impossible to forget: three documents used
+    to claim the chain ruled out "a row quietly dropped", and it does not. The
+    guarantee that covers it is `export_csv`'s shrink refusal plus the
+    committed CSV's git history, tested below.
+    """
+    append(conn, [make(offset=i) for i in range(6)])
+    conn.execute("DELETE FROM alerts WHERE seq >= 4")
+    conn.commit()
+
+    report = verify_chain(conn)["cusum"]
+    assert report["ok"] is True, "the chain genuinely cannot see this"
+    assert report["rows"] == 4
+
+    append(conn, [make(detector="volume_zscore", offset=i) for i in range(3)])
+    conn.execute("DELETE FROM alerts WHERE detector = 'volume_zscore'")
+    conn.commit()
+    assert "volume_zscore" not in verify_chain(conn), \
+        "a deleted detector is not walked at all"
+
+
+def test_exporting_a_shorter_log_is_refused(conn, tmp_path):
+    """The head anchor the chain lacks.
+
+    The export runs last in every cycle and is the only writer of the committed
+    file, so it is the one place that can compare what is about to be written
+    against what is already on record. A database restored from a partial
+    backup — the realistic way rows go missing — must not quietly overwrite the
+    fuller record with a shorter one.
+    """
+    from src.live.alertlog import export_csv
+
+    path = tmp_path / "alerts.csv"
+    append(conn, [make(offset=i) for i in range(6)])
+    assert export_csv(conn, path) == 6
+
+    conn.execute("DELETE FROM alerts WHERE seq >= 4")
+    conn.commit()
+    with pytest.raises(SystemExit, match="would LOSE rows"):
+        export_csv(conn, path)
+
+    # ...and the file on record is untouched.
+    assert sum(1 for _ in path.open()) - 1 == 6
+
+
+def test_a_first_export_is_not_a_shrink(conn, tmp_path):
+    """"Nothing to compare against" is the first run, not data loss."""
+    from src.live.alertlog import export_csv
+
+    append(conn, [make(offset=i) for i in range(3)])
+    assert export_csv(conn, tmp_path / "fresh.csv") == 3
+
+
+def test_a_growing_log_exports_normally(conn, tmp_path):
+    """The guard must not fire on the ordinary case, which is every cycle."""
+    from src.live.alertlog import export_csv
+
+    path = tmp_path / "alerts.csv"
+    append(conn, [make(offset=i) for i in range(3)])
+    export_csv(conn, path)
+    append(conn, [make(offset=i) for i in range(3, 7)])
+    assert export_csv(conn, path) == 7
