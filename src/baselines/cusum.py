@@ -168,8 +168,26 @@ def tune_cusum(cfg: dict, frame: pd.DataFrame, conn=None,
         AlwaysQuiet(cfg).predict(frame, conn=conn, context="cusum tune floor"))
 
     best = None
+    evaluated = 0
     for k in drift_grid:
         for h in threshold_grid:
+            # h >= k, ALWAYS. Not a preference — with `reset_after_alarm` the
+            # boundary is also a cap on how much evidence the statistic may
+            # carry, so a boundary below the slack means S can never hold more
+            # than h and the recursion saw-tooths instead of accumulating. At
+            # the pair this sweep previously chose (k=1.5, h=1.0), six
+            # consecutive 2-sigma bars peaked at 1.0 while a single 4.5-sigma
+            # bar reached 3.0 — the exact inversion of the hypothesis this
+            # baseline exists to test, and it made CUSUM a shifted per-bar
+            # z-score wearing a change-detector's name.
+            #
+            # config.yaml stated this rule ("h is bounded below by k") beside a
+            # grid that violated it, and nothing enforced it. Skipping the
+            # pairs here rather than editing the grids keeps both grids
+            # readable and keeps the constraint true for every k.
+            if h < k:
+                continue
+            evaluated += 1
             model = CUSUM(cfg, drift=k, threshold=h)
             scored = model.predict(frame, threshold=float("inf"), conn=conn,
                                    context=f"cusum tune k={k} h={h}")
@@ -185,6 +203,12 @@ def tune_cusum(cfg: dict, frame: pd.DataFrame, conn=None,
             if best is None or key > best[0]:
                 best = (key, k, h, budget, lead)
 
+    if best is None:
+        raise SystemExit(
+            f"no (k, h) pair satisfies h >= k across drift_grid={drift_grid} "
+            f"and threshold_grid={threshold_grid}. A CUSUM whose boundary sits "
+            f"below its slack cannot accumulate, so there is nothing here "
+            f"worth tuning — widen threshold_grid upward.")
     _, k, h, budget, lead = best
     return CusumOperatingPoint(
         drift=float(k),
@@ -198,5 +222,8 @@ def tune_cusum(cfg: dict, frame: pd.DataFrame, conn=None,
         median_trading_hours=float(lead),
         n_windows=int(budget.n_windows),
         n_positive=int(budget.n_positive),
-        grid_size=len(drift_grid) * len(threshold_grid),
+        # The pairs actually EVALUATED, not the cartesian product:
+        # the h < k half is skipped, so reporting the product would
+        # overstate the search by roughly a third.
+        grid_size=evaluated,
     )

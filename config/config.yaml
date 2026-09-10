@@ -511,7 +511,23 @@ baselines:
     # precision 0.08616 vs a 0.00461 floor = 18.7x, recall 0.532, median lead
     # 23.6 trading hours. Both are interior maxima of their bracketed grids.
     drift: 1.5                     # k — the slack parameter
-    threshold: 1.0                 # h — decision boundary; with reset_after_alarm
+    # h — decision boundary. RAISED 1.0 -> 1.5 on 2026-09-10, and the change is
+    # a correctness fix rather than a tuning tweak: with `reset_after_alarm` the
+    # boundary also CAPS how much evidence S may carry, so at h < k the
+    # statistic saw-tooths and can never accumulate. At the old (k=1.5, h=1.0),
+    # six consecutive 2-sigma bars peaked at 1.0 while a single 4.5-sigma bar
+    # reached 3.0 — a single loud bar outranking sustained elevation, which is
+    # the inverse of what this baseline is here to test. The comment below
+    # already stated the rule ("h is bounded below by k") and the grid violated
+    # it; `tune_cusum` now enforces h >= k and re-picked this value.
+    #
+    # 1.5 is the MINIMAL LEGAL value (h == k), not a tuned optimum. A re-tune
+    # on validation did pick it, but under an evaluation frame that is itself
+    # under revision (see context/review-progress.md), so treating that as the
+    # tuned answer would be recording a number the frame is about to move.
+    # h == k is defensible independently of any frame; the optimum is not.
+    # RE-TUNE THIS once the frame is settled.
+    threshold: 1.5                 # with reset_after_alarm
                                    # on, this is part of the ESTIMATOR, not just
                                    # an alarm rule, because crossing it zeroes S
     reset_after_alarm: true

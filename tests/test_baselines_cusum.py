@@ -219,9 +219,65 @@ def test_tune_reports_the_floor_alongside(cfg, tuning_frame):
 
 
 def test_tune_uses_the_configured_grids_by_default(cfg, tuning_frame):
+    """The defaults come from config, not from grids hardcoded in the sweep.
+
+    `grid_size` counts the pairs actually EVALUATED, which is the legal half:
+    pairs with h < k are skipped because a boundary below the slack caps the
+    statistic and stops it accumulating. Reporting the cartesian product would
+    overstate the search by about a third.
+    """
     op = tune_cusum(cfg, tuning_frame)
     c = cfg["baselines"]["cusum"]
-    assert op.grid_size == len(c["drift_grid"]) * len(c["threshold_grid"])
+    legal = sum(1 for k in c["drift_grid"] for h in c["threshold_grid"] if h >= k)
+    assert op.grid_size == legal
+    assert legal < len(c["drift_grid"]) * len(c["threshold_grid"])
+
+
+def test_tune_never_returns_a_boundary_below_its_slack(cfg, tuning_frame):
+    """The property the whole baseline rests on.
+
+    With `reset_after_alarm`, h is not only the alarm rule — it caps how much
+    evidence S may carry. At h < k the recursion saw-tooths and a single loud
+    bar outranks sustained elevation, which is the inverse of the hypothesis
+    CUSUM is here to test. The sweep once chose exactly that (k=1.5, h=1.0).
+    """
+    op = tune_cusum(cfg, tuning_frame)
+    assert op.threshold >= op.drift
+
+
+def test_the_configured_boundary_is_not_below_its_own_slack(cfg):
+    """The defect that shipped: `drift: 1.5` with `threshold: 1.0`.
+
+    With `reset_after_alarm`, h is not only the alarm rule — the statistic
+    resets on crossing it, so h also CAPS how much evidence S can hold. Below
+    the slack, S can never exceed h at all and the recursion saw-tooths.
+
+    Stated honestly, because a stronger claim would be wrong: h >= k does NOT
+    make sustained elevation outrank every single spike. The reset caps a
+    sustained run at ~h while a lone bar of x >> k alarms immediately with the
+    uncapped value x - k, so a large enough spike always wins on peak score.
+    That is a property of reset-based CUSUM, not a bug, and it is worth knowing
+    when reading the scores. What h >= k buys is that the statistic can
+    accumulate across bars at all before it alarms — which at h < k it cannot.
+    """
+    c = cfg["baselines"]["cusum"]
+    assert c["threshold"] >= c["drift"], (
+        f"config ships drift={c['drift']}, threshold={c['threshold']}: a "
+        f"boundary below the slack caps S below one bar's own increment, so "
+        f"the statistic cannot accumulate and this stops being CUSUM")
+
+
+def test_a_boundary_below_the_slack_cannot_accumulate(cfg):
+    """Why the rule above exists, demonstrated rather than asserted."""
+    import numpy as np
+
+    reset = cfg["baselines"]["cusum"]["reset_after_alarm"]
+    bad = cusum_statistic(np.full(6, 2.0), k=1.5, h=1.0, reset_after_alarm=reset)
+    good = cusum_statistic(np.full(6, 2.0), k=1.5, h=3.0, reset_after_alarm=reset)
+    assert bad.max() <= 1.0, "S is capped below what one bar contributes"
+    assert good.max() > bad.max(), (
+        "a legal boundary lets six consecutive 2-sigma bars build past what an "
+        "illegal one allows")
 
 
 def test_tune_never_touches_the_sealed_test_split(cfg, conn):
