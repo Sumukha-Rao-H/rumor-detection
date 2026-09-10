@@ -486,44 +486,69 @@ def _feature_table(row: pd.Series, price: pd.DataFrame) -> None:
 # --------------------------------------------------------------------------
 # P9-04 — evaluation
 # --------------------------------------------------------------------------
-#: The Phase 10 artifacts, newest first. The corrected file is preferred and
-#: the original is the fallback, never the other way round: it fixes three
-#: defects derivable from the run's own stored counts — a `max_precision`
-#: ceiling ten rows beat, `degenerate = False` on all 42 `always_quiet` rows,
-#: and 36 rows for item codes that `config.items.exclude` drops. Showing the
-#: superseded file made the screen contradict itself, captioning "a detector
-#: that cannot detect shows as `degenerate`" above a table of `False`.
+#: The Phase 10 artifacts, newest FIRST — and "newest" means the 2026-09-10
+#: re-run, not either 2026-09-08 file.
+#:
+#: The two older files are VOID, not merely superseded. They were produced by
+#: an evaluation frame that gave a positive episode 48 bars and a quiet window
+#: one, scoring a window by its maximum — so a positive had 48 chances to cross
+#: the threshold against a quiet bar's one, at the same one-alert cost. On that
+#: frame a pure random-noise scorer reached 29.6x lift, beating every tuned
+#: detector in the table. Those numbers rank on window length, not detection,
+#: and the arithmetic corrections applied to one of them fix three real defects
+#: without touching that one. Preferring either over the re-run would put a
+#: number on screen that the project's own correction note disowns.
 _PHASE10 = (
+    ("phase10/FINAL-test-evaluation-r2.csv",
+     "**Phase 10 final evaluation on the sealed test set**, re-run once on "
+     "2026-09-10 after the evaluation frame was corrected. The seal was opened "
+     "with its reason recorded first and closed again afterwards; the decision "
+     "is in the project's decision log. These are the results."),
     ("phase10/FINAL-test-evaluation-corrected.csv",
-     "**Phase 10 final evaluation on the sealed test set**, run once on "
-     "2026-09-08, with the arithmetic corrections of 2026-09-09 applied "
-     "(`FINAL-test-evaluation-corrected.csv` — see `CORRECTION-NOTE.md` beside "
-     "it). No model was re-scored and the sealed test set was not touched "
-     "again."),
+     "⚠ **VOID — shown only because the 2026-09-10 re-run is missing.** This is "
+     "the 2026-09-08 run with arithmetic corrections applied. Its frame ranked "
+     "on window length rather than detection: pure random noise scored 29.6x on "
+     "it. Do not quote these numbers. See `CORRECTION-NOTE.md` beside the file."),
     ("phase10/FINAL-test-evaluation.csv",
-     "**Phase 10 final evaluation on the sealed test set**, run once on "
-     "2026-09-08 — the ORIGINAL file. The corrected artifact is not present, "
-     "so three known defects stand in the numbers below: the `max_precision` "
-     "ceiling is measured on the allowance rather than the alerts issued, "
-     "`always_quiet` reads `degenerate = False` when it emits one constant "
-     "score, and excluded item codes 9.01 and 5.07 still have rows."),
+     "⚠ **VOID — the original 2026-09-08 file, uncorrected.** Its frame ranked "
+     "on window length (pure noise scored 29.6x), AND three arithmetic defects "
+     "stand: a `max_precision` ceiling ten rows beat, `degenerate = False` on "
+     "all 42 `always_quiet` rows, and rows for item codes `items.exclude` "
+     "drops. Do not quote these numbers."),
 )
 
 #: Kept as a standing caption rather than a footnote, because it disqualifies a
 #: column that is on screen. Quoted from `CORRECTION-NOTE.md`.
+#: Shown ONLY when a void artifact is on screen. It disqualifies the `lift`
+#: column, so applying it to the 2026-09-10 re-run — whose frame is the fixed
+#: one — would disown a number that is actually sound. Keyed off which file was
+#: loaded rather than printed unconditionally.
 _LIFT_CAVEAT = (
-    "**The `lift vs floor` column predates the evaluation-frame fix and is "
-    "pending recomputation.** Both Phase 10 files were produced under a frame "
-    "that rewarded window length rather than detection: a positive episode got "
-    "48 bars and a quiet window got one, while a window scores as the maximum "
-    "over its rows. Measured on that exact shape, **a scorer made of pure "
-    "random noise reaches precision 0.0943 and 29.6× lift, beating every "
-    "detector in the table**; with both classes the same length the same noise "
-    "scores 1.0×. The metric is fixed in commit `61083d4`, which also adds a "
-    "permanent `random_noise` row so the null is visible in every future table, "
-    "but no phase has been re-run. The figures are kept and labelled rather "
-    "than deleted — precision, recall and the counts are unaffected."
+    "**The `lift vs floor` column in THIS file is not trustworthy.** It was "
+    "produced under an evaluation frame that rewarded window length rather "
+    "than detection: a positive episode got 48 bars and a quiet window got "
+    "one, while a window scores as the maximum over its rows. Measured on that "
+    "exact shape, **a scorer made of pure random noise reaches 29.6× lift, "
+    "beating every detector in the table**; with both classes the same length "
+    "the same noise scores 1.0×. Fixed in `9ada635`, and the sealed set was "
+    "re-run on 2026-09-10 — load `FINAL-test-evaluation-r2.csv` instead. The "
+    "figures here are kept and labelled rather than deleted."
 )
+
+#: The re-run carries a permanent `random_noise` row, so a reader can check the
+#: null instead of being asked to trust it. Said on screen, because "the metric
+#: is fixed" is a claim and the row is the evidence.
+_NULL_NOTE = (
+    "**Every row here can be checked against a `random_noise` baseline**, "
+    "drawn at several seeds and run through the identical evaluation path. A "
+    "scorer that knows nothing must land on the always-quiet floor; if it ever "
+    "reads meaningfully above it, the evaluation frame has developed an "
+    "asymmetry and no other row means anything until that is explained. This "
+    "row exists because an earlier frame gave a 29.6× lift to pure noise and "
+    "nothing in the table could reveal it."
+)
+
+
 
 
 def evaluation() -> None:
@@ -554,7 +579,11 @@ def evaluation() -> None:
         "results announcements — have dates published weeks ahead, so a run-up "
         "before one is far less interesting. Unscheduled events are the real "
         "target, and pooling would let the easy half carry the number.")
-    st.warning(_LIFT_CAVEAT)
+    # Only the void files carry the caveat; the re-run's lift is sound.
+    if "-r2" in source or "re-run" in source:
+        ui.note(_NULL_NOTE)
+    else:
+        st.warning(_LIFT_CAVEAT)
 
     if source:
         st.caption(f"Source: {source}")

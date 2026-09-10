@@ -318,3 +318,27 @@ def test_the_outcome_window_is_called_wall_clock_not_trading_hours():
     body = _text(_run("Live monitor log")).lower()
     assert "48 trading hours" not in body
     assert "wall-clock" in body or "wall clock" in body
+
+
+def test_the_evaluation_screen_prefers_the_re_run_over_the_void_files():
+    """Three Phase 10 files sit side by side and two of them are VOID.
+
+    The 2026-09-08 pair — original and arithmetically corrected — were produced
+    by a frame that ranked on window length: pure random noise scored 29.6x on
+    it, beating every detector. Preferring either over the 2026-09-10 re-run
+    would put numbers on screen that the project's own correction note disowns.
+    """
+    from app.screens import _PHASE10
+
+    assert _PHASE10[0][0].endswith("FINAL-test-evaluation-r2.csv")
+    for path, caption in _PHASE10[1:]:
+        assert "VOID" in caption, f"{path} must be labelled void"
+
+
+def test_the_lift_caveat_is_not_applied_to_the_corrected_re_run():
+    """The caveat disqualifies the lift column. Printing it unconditionally
+    would disown the one set of numbers that is actually sound."""
+    body = _text(_run("Evaluation"))
+    if "re-run once on 2026-09-10" in body:
+        assert "not trustworthy" not in body
+        assert "random_noise" in body, "the null must be named on screen"
