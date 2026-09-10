@@ -217,6 +217,89 @@ def audit(cfg: dict, conn) -> list[Verdict]:
     return verdicts
 
 
+def thin_sessions(cfg: dict, conn, min_share: float = 0.5) -> list[dict]:
+    """Sessions the whole universe is SHORT of bars on — a snapshot defect.
+
+    The per-event audit above scores a session date as present or absent, never
+    as partial: a session holding 1 of its 7 hourly bars counts exactly like
+    one holding 7. That is deliberate — a raw bar ratio would score a perfect
+    event at 7/6.5 and the threshold would have to absorb the artefact — but it
+    leaves the audit blind to a session that exists and is hollow.
+
+    The frozen snapshot has exactly that. 2026-01-30 holds 14:30 for every
+    ticker and 15:30 for a third of them, then nothing; 2026-02-02 starts at
+    18:30. About nine trading hours are missing across the two, for the ENTIRE
+    universe, and `audit()` reports zero failures on both days because both
+    dates are present.
+
+    This is reported, NOT enforced, and the distinction matters. Turning it
+    into a per-event rule would change which events are usable, and therefore
+    every number the project reports — the labels, the feature matrix, the
+    baselines and the sealed-set result were all produced under the
+    session-membership rule. So this surfaces the defect for the report and for
+    anyone auditing the snapshot, and leaves the verdicts alone.
+
+    A market-wide hole is a data problem, not a per-ticker one: `min_share` is
+    the fraction of the universe that must be short before a session is called
+    thin, so one delisted ticker cannot raise it.
+    """
+    import pandas as pd
+
+    from src.utils.timeutils import get_market_calendar
+
+    interval = cfg["market"]["interval"]
+    lo = date_str_to_ts(cfg["study_window"]["start"])
+    hi = date_str_to_ts(cfg["study_window"]["end"])
+    cal = get_market_calendar(cfg["market"]["calendar"])
+
+    rows = conn.execute(
+        "SELECT ts_utc, COUNT(DISTINCT ticker) n FROM bars "
+        "WHERE interval = ? AND ts_utc BETWEEN ? AND ? AND ticker IN "
+        "(SELECT ticker FROM companies WHERE in_universe = 1) "
+        "GROUP BY ts_utc", (interval, lo, hi)).fetchall()
+    if not rows:
+        return []
+
+    universe = conn.execute(
+        "SELECT COUNT(*) FROM companies WHERE in_universe = 1").fetchone()[0]
+
+    by_date: dict = defaultdict(dict)
+    for r in rows:
+        stamp = pd.Timestamp(r["ts_utc"], unit="s", tz="UTC")
+        by_date[stamp.date()][stamp.time()] = r["n"]
+
+    out = []
+    for day, counts in sorted(by_date.items()):
+        stamp = pd.Timestamp(day)
+        if not cal.is_session(stamp):
+            continue                     # a bar dated off-session; not ours
+        # The calendar's own open/close, so an early close expects fewer bars
+        # automatically and is never reported as thin. NOT wrapped in a bare
+        # `except Exception` — the first draft of this function was, it called
+        # a method that does not exist, and the AttributeError was swallowed
+        # into "no thin sessions found" on a snapshot that has two. A helper
+        # that reports a defect must not be able to fail silently.
+        open_, close = cal.session_open(stamp), cal.session_close(stamp)
+        # Bars are stamped at the START of the hour they cover, so only the
+        # WHOLE hours between open and close are guaranteed. A 6.5-hour session
+        # owes 6 (14:30..19:30); the 20:30 bar covering the final half hour is
+        # real but optional, and on a 3.5-hour early close the same is true of
+        # its last slot. Requiring it would flag every half-day in the calendar
+        # — a guard that cries wolf on normal days is how a real defect later
+        # gets ignored.
+        whole_hours = int((close - open_).total_seconds() // 3600)
+        required = {(open_ + pd.Timedelta(hours=i)).time()
+                    for i in range(whole_hours)}
+        present = {t for t, n in counts.items() if n >= min_share * universe}
+        missing = required - present
+        if missing:
+            out.append({"date": str(day), "expected_hours": whole_hours,
+                        "hours_universe_wide": len(required & present),
+                        "missing": len(missing),
+                        "missing_hours": sorted(str(t)[:5] for t in missing)})
+    return out
+
+
 def print_report(cfg: dict, verdicts: list[Verdict], list_failures: bool = False,
                  max_listed: int = 25) -> None:
     """The acceptance check: the failure list, empty or explained."""
@@ -231,6 +314,10 @@ def print_report(cfg: dict, verdicts: list[Verdict], list_failures: bool = False
           f"+{cfg['market']['pad_days_after']}d, widened by "
           f"{cfg['news']['t0_lookback_hours']}h for t0; "
           f"min session coverage {cfg['market']['min_session_coverage']:.0%}")
+    if not verdicts:
+        print("no events audited — nothing to report")
+        return
+
     print(f"\nevents audited : {len(verdicts):,}")
     print(f"  ok           : {counts['ok']:,}  ({counts['ok']/len(verdicts):.1%})")
     for outcome in ("starts_late", "ends_early", "gaps", "no_bars", "no_sessions"):
@@ -270,6 +357,22 @@ def main() -> None:
     cfg = load_config()
     conn = db.get_conn(cfg["paths"]["db"])
     print_report(cfg, audit(cfg, conn), list_failures=args.failures)
+
+    # Reported after the per-event verdicts, and separately, because it is a
+    # SNAPSHOT defect rather than an event one: the audit above scores a
+    # session present or absent and cannot see one that exists and is hollow.
+    thin = thin_sessions(cfg, conn)
+    if thin:
+        print(f"\n⚠ {len(thin)} session(s) the whole universe is short of bars "
+              f"on — a defect in the frozen snapshot, NOT an event failure:")
+        for t in thin:
+            print(f"    {t['date']}: {t['missing']} of {t['expected_hours']} "
+                  f"whole hours missing universe-wide "
+                  f"({', '.join(t['missing_hours'])})")
+        print("  Every event whose span covers these dates passed the audit "
+              "above, because both dates are present in the data.\n"
+              "  Not enforced per event: making it a rule would change which "
+              "events are usable, and every number downstream of that.")
 
 
 if __name__ == "__main__":

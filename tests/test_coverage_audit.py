@@ -402,3 +402,65 @@ def test_print_report_runs_with_no_failures(cfg, capsys):
     assert "ok           : 2  (100.0%)" in out
     assert "Worst offenders" not in out
     assert "All 0 failing events:" in out
+
+
+# --------------------------------------------------------------------------
+# A session can exist and still be hollow
+# --------------------------------------------------------------------------
+
+def test_a_session_present_but_missing_most_of_its_hours_is_reported():
+    """The audit scores a session present or absent, never partial — so a day
+    holding 1 of its 7 hourly bars counts exactly like one holding 7.
+
+    That is deliberate (a raw bar ratio would score a perfect event above 1.0),
+    but it left the frozen snapshot's real defect invisible: 2026-01-30 holds
+    14:30 for every ticker and then almost nothing, and 2026-02-02 does not
+    start until 18:30. Roughly nine trading hours are missing across the two,
+    for the ENTIRE universe, and `audit()` reports zero failures on both.
+    """
+    from src.pipeline.coverage import thin_sessions
+
+    cfg = load_config()
+    conn = db.get_conn(":memory:")
+    db.upsert_companies(conn, [{"cik": f"C{i}", "ticker": f"T{i}",
+                                "in_universe": 1} for i in range(10)])
+    start = date_str_to_ts("2026-01-29")          # a full XNYS session
+    full = [(f"T{i}", start + 14 * 3600 + 1800 + h * 3600,
+             1.0, 1.0, 1.0, 1.0, 100, "60m")
+            for i in range(10) for h in range(7)]
+    # ...and the next session with only its first hour
+    nxt = date_str_to_ts("2026-01-30")
+    hollow = [(f"T{i}", nxt + 14 * 3600 + 1800, 1.0, 1.0, 1.0, 1.0, 100, "60m")
+              for i in range(10)]
+    db.upsert_bars(conn, full + hollow)
+
+    thin = {t["date"] for t in thin_sessions(cfg, conn)}
+    assert "2026-01-30" in thin, "a session with 1 of 7 hours must be reported"
+    assert "2026-01-29" not in thin, "a complete session must not be"
+
+
+def test_an_early_close_is_not_reported_as_thin():
+    """A guard that cries wolf on every half-day is how a real defect later
+    gets ignored. The final bar of a session covers a partial hour and is
+    optional, so a 3.5-hour early close owes 3 whole hours, not 4."""
+    from src.pipeline.coverage import thin_sessions
+
+    cfg = load_config()
+    conn = db.get_conn(":memory:")
+    db.upsert_companies(conn, [{"cik": f"C{i}", "ticker": f"T{i}",
+                                "in_universe": 1} for i in range(10)])
+    half = date_str_to_ts("2025-11-28")           # Thanksgiving Friday, 13:00 ET
+    bars = [(f"T{i}", half + 14 * 3600 + 1800 + h * 3600,
+             1.0, 1.0, 1.0, 1.0, 100, "60m")
+            for i in range(10) for h in range(3)]
+    db.upsert_bars(conn, bars)
+
+    assert "2025-11-28" not in {t["date"] for t in thin_sessions(cfg, conn)}
+
+
+def test_print_report_survives_an_empty_verdict_list():
+    """`counts['ok']/len(verdicts)` divided by zero after printing a partial
+    header — reachable from any direct call."""
+    from src.pipeline.coverage import print_report
+
+    print_report(load_config(), [])       # must not raise
