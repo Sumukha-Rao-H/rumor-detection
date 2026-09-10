@@ -551,3 +551,43 @@ def test_a_candidate_must_carry_its_filing_evidence(cfg):
     """
     with pytest.raises(TypeError):
         Candidate("ZZZ", 0, 0, 50.0, 1e8, 300)
+
+
+# --------------------------------------------------------------------------
+# The stored universe can drift away from the config that describes it
+# --------------------------------------------------------------------------
+
+def test_drift_is_reported_when_the_config_no_longer_selects_the_stored_set(cfg,
+                                                                           conn):
+    """`companies.in_universe` is written once and read by every later stage.
+    Nothing re-derives it, so a config change after the write leaves code and
+    data disagreeing in silence — which is what happened when
+    `prior_8k_lookback_days` was added and the filter was never re-run."""
+    from src.pipeline.universe import check_drift
+
+    liquid(cfg, conn, "AAA")
+    liquid(cfg, conn, "BBB")
+    apply_filter(cfg, conn)
+    assert check_drift(cfg, conn)["drift"] == 0
+
+    # A company qualifies now that did not when the flags were written.
+    liquid(cfg, conn, "CCC")
+    d = check_drift(cfg, conn)
+    assert d["drift"] > 0
+    assert "CCC" in d["computed_only"]
+
+
+def test_drift_check_writes_nothing(cfg, conn):
+    """It is the mode you run to find out where you stand, so it must not
+    quietly move you somewhere else."""
+    from src.pipeline.universe import check_drift
+
+    liquid(cfg, conn, "AAA")
+    apply_filter(cfg, conn)
+    before = {r[0] for r in conn.execute(
+        "SELECT ticker FROM companies WHERE in_universe = 1")}
+    liquid(cfg, conn, "CCC")
+    check_drift(cfg, conn)
+    after = {r[0] for r in conn.execute(
+        "SELECT ticker FROM companies WHERE in_universe = 1")}
+    assert before == after

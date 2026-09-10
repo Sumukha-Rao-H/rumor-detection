@@ -56,7 +56,15 @@ universe:
   company_tickers_url: "https://www.sec.gov/files/company_tickers_exchange.json"
   exchanges: [Nasdaq, NYSE]
   min_price_usd: 5.0
-  min_adv_usd: 5000000             # average daily traded value
+  # average daily traded value. NOTE, and say this in any write-up: 5000000 is
+  # NOT the operative cut. 2,114 companies clear every threshold in this block,
+  # and `max_tickers` then keeps the top 1,500 by ADV — so the line that
+  # actually decides membership is **$20.7M** (XMTR, measured 2026-09-10), four
+  # times the stated floor. That is the documented design (the cap is a budget,
+  # not a fifth threshold) but a reader who quotes $5M from this file would be
+  # describing a universe the project does not study. `print_report` prints the
+  # realised line every run.
+  min_adv_usd: 5000000
   min_history_days: 365
   max_tickers: 1500
   # ADV is a mean, so it needs a denominator worth trusting: a name that traded
@@ -90,6 +98,20 @@ universe:
   # PPLT, OUNZ, GLDM, IAUM, DBC and one issuer that has filed nothing since
   # 2023), which between them filed 12 in-window 8-Ks — all trust
   # administration — and admits 14 operating companies that filed 129.
+  #
+  # COST RE-MEASURED 2026-09-10. This comment used to say the rule "costs 4
+  # domestic companies that first filed mid-window". The real figure is 7, and
+  # they filed 66 in-window 8-Ks between them: PSKY 24, XXI 13, LLYVA 10, SN 6,
+  # DOLE 5, JHX 5, NVRI 3. (27 companies are excluded by this rule alone, but
+  # 20 of those are commodity/currency trusts and closed-end funds — GLD, SLV,
+  # IAU, FXE and the like — which is exactly the population the rule exists to
+  # remove, and their 28 filings are trust administration.)
+  #
+  # Worth stating alongside the delisting limitation rather than on its own:
+  # all 7 have their FIRST EDGAR filing ever inside the window, so they are
+  # entities born of a merger, a tracking-stock split or a re-domiciliation.
+  # That is the same M&A-born population the live company register already
+  # drops from the other end. Two mechanisms, one bias, same direction.
   prior_8k_lookback_days: 365
   # The liquidity filter is applied using data as of study_window.start, never
   # today's — a universe built from today silently drops every company that was

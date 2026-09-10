@@ -243,6 +243,60 @@ def write_flags(conn, survivors: list[Candidate], cutoff: int) -> int:
     return written
 
 
+def check_drift(cfg: dict, conn) -> dict:
+    """Does the STORED universe still match what this config computes?
+
+    `companies.in_universe` is written once and then read by every later stage.
+    Nothing re-derives it, so a config change after the write leaves the code
+    and the data disagreeing silently — which is exactly what happened:
+    `prior_8k_lookback_days` was added on 2026-09-02 and the filter was never
+    re-run, so the flags in the database predate the knob and the comment
+    beside it describes an effect that is not in force.
+
+    Reported, never repaired. Re-running the filter today would swap 14 flagged
+    members for 14 that have **zero** hourly bars — the hourly snapshot was
+    collected for the universe as it stood, and `market.snapshot_frozen` means
+    the missing history cannot be fetched without `--force` restating the
+    frozen prices. So the honest state is "config and data differ, here is the
+    difference", not a silent re-write in either direction.
+
+    Returns `{"drift": n, "flagged_only": [...], "computed_only": [...]}`.
+    """
+    survivors, _ = select_universe(cfg, conn)
+    computed = {c.ticker for c in survivors}
+    flagged = {r[0] for r in conn.execute(
+        "SELECT ticker FROM companies WHERE in_universe = 1")}
+    return {"drift": len(computed ^ flagged),
+            "flagged_only": sorted(flagged - computed),
+            "computed_only": sorted(computed - flagged),
+            "n_computed": len(computed), "n_flagged": len(flagged)}
+
+
+def print_drift(cfg: dict, conn) -> None:
+    """The drift guard's report. Says which way the difference runs and why it
+    is not simply corrected."""
+    d = check_drift(cfg, conn)
+    print("\n=== Universe drift: stored flags vs this config ===")
+    print(f"computed {d['n_computed']:,}  flagged {d['n_flagged']:,}  "
+          f"differing tickers {d['drift']}")
+    if not d["drift"]:
+        print("  in agreement — the stored universe is what this config selects")
+        return
+    print(f"  flagged in the DB, NOT selected now ({len(d['flagged_only'])}): "
+          f"{', '.join(d['flagged_only'])}")
+    print(f"  selected now, NOT flagged ({len(d['computed_only'])}): "
+          f"{', '.join(d['computed_only'])}")
+    missing = [t for t in d["computed_only"] if not conn.execute(
+        "SELECT 1 FROM bars WHERE ticker = ? AND interval = ? LIMIT 1",
+        (t, cfg["market"]["interval"])).fetchone()]
+    if missing:
+        print(f"\n  ⚠ {len(missing)} of the newly-selected have NO "
+              f"{cfg['market']['interval']} bars at all: {', '.join(missing)}")
+        print("  Re-running the filter would seat them in capped slots they "
+              "cannot fill, and the frozen snapshot cannot be extended to "
+              "cover them without --force restating it. Reported, not fixed.")
+
+
 def apply_filter(cfg: dict, conn) -> list[Candidate]:
     """Select the universe and write the flags. Returns the survivors."""
     survivors, reasons = select_universe(cfg, conn)
@@ -289,6 +343,9 @@ def print_report(cfg: dict, conn, max_listed: int = 15) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true",
+                        help="report whether the stored universe still matches "
+                             "this config, and write nothing")
     parser.add_argument("--report", action="store_true",
                         help="explain the cut and exit, writing nothing")
     args = parser.parse_args()
@@ -297,8 +354,15 @@ def main() -> None:
                         format="%(asctime)s [%(levelname)s] %(message)s")
     cfg = load_config()
     conn = db.get_conn(cfg["paths"]["db"])
+    if args.check:
+        # Read-only, and deliberately BEFORE the write paths: this is the mode
+        # you run to find out whether the stored universe is still the one this
+        # config selects, without changing either.
+        print_drift(cfg, conn)
+        return
     if args.report:
         print_report(cfg, conn)
+        print_drift(cfg, conn)
         return
     apply_filter(cfg, conn)
     print_report(cfg, conn)
